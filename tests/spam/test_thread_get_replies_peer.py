@@ -14,18 +14,20 @@ from app.types import PeerResolutionContext
 
 def _make_context(**overrides):
     """Create a PeerResolutionContext with sensible defaults for discussion thread tests."""
-    defaults = dict(
-        chat_id=-1001660382870,
-        user_id=1,
-        message_id=100,
-        chat_username="discussgroup",
-        message_thread_id=14979,
-        reply_to_message_id=None,
-        main_channel_id=-100111,
-        main_channel_username="publicchannel",
-        original_channel_post_id=4021,
+    defaults = (
+        dict(
+            chat_id=-1001660382870,
+            user_id=1,
+            message_id=100,
+            chat_username="discussgroup",
+            message_thread_id=14979,
+            reply_to_message_id=None,
+            main_channel_id=-100111,
+            main_channel_username="publicchannel",
+            original_channel_post_id=4021,
+        )
+        | overrides
     )
-    defaults.update(overrides)
     return PeerResolutionContext(**defaults)
 
 
@@ -108,9 +110,7 @@ async def test_msg_id_invalid_resolves_grouped_album_anchor():
             if params.get("msg_id") == 4021:
                 raise msg_id_invalid_error
             return anchor_replies
-        if method == "messages.getHistory":
-            return channel_history
-        return {"messages": []}
+        return channel_history if method == "messages.getHistory" else {"messages": []}
 
     with patch("app.spam.user_context_utils.get_mtproto_client") as m:
         m.return_value.call = mock_call
@@ -154,10 +154,7 @@ async def test_msg_id_invalid_no_grouped_album_falls_back_to_discussion_group():
             params = kwargs.get("params", {})
             peer = params.get("peer")
             # Channel history for anchor resolution
-            if peer == "publicchannel":
-                return channel_history
-            # Discussion group fallback
-            return discussion_history
+            return channel_history if peer == "publicchannel" else discussion_history
         return {"messages": []}
 
     with patch("app.spam.user_context_utils.get_mtproto_client") as m:

@@ -582,13 +582,14 @@ async def _resolve_grouped_album_anchor(
         if not messages:
             return None
 
-        # Find the target message's grouped_id
-        target_grouped_id = None
-        for msg in messages:
-            if msg.get("id") == msg_id:
-                target_grouped_id = msg.get("grouped_id")
-                break
-
+        target_grouped_id = next(
+            (
+                msg.get("grouped_id")
+                for msg in messages
+                if msg.get("id") == msg_id
+            ),
+            None,
+        )
         if not target_grouped_id:
             return None
 
