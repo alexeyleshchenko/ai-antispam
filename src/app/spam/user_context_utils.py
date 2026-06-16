@@ -58,6 +58,14 @@ def _is_message_not_found_error(error_msg: str) -> bool:
     return ERROR_MESSAGE_NOT_FOUND in error_msg or ERROR_MESSAGE_DELETED in error_msg
 
 
+def _is_msg_id_invalid_error(error_msg: str) -> bool:
+    """Check if error indicates an invalid message ID (e.g. no discussion thread).
+
+    Checks for error pattern: 'msg_id_invalid'.
+    """
+    return ERROR_MSG_ID_INVALID in error_msg
+
+
 def _should_skip_join_for_error(error_msg: str) -> bool:
     """Determine if join should be skipped based on error type (Option 2B).
 
@@ -153,6 +161,7 @@ ERROR_MESSAGE_NOT_FOUND = "message not found"
 ERROR_MESSAGE_DELETED = "message deleted"
 ERROR_CHANNEL_INVALID = "channel invalid"
 ERROR_CHAT_ID_INVALID = "chat id invalid"
+ERROR_MSG_ID_INVALID = "msg_id_invalid"
 ERROR_PEER_ID_INVALID = "peer id invalid"
 
 # Context source types
@@ -468,11 +477,69 @@ async def establish_context_via_thread_reading(
         return True
 
     except MtprotoHttpError as e:
+        error_msg = str(e).lower()
+
+        # MSG_ID_INVALID: channel post has no discussion thread (replies=null).
+        # Fall back to reading the discussion group directly to establish peer context.
+        if use_main_channel_peer and _is_msg_id_invalid_error(error_msg):
+            logger.debug(
+                "GetReplies returned MSG_ID_INVALID (no discussion thread on channel post), "
+                "falling back to discussion group reading",
+                extra=logging_context,
+            )
+            return await _fallback_discussion_group_reading(context, logging_context)
+
         _log_mtproto_error(e, "thread-based context establishment", logging_context)
         return False
 
     except Exception as e:
         _log_unexpected_error(e, "thread-based context establishment", logging_context)
+        return False
+
+
+async def _fallback_discussion_group_reading(
+    context: PeerResolutionContext,
+    logging_context: Dict[str, Any],
+) -> bool:
+    """Fall back to reading the discussion group when GetReplies fails with MSG_ID_INVALID.
+
+    When the channel post has no discussion thread (replies=null), messages.getReplies
+    returns MSG_ID_INVALID. This fallback reads the discussion group directly via
+    messages.getHistory to still establish peer resolution context.
+    """
+    client = get_mtproto_client()
+    group_identifier = get_mtproto_chat_identifier(
+        context.chat_id, context.chat_username
+    )
+
+    try:
+        result = await client.call(
+            "messages.getHistory",
+            params={
+                "peer": group_identifier,
+                "offset_id": context.message_id + HISTORY_OFFSET_INCREMENT,
+                "offset_date": DEFAULT_OFFSET,
+                "add_offset": DEFAULT_OFFSET,
+                "limit": THREAD_MESSAGE_LIMIT,
+                "max_id": DEFAULT_OFFSET,
+                "min_id": DEFAULT_OFFSET,
+                "hash": DEFAULT_HASH,
+            },
+            resolve=True,
+        )
+
+        messages_found = len(result.get("messages", []))
+        logger.debug(
+            "Discussion group fallback reading succeeded",
+            extra={**logging_context, "messages_found": messages_found},
+        )
+        return True
+
+    except Exception as e:
+        logger.debug(
+            "Discussion group fallback reading also failed",
+            extra={**logging_context, "error": str(e)},
+        )
         return False
 
 
