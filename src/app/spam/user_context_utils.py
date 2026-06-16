@@ -58,6 +58,14 @@ def _is_message_not_found_error(error_msg: str) -> bool:
     return ERROR_MESSAGE_NOT_FOUND in error_msg or ERROR_MESSAGE_DELETED in error_msg
 
 
+def _is_msg_id_invalid_error(error_msg: str) -> bool:
+    """Check if error indicates an invalid message ID (e.g. no discussion thread).
+
+    Checks for error pattern: 'msg_id_invalid'.
+    """
+    return ERROR_MSG_ID_INVALID in error_msg
+
+
 def _should_skip_join_for_error(error_msg: str) -> bool:
     """Determine if join should be skipped based on error type (Option 2B).
 
@@ -140,9 +148,41 @@ def _log_unexpected_error(
 # Constants for MTProto API calls
 DEFAULT_MESSAGE_LIMIT = 1
 THREAD_MESSAGE_LIMIT = 10
+# Telegram limits grouped albums to 10 items; 20 is generous for finding the anchor
+GROUPED_ALBUM_SEARCH_LIMIT = 20
 HISTORY_OFFSET_INCREMENT = 1
 DEFAULT_OFFSET = 0
 DEFAULT_HASH = 0
+
+
+def _build_get_replies_params(peer: Any, msg_id: int, limit: int = THREAD_MESSAGE_LIMIT) -> dict:
+    """Build standard MTProto params for messages.getReplies."""
+    return {
+        "peer": peer,
+        "msg_id": msg_id,
+        "offset_id": DEFAULT_OFFSET,
+        "offset_date": DEFAULT_OFFSET,
+        "add_offset": DEFAULT_OFFSET,
+        "limit": limit,
+        "max_id": DEFAULT_OFFSET,
+        "min_id": DEFAULT_OFFSET,
+        "hash": DEFAULT_HASH,
+    }
+
+
+def _build_history_params(peer: Any, offset_id: int, limit: int = DEFAULT_MESSAGE_LIMIT) -> dict:
+    """Build standard MTProto params for messages.getHistory."""
+    return {
+        "peer": peer,
+        "offset_id": offset_id,
+        "offset_date": DEFAULT_OFFSET,
+        "add_offset": DEFAULT_OFFSET,
+        "limit": limit,
+        "max_id": DEFAULT_OFFSET,
+        "min_id": DEFAULT_OFFSET,
+        "hash": DEFAULT_HASH,
+    }
+
 
 # Error message patterns for MTProto errors
 ERROR_USER_ALREADY_PARTICIPANT = "user already participant"
@@ -153,6 +193,7 @@ ERROR_MESSAGE_NOT_FOUND = "message not found"
 ERROR_MESSAGE_DELETED = "message deleted"
 ERROR_CHANNEL_INVALID = "channel invalid"
 ERROR_CHAT_ID_INVALID = "chat id invalid"
+ERROR_MSG_ID_INVALID = "msg_id_invalid"
 ERROR_PEER_ID_INVALID = "peer id invalid"
 
 # Context source types
@@ -445,17 +486,7 @@ async def establish_context_via_thread_reading(
         # This includes messages from various users, helping with peer resolution
         thread_result = await client.call(
             "messages.getReplies",
-            params={
-                "peer": chat_identifier,
-                "msg_id": target_message_id,
-                "offset_id": DEFAULT_OFFSET,
-                "offset_date": DEFAULT_OFFSET,
-                "add_offset": DEFAULT_OFFSET,
-                "limit": THREAD_MESSAGE_LIMIT,  # Read up to 10 recent messages in the thread
-                "max_id": DEFAULT_OFFSET,
-                "min_id": DEFAULT_OFFSET,
-                "hash": DEFAULT_HASH,
-            },
+            params=_build_get_replies_params(chat_identifier, target_message_id),
             resolve=True,
         )
 
@@ -468,11 +499,167 @@ async def establish_context_via_thread_reading(
         return True
 
     except MtprotoHttpError as e:
+        error_msg = str(e).lower()
+
+        # MSG_ID_INVALID: channel post has no discussion thread (replies=null).
+        # This often happens with grouped media albums where only the first message
+        # in the group has the comments thread. Try to resolve the anchor first.
+        if use_main_channel_peer and _is_msg_id_invalid_error(error_msg):
+            anchor_id = None
+            if target_message_id is not None:
+                anchor_id = await _resolve_grouped_album_anchor(
+                    channel_chat_id, target_chat_username, target_message_id, logging_context
+                )
+            if anchor_id is not None:
+                try:
+                    logger.debug(
+                        "Retrying GetReplies with grouped album anchor",
+                        extra={**logging_context, "anchor_msg_id": anchor_id},
+                    )
+                    thread_result = await client.call(
+                        "messages.getReplies",
+                        params=_build_get_replies_params(chat_identifier, anchor_id),
+                        resolve=True,
+                    )
+                    logger.debug(
+                        "Grouped album anchor GetReplies succeeded",
+                        extra={**logging_context, "messages_found": len(thread_result.get("messages", []))},
+                    )
+                    return True
+                except Exception as e:
+                    logger.debug(
+                        "Grouped album anchor GetReplies also failed, "
+                        "falling back to discussion group",
+                        extra={**logging_context, "error": str(e)},
+                        exc_info=True,
+                    )
+
+            # No grouped album found or anchor also failed — fall back to discussion group
+            logger.debug(
+                "GetReplies returned MSG_ID_INVALID, "
+                "falling back to discussion group reading",
+                extra=logging_context,
+            )
+            return await _fallback_discussion_group_reading(context, logging_context)
+
         _log_mtproto_error(e, "thread-based context establishment", logging_context)
         return False
 
     except Exception as e:
         _log_unexpected_error(e, "thread-based context establishment", logging_context)
+        return False
+
+
+async def _resolve_grouped_album_anchor(
+    channel_chat_id: int,
+    channel_username: Optional[str],
+    msg_id: int,
+    logging_context: Dict[str, Any],
+) -> Optional[int]:
+    """Find the first message in a grouped media album containing msg_id.
+
+    When GetReplies fails with MSG_ID_INVALID on a channel post that's part of
+    a grouped album, the comments thread is anchored to the FIRST message in
+    the group (the one with replies != null). This function fetches nearby
+    messages from the channel, finds all messages sharing the same grouped_id,
+    and returns the lowest message ID — the anchor.
+
+    Returns the anchor message ID, or None if:
+    - The message is not part of a grouped album (grouped_id is null)
+    - The message couldn't be fetched
+    - The target message is already the first in the group
+    """
+    client = get_mtproto_client()
+    channel_identifier = get_mtproto_chat_identifier(channel_chat_id, channel_username)
+
+    try:
+        # Fetch messages from msg_id backwards. Telegram limits albums to 10 items,
+        # so 20 is generous enough to always capture the full group.
+        result = await client.call(
+            "messages.getHistory",
+            params=_build_history_params(channel_identifier, msg_id + HISTORY_OFFSET_INCREMENT, GROUPED_ALBUM_SEARCH_LIMIT),
+            resolve=True,
+        )
+
+        messages = result.get("messages", [])
+        if not messages:
+            return None
+
+        target_grouped_id = next(
+            (
+                msg.get("grouped_id")
+                for msg in messages
+                if msg.get("id") == msg_id
+            ),
+            None,
+        )
+        if target_grouped_id is None:
+            return None
+
+        # Find the first message in the group (lowest ID with matching grouped_id)
+        anchor_msg_id = min(
+            (msg.get("id", msg_id) for msg in messages if msg.get("grouped_id") == target_grouped_id),
+            default=msg_id,
+        )
+
+        if anchor_msg_id == msg_id:
+            # Target is already the first in the group — GetReplies failed for another reason
+            return None
+
+        logger.debug(
+            "Resolved grouped album anchor",
+            extra={
+                **logging_context,
+                "anchor_msg_id": anchor_msg_id,
+                "grouped_id": target_grouped_id,
+            },
+        )
+        return anchor_msg_id
+
+    except Exception as e:
+        logger.debug(
+            "Failed to resolve grouped album anchor",
+            extra={**logging_context, "error": str(e)},
+            exc_info=True,
+        )
+        return None
+
+
+async def _fallback_discussion_group_reading(
+    context: PeerResolutionContext,
+    logging_context: Dict[str, Any],
+) -> bool:
+    """Fall back to reading the discussion group when GetReplies fails with MSG_ID_INVALID.
+
+    When the channel post has no discussion thread (replies=null), messages.getReplies
+    returns MSG_ID_INVALID. This fallback reads the discussion group directly via
+    messages.getHistory to still establish peer resolution context.
+    """
+    client = get_mtproto_client()
+    group_identifier = get_mtproto_chat_identifier(
+        context.chat_id, context.chat_username
+    )
+
+    try:
+        result = await client.call(
+            "messages.getHistory",
+            params=_build_history_params(group_identifier, context.message_id + HISTORY_OFFSET_INCREMENT, THREAD_MESSAGE_LIMIT),
+            resolve=True,
+        )
+
+        messages_found = len(result.get("messages", []))
+        logger.debug(
+            "Discussion group fallback reading succeeded",
+            extra={**logging_context, "messages_found": messages_found},
+        )
+        return True
+
+    except Exception as e:
+        logger.warning(
+            "Discussion group fallback reading also failed",
+            extra={**logging_context, "error": str(e)},
+            exc_info=True,
+        )
         return False
 
 
