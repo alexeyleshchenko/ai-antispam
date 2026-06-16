@@ -480,10 +480,51 @@ async def establish_context_via_thread_reading(
         error_msg = str(e).lower()
 
         # MSG_ID_INVALID: channel post has no discussion thread (replies=null).
-        # Fall back to reading the discussion group directly to establish peer context.
+        # This often happens with grouped media albums where only the first message
+        # in the group has the comments thread. Try to resolve the anchor first.
         if use_main_channel_peer and _is_msg_id_invalid_error(error_msg):
+            anchor_id = None
+            if target_message_id is not None:
+                anchor_id = await _resolve_grouped_album_anchor(
+                    channel_chat_id, target_chat_username, target_message_id, logging_context
+                )
+            if anchor_id is not None:
+                try:
+                    logger.debug(
+                        "Retrying GetReplies with grouped album anchor",
+                        extra={**logging_context, "anchor_msg_id": anchor_id},
+                    )
+                    thread_result = await client.call(
+                        "messages.getReplies",
+                        params={
+                            "peer": chat_identifier,
+                            "msg_id": anchor_id,
+                            "offset_id": DEFAULT_OFFSET,
+                            "offset_date": DEFAULT_OFFSET,
+                            "add_offset": DEFAULT_OFFSET,
+                            "limit": THREAD_MESSAGE_LIMIT,
+                            "max_id": DEFAULT_OFFSET,
+                            "min_id": DEFAULT_OFFSET,
+                            "hash": DEFAULT_HASH,
+                        },
+                        resolve=True,
+                    )
+                    messages_found = len(thread_result.get("messages", []))
+                    logger.debug(
+                        "Grouped album anchor GetReplies succeeded",
+                        extra={**logging_context, "messages_found": messages_found},
+                    )
+                    return True
+                except Exception:
+                    logger.debug(
+                        "Grouped album anchor GetReplies also failed, "
+                        "falling back to discussion group",
+                        extra=logging_context,
+                    )
+
+            # No grouped album found or anchor also failed — fall back to discussion group
             logger.debug(
-                "GetReplies returned MSG_ID_INVALID (no discussion thread on channel post), "
+                "GetReplies returned MSG_ID_INVALID, "
                 "falling back to discussion group reading",
                 extra=logging_context,
             )
@@ -495,6 +536,88 @@ async def establish_context_via_thread_reading(
     except Exception as e:
         _log_unexpected_error(e, "thread-based context establishment", logging_context)
         return False
+
+
+async def _resolve_grouped_album_anchor(
+    channel_chat_id: int,
+    channel_username: Optional[str],
+    msg_id: int,
+    logging_context: Dict[str, Any],
+) -> Optional[int]:
+    """Find the first message in a grouped media album containing msg_id.
+
+    When GetReplies fails with MSG_ID_INVALID on a channel post that's part of
+    a grouped album, the comments thread is anchored to the FIRST message in
+    the group (the one with replies != null). This function fetches nearby
+    messages from the channel, finds all messages sharing the same grouped_id,
+    and returns the lowest message ID — the anchor.
+
+    Returns the anchor message ID, or None if:
+    - The message is not part of a grouped album (grouped_id is null)
+    - The message couldn't be fetched
+    - The target message is already the first in the group
+    """
+    client = get_mtproto_client()
+    channel_identifier = get_mtproto_chat_identifier(channel_chat_id, channel_username)
+
+    try:
+        # Fetch messages from msg_id backwards. Telegram limits albums to 10 items,
+        # so 20 is generous enough to always capture the full group.
+        result = await client.call(
+            "messages.getHistory",
+            params={
+                "peer": channel_identifier,
+                "offset_id": msg_id + HISTORY_OFFSET_INCREMENT,
+                "offset_date": DEFAULT_OFFSET,
+                "add_offset": DEFAULT_OFFSET,
+                "limit": 20,
+                "max_id": DEFAULT_OFFSET,
+                "min_id": DEFAULT_OFFSET,
+                "hash": DEFAULT_HASH,
+            },
+            resolve=True,
+        )
+
+        messages = result.get("messages", [])
+        if not messages:
+            return None
+
+        # Find the target message's grouped_id
+        target_grouped_id = None
+        for msg in messages:
+            if msg.get("id") == msg_id:
+                target_grouped_id = msg.get("grouped_id")
+                break
+
+        if not target_grouped_id:
+            return None
+
+        # Find the first message in the group (lowest ID with matching grouped_id)
+        anchor_msg_id = msg_id
+        for msg in messages:
+            if msg.get("grouped_id") == target_grouped_id:
+                anchor_msg_id = min(anchor_msg_id, msg["id"])
+
+        if anchor_msg_id == msg_id:
+            # Target is already the first in the group — GetReplies failed for another reason
+            return None
+
+        logger.debug(
+            "Resolved grouped album anchor",
+            extra={
+                **logging_context,
+                "anchor_msg_id": anchor_msg_id,
+                "grouped_id": target_grouped_id,
+            },
+        )
+        return anchor_msg_id
+
+    except Exception as e:
+        logger.debug(
+            "Failed to resolve grouped album anchor",
+            extra={**logging_context, "error": str(e)},
+        )
+        return None
 
 
 async def _fallback_discussion_group_reading(
