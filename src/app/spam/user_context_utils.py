@@ -148,6 +148,8 @@ def _log_unexpected_error(
 # Constants for MTProto API calls
 DEFAULT_MESSAGE_LIMIT = 1
 THREAD_MESSAGE_LIMIT = 10
+# Telegram limits grouped albums to 10 items; 20 is generous for finding the anchor
+GROUPED_ALBUM_SEARCH_LIMIT = 20
 HISTORY_OFFSET_INCREMENT = 1
 DEFAULT_OFFSET = 0
 DEFAULT_HASH = 0
@@ -509,17 +511,17 @@ async def establish_context_via_thread_reading(
                         },
                         resolve=True,
                     )
-                    messages_found = len(thread_result.get("messages", []))
                     logger.debug(
                         "Grouped album anchor GetReplies succeeded",
-                        extra={**logging_context, "messages_found": messages_found},
+                        extra={**logging_context, "messages_found": len(thread_result.get("messages", []))},
                     )
                     return True
-                except Exception:
+                except Exception as e:
                     logger.debug(
                         "Grouped album anchor GetReplies also failed, "
                         "falling back to discussion group",
-                        extra=logging_context,
+                        extra={**logging_context, "error": str(e)},
+                        exc_info=True,
                     )
 
             # No grouped album found or anchor also failed — fall back to discussion group
@@ -570,7 +572,7 @@ async def _resolve_grouped_album_anchor(
                 "offset_id": msg_id + HISTORY_OFFSET_INCREMENT,
                 "offset_date": DEFAULT_OFFSET,
                 "add_offset": DEFAULT_OFFSET,
-                "limit": 20,
+                "limit": GROUPED_ALBUM_SEARCH_LIMIT,
                 "max_id": DEFAULT_OFFSET,
                 "min_id": DEFAULT_OFFSET,
                 "hash": DEFAULT_HASH,
@@ -590,14 +592,14 @@ async def _resolve_grouped_album_anchor(
             ),
             None,
         )
-        if not target_grouped_id:
+        if target_grouped_id is None:
             return None
 
         # Find the first message in the group (lowest ID with matching grouped_id)
         anchor_msg_id = msg_id
         for msg in messages:
             if msg.get("grouped_id") == target_grouped_id:
-                anchor_msg_id = min(anchor_msg_id, msg["id"])
+                anchor_msg_id = min(anchor_msg_id, msg.get("id", anchor_msg_id))
 
         if anchor_msg_id == msg_id:
             # Target is already the first in the group — GetReplies failed for another reason
@@ -661,7 +663,7 @@ async def _fallback_discussion_group_reading(
         return True
 
     except Exception as e:
-        logger.debug(
+        logger.warning(
             "Discussion group fallback reading also failed",
             extra={**logging_context, "error": str(e)},
             exc_info=True,
