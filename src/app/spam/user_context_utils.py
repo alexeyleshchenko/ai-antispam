@@ -484,6 +484,7 @@ async def establish_context_via_thread_reading(
 
         # Read recent messages in the thread to establish peer context
         # This includes messages from various users, helping with peer resolution
+        assert target_message_id is not None  # guaranteed by caller for thread-based path
         thread_result = await client.call(
             "messages.getReplies",
             params=_build_get_replies_params(chat_identifier, target_message_id),
