@@ -154,6 +154,36 @@ HISTORY_OFFSET_INCREMENT = 1
 DEFAULT_OFFSET = 0
 DEFAULT_HASH = 0
 
+
+def _build_get_replies_params(peer: Any, msg_id: int, limit: int = THREAD_MESSAGE_LIMIT) -> dict:
+    """Build standard MTProto params for messages.getReplies."""
+    return {
+        "peer": peer,
+        "msg_id": msg_id,
+        "offset_id": DEFAULT_OFFSET,
+        "offset_date": DEFAULT_OFFSET,
+        "add_offset": DEFAULT_OFFSET,
+        "limit": limit,
+        "max_id": DEFAULT_OFFSET,
+        "min_id": DEFAULT_OFFSET,
+        "hash": DEFAULT_HASH,
+    }
+
+
+def _build_history_params(peer: Any, offset_id: int, limit: int = DEFAULT_MESSAGE_LIMIT) -> dict:
+    """Build standard MTProto params for messages.getHistory."""
+    return {
+        "peer": peer,
+        "offset_id": offset_id,
+        "offset_date": DEFAULT_OFFSET,
+        "add_offset": DEFAULT_OFFSET,
+        "limit": limit,
+        "max_id": DEFAULT_OFFSET,
+        "min_id": DEFAULT_OFFSET,
+        "hash": DEFAULT_HASH,
+    }
+
+
 # Error message patterns for MTProto errors
 ERROR_USER_ALREADY_PARTICIPANT = "user already participant"
 ERROR_ALREADY = "already"
@@ -456,17 +486,7 @@ async def establish_context_via_thread_reading(
         # This includes messages from various users, helping with peer resolution
         thread_result = await client.call(
             "messages.getReplies",
-            params={
-                "peer": chat_identifier,
-                "msg_id": target_message_id,
-                "offset_id": DEFAULT_OFFSET,
-                "offset_date": DEFAULT_OFFSET,
-                "add_offset": DEFAULT_OFFSET,
-                "limit": THREAD_MESSAGE_LIMIT,  # Read up to 10 recent messages in the thread
-                "max_id": DEFAULT_OFFSET,
-                "min_id": DEFAULT_OFFSET,
-                "hash": DEFAULT_HASH,
-            },
+            params=_build_get_replies_params(chat_identifier, target_message_id),
             resolve=True,
         )
 
@@ -498,17 +518,7 @@ async def establish_context_via_thread_reading(
                     )
                     thread_result = await client.call(
                         "messages.getReplies",
-                        params={
-                            "peer": chat_identifier,
-                            "msg_id": anchor_id,
-                            "offset_id": DEFAULT_OFFSET,
-                            "offset_date": DEFAULT_OFFSET,
-                            "add_offset": DEFAULT_OFFSET,
-                            "limit": THREAD_MESSAGE_LIMIT,
-                            "max_id": DEFAULT_OFFSET,
-                            "min_id": DEFAULT_OFFSET,
-                            "hash": DEFAULT_HASH,
-                        },
+                        params=_build_get_replies_params(chat_identifier, anchor_id),
                         resolve=True,
                     )
                     logger.debug(
@@ -567,16 +577,7 @@ async def _resolve_grouped_album_anchor(
         # so 20 is generous enough to always capture the full group.
         result = await client.call(
             "messages.getHistory",
-            params={
-                "peer": channel_identifier,
-                "offset_id": msg_id + HISTORY_OFFSET_INCREMENT,
-                "offset_date": DEFAULT_OFFSET,
-                "add_offset": DEFAULT_OFFSET,
-                "limit": GROUPED_ALBUM_SEARCH_LIMIT,
-                "max_id": DEFAULT_OFFSET,
-                "min_id": DEFAULT_OFFSET,
-                "hash": DEFAULT_HASH,
-            },
+            params=_build_history_params(channel_identifier, msg_id + HISTORY_OFFSET_INCREMENT, GROUPED_ALBUM_SEARCH_LIMIT),
             resolve=True,
         )
 
@@ -596,10 +597,10 @@ async def _resolve_grouped_album_anchor(
             return None
 
         # Find the first message in the group (lowest ID with matching grouped_id)
-        anchor_msg_id = msg_id
-        for msg in messages:
-            if msg.get("grouped_id") == target_grouped_id:
-                anchor_msg_id = min(anchor_msg_id, msg.get("id", anchor_msg_id))
+        anchor_msg_id = min(
+            (msg.get("id", msg_id) for msg in messages if msg.get("grouped_id") == target_grouped_id),
+            default=msg_id,
+        )
 
         if anchor_msg_id == msg_id:
             # Target is already the first in the group — GetReplies failed for another reason
@@ -642,16 +643,7 @@ async def _fallback_discussion_group_reading(
     try:
         result = await client.call(
             "messages.getHistory",
-            params={
-                "peer": group_identifier,
-                "offset_id": context.message_id + HISTORY_OFFSET_INCREMENT,
-                "offset_date": DEFAULT_OFFSET,
-                "add_offset": DEFAULT_OFFSET,
-                "limit": THREAD_MESSAGE_LIMIT,
-                "max_id": DEFAULT_OFFSET,
-                "min_id": DEFAULT_OFFSET,
-                "hash": DEFAULT_HASH,
-            },
+            params=_build_history_params(group_identifier, context.message_id + HISTORY_OFFSET_INCREMENT, THREAD_MESSAGE_LIMIT),
             resolve=True,
         )
 
