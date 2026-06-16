@@ -617,6 +617,7 @@ async def _resolve_grouped_album_anchor(
         logger.debug(
             "Failed to resolve grouped album anchor",
             extra={**logging_context, "error": str(e)},
+            exc_info=True,
         )
         return None
 
@@ -663,6 +664,7 @@ async def _fallback_discussion_group_reading(
         logger.debug(
             "Discussion group fallback reading also failed",
             extra={**logging_context, "error": str(e)},
+            exc_info=True,
         )
         return False
 
