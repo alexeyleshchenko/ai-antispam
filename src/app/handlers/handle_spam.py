@@ -9,7 +9,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from ..common.bot import bot
-from ..common.telegram_errors import is_group_inaccessible_error, is_permission_error
+from ..common.telegram_errors import is_group_inaccessible_error, is_message_not_found_error, is_permission_error
 from ..common.mcp_client import McpHttpError, get_mcp_client
 from ..common.notifications import notify_admins_with_fallback_and_cleanup
 
@@ -434,6 +434,14 @@ async def handle_spam_message_deletion(
         if is_group_inaccessible_error(e):
             logger.info(
                 "Cannot delete spam message %s in chat %s (group inaccessible): %s",
+                message.message_id,
+                message.chat.id,
+                e,
+            )
+            return
+        if is_message_not_found_error(e):
+            logger.debug(
+                "Spam message %s already deleted in chat %s: %s",
                 message.message_id,
                 message.chat.id,
                 e,
