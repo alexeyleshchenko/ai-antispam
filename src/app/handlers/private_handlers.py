@@ -11,6 +11,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import or_f
 
 from ..common.bot import bot
+from ..common.telegram_errors import is_message_not_found_error
 from ..spam.account_signals import build_account_signals_body
 from ..spam.user_profile import collect_user_context
 from pydantic_ai import ModelSettings
@@ -375,6 +376,22 @@ def _resolve_example_texts(lang: str, is_spam: bool) -> tuple[str, str]:
     return answer_text, edit_type
 
 
+async def _delete_message_safely(chat_id: int, message_id: int) -> None:
+    """Delete a message, silently ignoring 'message not found' errors."""
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except TelegramBadRequest as e:
+        if is_message_not_found_error(e):
+            logger.debug(
+                "Message %s already deleted in chat %s",
+                message_id,
+                chat_id,
+                extra={"message_deletion": "already_deleted"},
+            )
+            return
+        raise
+
+
 def _append_spam_cleanup_tasks(
     tasks: List[Coroutine[Any, Any, Any]],
     info: Dict[str, Any],
@@ -393,7 +410,7 @@ def _append_spam_cleanup_tasks(
             extra={"message_deletion": "task_added"},
         )
         tasks.append(
-            bot.delete_message(
+            _delete_message_safely(
                 chat_id=group_chat_id,
                 message_id=group_message_id,
             )

@@ -440,7 +440,7 @@ async def handle_spam_message_deletion(
             )
             return
         if is_message_not_found_error(e):
-            logger.info(
+            logger.debug(
                 "Spam message %s already deleted in chat %s: %s",
                 message.message_id,
                 message.chat.id,
