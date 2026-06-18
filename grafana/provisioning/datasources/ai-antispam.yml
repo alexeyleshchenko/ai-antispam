@@ -1,0 +1,20 @@
+apiVersion: 1
+datasources:
+  - name: AI-Antispam
+    type: postgres
+    uid: ai-antispam-pg
+    access: proxy
+    url: postgres:5432
+    user: postgres
+    database: ai_spam_bot
+    isDefault: false
+    editable: true
+    jsonData:
+      sslmode: disable
+      database: ai_spam_bot
+      postgresVersion: 1600
+      maxOpenConns: 5
+      maxIdleConns: 2
+      connMaxLifetime: 14400
+    secureJsonData:
+      password: "postgres_party_ai_sales"
