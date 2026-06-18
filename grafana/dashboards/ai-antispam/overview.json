@@ -1,0 +1,221 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "title": "Intercepted Spam",
+      "type": "timeseries",
+      "datasource": { "uid": "ai-antispam-pg", "type": "grafana-postgresql-datasource" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisBorderShow": false,
+            "drawStyle": "bars",
+            "fillOpacity": 30,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "stacking": { "mode": "none" }
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "uid": "ai-antispam-pg", "type": "grafana-postgresql-datasource" },
+          "format": "time_series",
+          "rawSql": "SELECT\n  $__timeGroup(created_at, '1d') AS time,\n  COUNT(*) AS \"spam caught\"\nFROM spam_examples\nWHERE confirmed = true\nGROUP BY 1\nORDER BY 1",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Paid Customers",
+      "type": "stat",
+      "datasource": { "uid": "ai-antispam-pg", "type": "grafana-postgresql-datasource" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 10 },
+              { "color": "green", "value": 50 }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "uid": "ai-antispam-pg", "type": "grafana-postgresql-datasource" },
+          "format": "table",
+          "rawSql": "SELECT COUNT(*) AS \"paid customers\" FROM administrators WHERE credits > 0",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Transactions",
+      "type": "timeseries",
+      "datasource": { "uid": "ai-antispam-pg", "type": "grafana-postgresql-datasource" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisBorderShow": false,
+            "drawStyle": "bars",
+            "fillOpacity": 30,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "stacking": { "mode": "none" }
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "uid": "ai-antispam-pg", "type": "grafana-postgresql-datasource" },
+          "format": "time_series",
+          "rawSql": "SELECT\n  $__timeGroup(created_at, '1d') AS time,\n  SUM(amount) AS \"stars\",\n  COUNT(*) AS \"count\"\nFROM transactions\nWHERE type = 'payment'\nGROUP BY 1\nORDER BY 1",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Total Credits Balance",
+      "type": "gauge",
+      "datasource": { "uid": "ai-antispam-pg", "type": "grafana-postgresql-datasource" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 100 },
+              { "color": "green", "value": 500 }
+            ]
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "targets": [
+        {
+          "datasource": { "uid": "ai-antispam-pg", "type": "grafana-postgresql-datasource" },
+          "format": "table",
+          "rawSql": "SELECT COALESCE(SUM(credits), 0) AS \"total credits\" FROM administrators",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Active Groups",
+      "type": "stat",
+      "datasource": { "uid": "ai-antispam-pg", "type": "grafana-postgresql-datasource" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": null }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "uid": "ai-antispam-pg", "type": "grafana-postgresql-datasource" },
+          "format": "table",
+          "rawSql": "SELECT COUNT(*) AS \"active groups\" FROM groups WHERE moderation_enabled = true",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Spam by Score",
+      "type": "piechart",
+      "datasource": { "uid": "ai-antispam-pg", "type": "grafana-postgresql-datasource" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "right" },
+        "pieType": "donut",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "targets": [
+        {
+          "datasource": { "uid": "ai-antispam-pg", "type": "grafana-postgresql-datasource" },
+          "format": "table",
+          "rawSql": "SELECT\n  CASE\n    WHEN score >= 80 THEN 'high (80+)'\n    WHEN score >= 50 THEN 'medium (50-79)'\n    ELSE 'low (<50)'\n  END AS \"score range\",\n  COUNT(*) AS \"count\"\nFROM spam_examples\nWHERE confirmed = true\nGROUP BY 1\nORDER BY 1",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "refresh": "5m",
+  "schemaVersion": 39,
+  "tags": ["ai-antispam"],
+  "templating": { "list": [] },
+  "time": { "from": "now-30d", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "AI-Antispam Overview",
+  "uid": "ai-antispam-overview",
+  "version": 1
+}
