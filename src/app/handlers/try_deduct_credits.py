@@ -12,6 +12,7 @@ import logging
 from typing import Optional, Sequence, Tuple, Union
 
 from aiogram.types import ChatMember, ChatMemberAdministrator, ChatMemberOwner
+from aiogram.exceptions import TelegramForbiddenError
 
 from ..common.bot import bot
 from ..common.utils import (
@@ -215,5 +216,12 @@ async def notify_admins_about_deactivation(
                 )
 
             await send_notification()
+        except TelegramForbiddenError as e:
+            # Admin never started a conversation with the bot or blocked it.
+            # Expected, non-critical — log without traceback.
+            logger.warning(
+                f"Cannot notify admin {admin_id} about deactivation: {e}. "
+                "Admin should send /start to the bot to enable notifications."
+            )
         except Exception as e:
             logger.warning(f"Failed to notify admin {admin_id}: {e}", exc_info=True)
