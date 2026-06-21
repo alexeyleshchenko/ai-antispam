@@ -86,6 +86,7 @@ async def test_handle_spam_confirm_callback_deletes_and_bans():
     Notification message is edited to remove keyboard and append confirmation line.
     """
     callback = AsyncMock(spec=CallbackQuery)
+    callback.answer = AsyncMock()
     callback.data = "delete_spam_message:12345:67890:111"
     callback.from_user = User(id=999, is_bot=False, first_name="Admin")
     callback.message = AsyncMock(spec=Message)

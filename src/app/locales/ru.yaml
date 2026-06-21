@@ -300,6 +300,7 @@ callback:
   message_inaccessible: "❌ Сообщение недоступно"
   safe_added: "Сообщение добавлено как безопасный пример"
   spam_deleted: "Спам удален"
+  delete_no_permission: "Спам подтверждён, но сообщение не удалось удалить — дайте боту право 'Удаление сообщений'"
   invalid_callback: "❌ Неверный callback"
   delete_failed: "❌ Не удалось удалить сообщение"
   error_generic: "❌ Произошла ошибка"

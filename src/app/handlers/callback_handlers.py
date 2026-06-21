@@ -4,7 +4,7 @@ import logging
 
 from aiogram import F, types
 from aiogram.exceptions import TelegramBadRequest
-from ..common.telegram_errors import is_message_not_found_error
+from ..common.telegram_errors import is_message_not_found_error, is_permission_error
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from ..common.bot import bot
@@ -254,10 +254,6 @@ async def handle_spam_confirm_callback(callback: CallbackQuery) -> str:
     lang = resolve_lang(callback.from_user, admin)
 
     try:
-        with contextlib.suppress(Exception):
-            await callback.answer(
-                f"✅ {t(lang, 'callback.spam_deleted')}", show_alert=False
-            )
         _, effective_user_id_str, chat_id_str, message_id_str = callback.data.split(":")
         effective_user_id = int(effective_user_id_str)
         chat_id = int(chat_id_str)
@@ -268,6 +264,7 @@ async def handle_spam_confirm_callback(callback: CallbackQuery) -> str:
             await callback.answer(t(lang, "callback.invalid_callback"), show_alert=True)
             return "callback_invalid_message"
 
+        delete_succeeded = False
         try:
 
             @retry_on_network_error
@@ -275,10 +272,19 @@ async def handle_spam_confirm_callback(callback: CallbackQuery) -> str:
                 return await bot.delete_message(chat_id, message_id)
 
             await delete_original_message()
+            delete_succeeded = True
         except TelegramBadRequest as e:
             if is_message_not_found_error(e):
                 logger.info(
                     f"Message to delete not found (likely already deleted): {chat_id}:{message_id}"
+                )
+                delete_succeeded = True
+            elif is_permission_error(e):
+                logger.info(
+                    f"Cannot delete message (no permission or too old): {chat_id}:{message_id}: {e}"
+                )
+                await callback.answer(
+                    t(lang, "callback.delete_no_permission"), show_alert=True
                 )
             else:
                 logger.warning(
@@ -295,6 +301,9 @@ async def handle_spam_confirm_callback(callback: CallbackQuery) -> str:
             await callback.answer(t(lang, "callback.delete_failed"), show_alert=True)
             return "callback_error_deleting_original"
 
+        if delete_succeeded:
+            await callback.answer(f"✅ {t(lang, 'callback.spam_deleted')}")
+
         await confirm_pending_example_as_spam(
             chat_id, message_id, callback.from_user.id
         )
@@ -310,9 +319,14 @@ async def handle_spam_confirm_callback(callback: CallbackQuery) -> str:
             existing_text = (
                 getattr(msg, "html_text", None) or msg.text or msg.caption or ""
             )
-            updated_text = (
-                f"{existing_text}\n\n✅ <b>{t(lang, 'callback.spam_deleted')}</b>"
-            )
+            if delete_succeeded:
+                updated_text = (
+                    f"{existing_text}\n\n✅ <b>{t(lang, 'callback.spam_deleted')}</b>"
+                )
+            else:
+                updated_text = (
+                    f"{existing_text}\n\n⚠️ <b>{t(lang, 'callback.delete_no_permission')}</b>"
+                )
             try:
                 await bot.edit_message_text(
                     chat_id=msg.chat.id,

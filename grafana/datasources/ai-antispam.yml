@@ -17,4 +17,4 @@ datasources:
       maxIdleConns: 2
       connMaxLifetime: 14400
     secureJsonData:
-      password: "postgres_party_ai_sales"
+      password: $__env{POSTGRES_PASSWORD}
