@@ -329,6 +329,7 @@ deactivate:
   group_message: "⚠️ <b>Attention! Group protection deactivated</b>\n\nThe neuromoderator paused due to low stars.\nThe group is left unprotected from:\n• Spam and ads\n• Scammers\n• Unwanted messages\n\n👉 Admins can restore protection via private messages with the bot\n\n🤖 <a href=\"{add_to_group_url}\">Want this moderator? Add bot</a> — you'll pick the group from a list.\n📢 <a href=\"https://t.me/ai_antispam\">Follow project updates</a>"
   admin_message: "Attention, organic life form!\n\nMy protection of \"{group}\" is temporarily paused due to star energy depletion.\n\nTop up with /buy so I can continue guarding your cyberspace from digital parasites!\n\n"
   admin_invite: "Or invite other admins: {ref_link}"
+  group_fallback_message: "moderation has been deactivated due to insufficient credits. Please add credits to continue."
 
 low_balance:
   in_7_days: "in 7 days"

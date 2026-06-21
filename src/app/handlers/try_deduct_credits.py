@@ -8,13 +8,14 @@
 - Поиска администраторов с минимальным количеством кредитов
 """
 
+import asyncio
 import logging
 from typing import Optional, Sequence, Tuple, Union
 
 from aiogram.types import ChatMember, ChatMemberAdministrator, ChatMemberOwner
-from aiogram.exceptions import TelegramForbiddenError
 
 from ..common.bot import bot
+from ..common.notifications import notify_admins_with_fallback_and_cleanup
 from ..common.utils import (
     format_chat_or_channel_display,
     get_add_to_group_url,
@@ -74,8 +75,50 @@ async def handle_deactivation(chat_id: int) -> None:
         await send_group_deactivation_message(
             chat_id, ref_link, min_credits_admin, min_credits
         )
-        await notify_admins_about_deactivation(
-            admins, chat.title, ref_link, getattr(chat, "username", None)
+
+        # Build per-admin message data for the shared notification handler
+        chat_username = getattr(chat, "username", None)
+        human_admin_ids = [
+            a.user.id
+            for a in admins
+            if isinstance(a, (ChatMemberAdministrator, ChatMemberOwner))
+            and not a.user.is_bot
+        ]
+
+        # Pre-resolve admin languages and group display names
+        default_lang = "en"
+        admin_objs = await asyncio.gather(
+            *(get_admin(aid) for aid in human_admin_ids)
+        )
+        admin_langs: dict[int, str] = {}
+        for aid, admin_obj in zip(human_admin_ids, admin_objs):
+            admin_langs[aid] = (
+                normalize_lang(admin_obj.language_code)
+                if admin_obj and admin_obj.language_code
+                else default_lang
+            )
+
+        group_displays: dict[str, str] = {}
+        for lang_code in set(admin_langs.values()) | {default_lang}:
+            group_displays[lang_code] = format_chat_or_channel_display(
+                chat.title, chat_username, t(lang_code, "common.group")
+            )
+
+        def _deactivation_message(admin_id: int) -> str:
+            lang = admin_langs.get(admin_id, default_lang)
+            group_display = group_displays.get(lang, group_displays[default_lang])
+            msg = t(lang, "deactivate.admin_message", group=group_display)
+            msg += t(lang, "deactivate.admin_invite", ref_link=ref_link)
+            return msg
+
+        await notify_admins_with_fallback_and_cleanup(
+            bot,
+            human_admin_ids,
+            chat_id,
+            private_message=_deactivation_message,
+            group_message_template="{mention}, " + t(default_lang, "deactivate.group_fallback_message"),
+            cleanup_if_group_fails=False,
+            assume_human_admins=True,
         )
 
 
@@ -152,76 +195,4 @@ async def send_group_deactivation_message(
         logger.warning(f"Failed to send group promo message: {e}", exc_info=True)
 
 
-async def notify_admins_about_deactivation(
-    admins: Sequence[ChatMember],
-    chat_title: str,
-    ref_link: str,
-    chat_username: Optional[str] = None,
-) -> None:
-    """
-    Отправляет персональные уведомления администраторам о деактивации.
 
-    Args:
-        admins: Список администраторов
-        chat_title: Название чата
-        ref_link: Реферальная ссылка
-        chat_username: Опциональный username группы без @
-    """
-    first_admin_id = next(
-        (
-            a.user.id
-            for a in admins
-            if isinstance(a, (ChatMemberAdministrator, ChatMemberOwner))
-            and not a.user.is_bot
-        ),
-        None,
-    )
-    lang = "en"
-    if first_admin_id:
-        first_admin = await get_admin(first_admin_id)
-        lang = (
-            normalize_lang(first_admin.language_code)
-            if first_admin and first_admin.language_code
-            else "en"
-        )
-
-    group_display = format_chat_or_channel_display(
-        chat_title, chat_username, t(lang, "common.group")
-    )
-    for admin in admins:
-        if not isinstance(admin, (ChatMemberAdministrator, ChatMemberOwner)):
-            continue
-        if admin.user.is_bot:
-            continue
-
-        admin_id = admin.user.id
-        admin_obj = await get_admin(admin_id)
-        admin_lang = (
-            normalize_lang(admin_obj.language_code)
-            if admin_obj and admin_obj.language_code
-            else lang
-        )
-        message_text = t(admin_lang, "deactivate.admin_message", group=group_display)
-        message_text += t(admin_lang, "deactivate.admin_invite", ref_link=ref_link)
-
-        try:
-
-            @retry_on_network_error
-            async def send_notification():
-                return await bot.send_message(
-                    admin_id,
-                    message_text,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                )
-
-            await send_notification()
-        except TelegramForbiddenError as e:
-            # Admin never started a conversation with the bot or blocked it.
-            # Expected, non-critical — log without traceback.
-            logger.warning(
-                f"Cannot notify admin {admin_id} about deactivation: {e}. "
-                "Admin should send /start to the bot to enable notifications."
-            )
-        except Exception as e:
-            logger.warning(f"Failed to notify admin {admin_id}: {e}", exc_info=True)
