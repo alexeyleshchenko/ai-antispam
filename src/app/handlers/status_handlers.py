@@ -15,6 +15,7 @@ from ..common.bot import bot
 from ..common.telegram_errors import (
     GROUP_ANONYMOUS_BOT_ID,
     is_bot_kicked_error,
+    is_group_inaccessible_error,
     is_message_not_found_error,
     is_permission_error,
     is_user_blocked_error,
@@ -541,9 +542,9 @@ async def handle_member_service_message(message: types.Message) -> str:
                 )
                 return "service_message_delete_failed"
         except Exception as e:
-            if is_bot_kicked_error(e):
+            if is_bot_kicked_error(e) or is_group_inaccessible_error(e):
                 logger.info(
-                    f"Bot was kicked from chat {chat_id} ('{message.chat.title or ''}') — skipping delete",
+                    f"Bot is not a member of chat {chat_id} ('{message.chat.title or ''}') — skipping delete",
                 )
                 return "service_message_bot_kicked"
             else:
