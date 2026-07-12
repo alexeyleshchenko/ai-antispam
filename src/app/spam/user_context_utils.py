@@ -543,6 +543,16 @@ async def establish_context_via_thread_reading(
             )
             return await _fallback_discussion_group_reading(context, logging_context)
 
+        # Entity not cached in MTProto session — Telethon can't resolve
+        # bare integer peer (defaults to PeerUser). Expected when the bot's
+        # userbot hasn't interacted with this channel. Fall back gracefully.
+        if "could not find the input entity" in error_msg:
+            logger.debug(
+                "Entity not cached in MTProto session, falling back",
+                extra={**logging_context, "error": str(e)},
+            )
+            return False
+
         _log_mtproto_error(e, "thread-based context establishment", logging_context)
         return False
 
