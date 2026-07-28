@@ -8,17 +8,18 @@ Scheduled daily via run_scheduled_jobs. Handles:
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from ..common.bot import bot
 from ..common.notifications import perform_complete_group_cleanup
 from ..common.utils import (
+    format_chat_log,
     format_chat_or_channel_display,
+    format_user_log,
     get_add_to_group_url,
     load_config,
     send_admin_dm,
 )
-from ..i18n import resolve_lang, t
 from ..database import (
     clear_depletion_flags,
     get_admin,
@@ -30,6 +31,7 @@ from ..database import (
     mark_depletion_day_6_warned,
     mark_low_balance_warned,
 )
+from ..i18n import resolve_lang, t
 
 logger = logging.getLogger(__name__)
 
@@ -65,16 +67,16 @@ async def check_week_ahead_warnings() -> None:
         text = t(lang, "low_balance.week_ahead", credits=credits)
         if await send_admin_dm(admin_id, text, log_context="low balance"):
             await mark_low_balance_warned(admin_id)
-            logger.info(f"Sent week-ahead warning to admin {admin_id}")
+            logger.info(f"Sent week-ahead warning to admin {format_user_log(admin_id)}")
 
 
 def _days_since(dt: datetime) -> float:
     """Days since the given datetime (UTC)."""
     if dt is None:
         return 0.0
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     delta = now - dt
     return delta.total_seconds() / SECONDS_PER_DAY
 
@@ -112,7 +114,7 @@ async def check_depletion_timeline() -> None:
             deadline = depleted_at
             if deadline:
                 deadline_dt = (
-                    deadline.replace(tzinfo=timezone.utc)
+                    deadline.replace(tzinfo=UTC)
                     if deadline.tzinfo is None
                     else deadline
                 )
@@ -123,7 +125,7 @@ async def check_depletion_timeline() -> None:
             text = t(lang, "low_balance.depleted", deadline=deadline_str)
             if await send_admin_dm(admin_id, text, log_context="low balance"):
                 await mark_depletion_day_1_warned(admin_id)
-                logger.info(f"Sent day-1 depletion warning to admin {admin_id}")
+                logger.info(f"Sent day-1 depletion warning to admin {format_user_log(admin_id)}")
 
         # Day 6: final warning (once per depletion cycle)
         elif (
@@ -135,7 +137,7 @@ async def check_depletion_timeline() -> None:
             text = t(lang, "low_balance.tomorrow")
             if await send_admin_dm(admin_id, text, log_context="low balance"):
                 await mark_depletion_day_6_warned(admin_id)
-                logger.info(f"Sent day-6 depletion warning to admin {admin_id}")
+                logger.info(f"Sent day-6 depletion warning to admin {format_user_log(admin_id)}")
 
 
 async def leave_sole_payer_groups(admin_id: int) -> None:
@@ -153,6 +155,7 @@ async def leave_sole_payer_groups(admin_id: int) -> None:
     for group_id in group_ids:
         paying = await get_paying_admins(group_id)
         if len(paying) == 0:
+            title = username = None
             try:
                 chat = await bot.get_chat(group_id)
                 title = getattr(chat, "title", None) or str(group_id)
@@ -164,13 +167,13 @@ async def leave_sole_payer_groups(admin_id: int) -> None:
             except Exception:
                 left_groups.append(str(group_id))
 
-            success = await perform_complete_group_cleanup(group_id)
+            success = await perform_complete_group_cleanup(group_id, title, username)
             if success:
                 logger.info(
-                    f"Left sole-payer group {group_id} for dry admin {admin_id}"
+                    f"Left sole-payer group {format_chat_log(group_id, title, username)} for dry admin {format_user_log(admin_id)}"
                 )
             else:
-                logger.warning(f"Failed to leave group {group_id} for admin {admin_id}")
+                logger.warning(f"Failed to leave group {format_chat_log(group_id, title, username)} for admin {format_user_log(admin_id)}")
 
     if left_groups:
         groups_list = "\n• ".join(left_groups)
@@ -183,7 +186,7 @@ async def leave_sole_payer_groups(admin_id: int) -> None:
         )
         await send_admin_dm(admin_id, text, log_context="low balance")
         logger.info(
-            f"Notified admin {admin_id} about leaving {len(left_groups)} groups"
+            f"Notified admin {format_user_log(admin_id)} about leaving {len(left_groups)} groups"
         )
 
 

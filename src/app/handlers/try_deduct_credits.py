@@ -17,6 +17,7 @@ from aiogram.types import ChatMember, ChatMemberAdministrator, ChatMemberOwner
 from ..common.bot import bot
 from ..common.notifications import notify_admins_with_fallback_and_cleanup
 from ..common.utils import (
+    format_chat_log,
     format_chat_or_channel_display,
     get_add_to_group_url,
     retry_on_network_error,
@@ -45,7 +46,7 @@ async def try_deduct_credits(chat_id: int, amount: int, reason: str) -> bool:
     admin_id = await deduct_credits_from_admins(chat_id, amount)
 
     if not admin_id:
-        logger.warning(f"No paying admins in chat {chat_id} for {reason}")
+        logger.warning(f"No paying admins in chat {format_chat_log(chat_id)} for {reason}")
         await handle_deactivation(chat_id)
         return False
 
@@ -62,7 +63,7 @@ async def handle_deactivation(chat_id: int) -> None:
     await set_group_moderation(chat_id, False)
     chat = await bot.get_chat(chat_id)
     if not chat.title:
-        logger.warning(f"Failed to get chat title for {chat_id}")
+        logger.warning(f"Failed to get chat title for {format_chat_log(chat_id)}")
         return
 
     admins = await bot.get_chat_administrators(chat_id)

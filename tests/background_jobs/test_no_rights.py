@@ -102,7 +102,7 @@ async def test_leave_no_rights_groups_leaves_when_no_rights():
 
         await leave_no_rights_groups()
 
-        mock_cleanup.assert_called_once_with(100)
+        mock_cleanup.assert_called_once_with(100, 'Test Group', 'test')
         mock_send.assert_called_once()
         assert "Test Group" in str(mock_send.call_args) or "100" in str(
             mock_send.call_args
@@ -184,7 +184,7 @@ async def test_leave_no_rights_groups_cleans_stale_group_chat_not_found():
 
         await leave_no_rights_groups()
 
-        mock_cleanup.assert_called_once_with(-1001234567890)
+        mock_cleanup.assert_called_once_with(-1001234567890, 'Stale Group', None)
         mock_send.assert_called_once()
 
 
@@ -241,4 +241,4 @@ async def test_leave_no_rights_groups_cleans_stale_group_bot_kicked():
 
         await leave_no_rights_groups()
 
-        mock_cleanup.assert_called_once_with(-1009876543210)
+        mock_cleanup.assert_called_once_with(-1009876543210, 'Kicked Group', None)

@@ -17,25 +17,29 @@ from .telegram_errors import (
     is_message_not_found_error,
     is_user_blocked_error,
 )
-from .utils import retry_on_network_error
+from .utils import format_chat_log, format_user_log, retry_on_network_error
 
 logger = logging.getLogger(__name__)
 
 
 @logfire.no_auto_trace
 @logfire.instrument(extract_args=True, record_return=True)
-async def perform_complete_group_cleanup(group_id: int) -> bool:
+async def perform_complete_group_cleanup(
+    group_id: int,
+    group_title: str | None = None,
+    group_username: str | None = None,
+) -> bool:
     """Perform complete group cleanup: leave chat and clean database. Returns success status."""
     try:
         await bot.leave_chat(group_id)
     except Exception as leave_e:
         if is_group_inaccessible_error(leave_e):
             logger.info(
-                f"Group {group_id} already inaccessible during leave, proceeding with DB cleanup"
+                f"Group {format_chat_log(group_id, group_title, group_username)} already inaccessible during leave, proceeding with DB cleanup"
             )
         else:
             logger.error(
-                f"Failed to leave group {group_id}: {leave_e}",
+                f"Failed to leave group {format_chat_log(group_id, group_title, group_username)}: {leave_e}",
                 exc_info=True,
             )
             return False
@@ -45,7 +49,7 @@ async def perform_complete_group_cleanup(group_id: int) -> bool:
         return True
     except Exception as db_e:
         logger.error(
-            f"Failed to clean DB for group {group_id}: {db_e}",
+            f"Failed to clean DB for group {format_chat_log(group_id, group_title, group_username)}: {db_e}",
             exc_info=True,
         )
         return False
@@ -63,6 +67,8 @@ async def notify_admins_with_fallback_and_cleanup(
     parse_mode: str = "HTML",
     reply_markup: InlineKeyboardMarkup | None = None,
     assume_human_admins: bool = False,
+    group_title: str | None = None,
+    group_username: str | None = None,
 ) -> dict:
     """
     Notifies all admins in private, falls back to group if none are reachable.
@@ -99,7 +105,7 @@ async def notify_admins_with_fallback_and_cleanup(
                     if not is_bot and admin_id < 0:
                         is_bot = True
                         logfire.warning(
-                            f"Detected channel/bot account {admin_id} with negative ID"
+                            f"Detected channel/bot account {format_user_log(admin_id)} with negative ID"
                         )
 
                     # Additional check: GroupAnonymousBot (1087968824)
@@ -112,7 +118,7 @@ async def notify_admins_with_fallback_and_cleanup(
 
                 if is_bot:
                     logfire.info(
-                        f"Skipping bot admin {admin_id} ({getattr(admin_chat, 'first_name', 'Unknown')}) - cannot send messages to bots"
+                        f"Skipping bot admin {format_user_log(admin_id, getattr(admin_chat, 'first_name', None), getattr(admin_chat, 'username', None))} - cannot send messages to bots"
                     )
                     bots_skipped.append(admin_id)
                     continue
@@ -140,7 +146,7 @@ async def notify_admins_with_fallback_and_cleanup(
             # Use admin_chat if available, otherwise we'll handle fallback without it
             if admin_chat:
                 last_admin_info = admin_chat
-            logger.debug(f"Successfully notified admin {admin_id} in private")
+            logger.debug(f"Successfully notified admin {format_user_log(admin_id, getattr(admin_chat, 'first_name', None) if admin_chat else None, getattr(admin_chat, 'username', None) if admin_chat else None)} in private")
         except Exception as e:
             # When tenacity exhausts retries, it wraps the exception in RetryError.
             # Unwrap it so existing TelegramBadRequest handlers work correctly.
@@ -170,7 +176,7 @@ async def notify_admins_with_fallback_and_cleanup(
                     # User has not started a conversation with the bot — expected for
                     # admins who never messaged the bot. Log at debug, not warning.
                     logger.debug(
-                        f"Cannot notify admin {admin_id}: user has not started a "
+                        f"Cannot notify admin {format_user_log(admin_id)}: user has not started a "
                         f"conversation with the bot. Admin should send /start to enable notifications."
                     )
                     unreachable.append(admin_id)
@@ -178,7 +184,7 @@ async def notify_admins_with_fallback_and_cleanup(
                     # Recipient is a bot (e.g. GroupAnonymousBot 1087968824) that cannot
                     # receive bot-to-bot DMs. Expected and harmless — skip silently at debug.
                     logger.debug(
-                        f"Cannot notify admin {admin_id}: bot account cannot receive DMs "
+                        f"Cannot notify admin {format_user_log(admin_id)}: bot account cannot receive DMs "
                         f"from other bots (USER_BOT_TO_BOT_DISABLED)."
                     )
                     unreachable.append(admin_id)
@@ -186,25 +192,25 @@ async def notify_admins_with_fallback_and_cleanup(
                     if is_user_blocked_error(e):
                         # User blocked the bot — expected, non-critical. Log at debug.
                         logger.debug(
-                            f"Cannot notify admin {admin_id}: bot was blocked by the user. "
+                            f"Cannot notify admin {format_user_log(admin_id)}: bot was blocked by the user. "
                             "This admin will not receive notifications until they unblock the bot."
                         )
                     else:
                         # Other TelegramForbiddenError (e.g. bot was kicked from private chat)
                         logger.debug(
-                            f"Cannot notify admin {admin_id}: {e}"
+                            f"Cannot notify admin {format_user_log(admin_id)}: {e}"
                         )
                     unreachable.append(admin_id)
                 else:
                     # Other TelegramBadRequest errors (like invalid chat_id) should be treated as unreachable
                     logger.warning(
-                        f"Telegram API error when notifying admin {admin_id}: {e}",
+                        f"Telegram API error when notifying admin {format_user_log(admin_id)}: {e}",
                         exc_info=True,
                     )
                     unreachable.append(admin_id)
             else:
                 logger.info(
-                    f"Failed to notify admin {admin_id} in private: {e}", exc_info=True
+                    f"Failed to notify admin {format_user_log(admin_id)} in private: {e}", exc_info=True
                 )
                 unreachable.append(admin_id)
             with contextlib.suppress(Exception):
@@ -240,17 +246,17 @@ async def notify_admins_with_fallback_and_cleanup(
                     else f"[админ](tg://user?id={last_admin_info.id})"
                 )
             logger.info(
-                f"Using mention '{mention}' for group fallback in chat {group_id}"
+                f"Using mention '{mention}' for group fallback in chat {format_chat_log(group_id, group_title, group_username)}"
             )
         else:
             mention = "админ"
             logger.info(
-                f"No admin info available for group fallback in chat {group_id}, using generic mention"
+                f"No admin info available for group fallback in chat {format_chat_log(group_id, group_title, group_username)}, using generic mention"
             )
 
         group_message = group_message_template.format(mention=mention)
         logger.info(
-            f"Sending group fallback message to chat {group_id}: {group_message[:100]}..."
+            f"Sending group fallback message to chat {format_chat_log(group_id, group_title, group_username)}: {group_message[:100]}..."
         )
 
         try:
@@ -269,25 +275,25 @@ async def notify_admins_with_fallback_and_cleanup(
             return result
         except Exception as group_e:
             logger.info(
-                f"Failed to send group fallback notification to chat {group_id}: {group_e}",
+                f"Failed to send group fallback notification to chat {format_chat_log(group_id, group_title, group_username)}: {group_e}",
                 exc_info=True,
             )
             if cleanup_if_group_fails:
-                cleanup_success = await perform_complete_group_cleanup(group_id)
+                cleanup_success = await perform_complete_group_cleanup(group_id, group_title, group_username)
                 result["group_cleaned_up"] = cleanup_success
                 if cleanup_success:
                     logger.info(
-                        f"Group {group_id} cleaned up due to inability to notify admins - all notification methods failed"
+                        f"Group {format_chat_log(group_id, group_title, group_username)} cleaned up due to inability to notify admins - all notification methods failed"
                     )
             else:
                 logger.info(
-                    f"Cleanup disabled for group {group_id}, leaving group accessible despite notification failure"
+                    f"Cleanup disabled for group {format_chat_log(group_id, group_title, group_username)}, leaving group accessible despite notification failure"
                 )
 
             # Log specific error if all notifications failed
             if not result["notified_private"] and not result["group_notified"]:
                 logger.info(
-                    f"Failed to notify admins - all notification methods failed for chat {group_id}"
+                    f"Failed to notify admins - all notification methods failed for chat {format_chat_log(group_id, group_title, group_username)}"
                     + (", cleanup initiated" if cleanup_if_group_fails else "")
                 )
 

@@ -49,5 +49,7 @@ class Group(BaseModel):
     admin_ids: List[int]
     moderation_enabled: bool = True
     member_ids: List[int] = []
+    title: Optional[str] = None
+    username: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.now)
     last_updated: datetime = Field(default_factory=datetime.now)

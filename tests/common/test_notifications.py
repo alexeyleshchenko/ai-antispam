@@ -58,7 +58,7 @@ class TestNotifyAdminsWithCleanup:
             assert mock_bot.get_chat.call_count == len(admin_ids) * 2
 
             # Should call the complete cleanup function
-            mock_cleanup.assert_called_once_with(group_id)
+            mock_cleanup.assert_called_once_with(group_id, None, None)
 
             # Should return cleanup result
             assert result["group_cleaned_up"] is True

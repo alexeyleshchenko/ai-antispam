@@ -75,6 +75,7 @@ async def create_schema(conn: asyncpg.Connection):
             CREATE TABLE IF NOT EXISTS groups (
                 group_id BIGINT PRIMARY KEY,
                 title VARCHAR(255),
+                username VARCHAR(255),
                 moderation_enabled BOOLEAN DEFAULT true,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 last_active TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -186,6 +187,14 @@ async def create_schema(conn: asyncpg.Connection):
         )
     except Exception as e:
         raise RuntimeError(f"Failed to create indexes: {e}") from e
+
+    # Migrations for existing databases (ADD COLUMN IF NOT EXISTS is idempotent)
+    try:
+        await conn.execute(
+            "ALTER TABLE groups ADD COLUMN IF NOT EXISTS username VARCHAR(255)"
+        )
+    except Exception as e:
+        raise RuntimeError(f"Failed to run migrations: {e}") from e
 
     await create_procedures(conn)
 

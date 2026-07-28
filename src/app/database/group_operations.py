@@ -5,7 +5,7 @@ from aiogram.exceptions import TelegramBadRequest
 
 from ..common.bot import bot
 from ..common.telegram_errors import GROUP_ANONYMOUS_BOT_ID, is_group_inaccessible_error
-from ..common.utils import load_config
+from ..common.utils import format_chat_log, load_config
 from . import admin_operations
 from .models import Group
 from .postgres_connection import get_pool
@@ -52,6 +52,8 @@ async def get_group(group_id: int) -> Optional[Group]:
             admin_ids=admin_ids,
             moderation_enabled=group_data["moderation_enabled"],
             member_ids=member_ids,
+            title=group_data.get("title"),
+            username=group_data.get("username"),
             created_at=group_data["created_at"],
             last_updated=group_data["last_active"],
         )
@@ -156,7 +158,7 @@ async def deduct_credits_from_admins(group_id: int, amount: int) -> int:
 
 async def cleanup_group_data(group_id: int) -> None:
     """Clean up all database records for a group"""
-    logger.info(f"Cleaning up database records for group {group_id}")
+    logger.info(f"Cleaning up database records for group {format_chat_log(group_id)}")
 
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -187,7 +189,7 @@ async def cleanup_group_data(group_id: int) -> None:
             group_id,
         )
 
-    logger.info(f"Successfully cleaned up database records for group {group_id}")
+    logger.info(f"Successfully cleaned up database records for group {format_chat_log(group_id)}")
 
 
 async def set_no_rights_detected_at(group_id: int) -> None:
@@ -298,7 +300,7 @@ async def get_admin_groups(admin_id: int) -> List[Dict]:
             try:
                 await cleanup_group_data(group_id)
             except Exception as e:
-                logger.error(f"Failed to cleanup inaccessible group {group_id}: {e}")
+                logger.error(f"Failed to cleanup inaccessible group {format_chat_log(group_id)}: {e}")
 
         return groups
 
@@ -451,20 +453,26 @@ async def update_group_admins(
     group_id: int,
     admin_ids: List[int],
     admin_usernames: Optional[List[Optional[str]]] = None,
+    group_title: Optional[str] = None,
+    group_username: Optional[str] = None,
 ) -> None:
     """Update list of group administrators with optional usernames"""
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            # Ensure group exists
+            # Ensure group exists, updating title/username when provided
             await conn.execute(
                 """
-                INSERT INTO groups (group_id, moderation_enabled, created_at, last_active)
-                VALUES ($1, TRUE, NOW(), NOW())
+                INSERT INTO groups (group_id, title, username, moderation_enabled, created_at, last_active)
+                VALUES ($1, $2, $3, TRUE, NOW(), NOW())
                 ON CONFLICT (group_id) DO UPDATE
-                SET last_active = NOW()
+                SET last_active = NOW(),
+                    title = COALESCE(EXCLUDED.title, groups.title),
+                    username = COALESCE(EXCLUDED.username, groups.username)
                 """,
                 group_id,
+                group_title,
+                group_username,
             )
 
             # Handle both old format (just IDs) and new format (IDs with usernames)

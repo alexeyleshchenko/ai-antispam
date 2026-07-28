@@ -15,7 +15,9 @@ from ..common.notifications import notify_admins_with_fallback_and_cleanup
 
 from ..common.utils import (
     determine_effective_user_id,
+    format_chat_log,
     format_chat_or_channel_display,
+    format_user_log,
     get_project_channel_url,
     get_setup_guide_url,
     get_spam_guide_url,
@@ -90,7 +92,8 @@ async def handle_spam(
             return "spam_no_user_info"
         await handle_spam_message_deletion(message, admin_ids)
         await ban_user_for_spam(
-            message.chat.id, effective_user_id, admin_ids, message.chat.title
+            message.chat.id, effective_user_id, admin_ids, message.chat.title,
+            group_username=getattr(message.chat, "username", None),
         )
         return "spam_auto_deleted"
 
@@ -201,7 +204,7 @@ async def handle_permission_error(
         return False
 
     logger.warning(
-        f"Cannot {action_description} in chat {chat_id}: {error}",
+        f"Cannot {action_description} in chat {format_chat_log(chat_id, group_title, group_username)}: {error}",
         exc_info=True,
     )
     await set_no_rights_detected_at(chat_id)
@@ -428,14 +431,14 @@ async def handle_spam_message_deletion(
 
         await delete_spam_message()
         logger.info(
-            f"Deleted spam message {message.message_id} in chat {message.chat.id}"
+            f"Deleted spam message {message.message_id} in chat {format_chat_log(message.chat.id, message.chat.title, getattr(message.chat, 'username', None))}"
         )
     except (TelegramBadRequest, TelegramForbiddenError) as e:
         if is_group_inaccessible_error(e):
             logger.info(
                 "Cannot delete spam message %s in chat %s (group inaccessible): %s",
                 message.message_id,
-                message.chat.id,
+                format_chat_log(message.chat.id, message.chat.title, getattr(message.chat, "username", None)),
                 e,
             )
             return
@@ -443,7 +446,7 @@ async def handle_spam_message_deletion(
             logger.debug(
                 "Spam message %s already deleted in chat %s: %s",
                 message.message_id,
-                message.chat.id,
+                format_chat_log(message.chat.id, message.chat.title, getattr(message.chat, "username", None)),
                 e,
             )
             return
@@ -460,7 +463,7 @@ async def handle_spam_message_deletion(
             lang=lang,
         ):
             logger.warning(
-                f"Could not delete spam message {message.message_id} in chat {message.chat.id}: {e}",
+                f"Could not delete spam message {message.message_id} in chat {format_chat_log(message.chat.id, message.chat.title, getattr(message.chat, 'username', None))}: {e}",
                 exc_info=True,
             )
 
@@ -470,6 +473,7 @@ async def ban_user_for_spam(
     user_id: int,
     admin_ids: list[int] | None = None,
     group_title: str | None = None,
+    group_username: str | None = None,
 ) -> None:
     """Ban user/channel in chat and remove from approved_members."""
     try:
@@ -482,13 +486,13 @@ async def ban_user_for_spam(
             return await bot.ban_chat_member(chat_id, user_id)
 
         await ban_spam_user()
-        logger.info(f"Banned user {user_id} in chat {chat_id} for spam")
+        logger.info(f"Banned user {format_user_log(user_id)} in chat {format_chat_log(chat_id, group_title, group_username)} for spam")
     except (TelegramBadRequest, TelegramForbiddenError) as e:
         if is_group_inaccessible_error(e):
             logger.info(
                 "Cannot ban user %s in chat %s (group inaccessible): %s",
-                user_id,
-                chat_id,
+                format_user_log(user_id),
+                format_chat_log(chat_id, group_title, group_username),
                 e,
             )
             return
@@ -501,20 +505,21 @@ async def ban_user_for_spam(
             group_title,
             perm_name,
             "ban user",
+            group_username,
             lang=lang,
         ):
             logger.warning(
-                f"Failed to ban user {user_id} in chat {chat_id}: {e}", exc_info=True
+                f"Failed to ban user {format_user_log(user_id)} in chat {format_chat_log(chat_id, group_title, group_username)}: {e}", exc_info=True
             )
     except Exception as e:
         logger.warning(
-            f"Failed to ban user {user_id} in chat {chat_id}: {e}", exc_info=True
+            f"Failed to ban user {format_user_log(user_id)} in chat {format_chat_log(chat_id, group_title, group_username)}: {e}", exc_info=True
         )
     try:
         await remove_member_from_group(user_id, chat_id)
     except Exception as e:
         logger.warning(
-            f"Failed to remove user {user_id} from approved_members: {e}", exc_info=True
+            f"Failed to remove user {format_user_log(user_id)} from approved_members: {e}", exc_info=True
         )
 
 

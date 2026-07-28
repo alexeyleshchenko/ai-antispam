@@ -197,7 +197,13 @@ async def _handle_bot_added(
 
     # Add only the admin who added the bot (with username if available)
     admin_username = getattr(event.from_user, "username", None)
-    await update_group_admins(chat_id, [admin_id], [admin_username])
+    await update_group_admins(
+        chat_id,
+        [admin_id],
+        [admin_username],
+        group_title=chat_title if chat_title != "Unnamed Group" else None,
+        group_username=getattr(event.chat, "username", None),
+    )
 
     has_admin_rights = (
         new_status == "administrator"
