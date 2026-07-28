@@ -19,3 +19,4 @@ admin_ids.txt
 scripts/broadcast_sent.ids
 src/ai_antispam.egg-info/
 src/tg_ai_blocker.egg-info/
+.secrets/
