@@ -13,17 +13,19 @@ from ..common.bot import bot
 from ..common.notifications import perform_complete_group_cleanup
 from ..common.telegram_errors import is_group_inaccessible_error
 from ..common.utils import (
+    format_chat_log,
     format_chat_or_channel_display,
+    format_user_log,
     get_add_to_group_url,
     load_config,
     send_admin_dm,
 )
-from ..i18n import resolve_lang, t
 from ..database import get_admin, get_group
 from ..database.group_operations import (
     clear_no_rights_detected_at,
     get_groups_with_no_rights_past_grace,
 )
+from ..i18n import resolve_lang, t
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +45,7 @@ async def _leave_group_and_record_for_notification(
         )
     except Exception:
         display = str(group_id)
-    success = await perform_complete_group_cleanup(group_id)
+    success = await perform_complete_group_cleanup(group_id, title, username)
     if success and group and group.admin_ids:
         for admin_id in group.admin_ids:
             if admin_id not in admin_to_left_groups:
@@ -78,17 +80,17 @@ async def leave_no_rights_groups() -> None:
                 and getattr(member, "can_restrict_members", False)
             ):
                 await clear_no_rights_detected_at(group_id)
-                logger.info(f"Rights restored in group {group_id}, cleared flag")
+                logger.info(f"Rights restored in group {format_chat_log(group_id)}, cleared flag")
                 skip_leave = True
         except Exception as e:
             if is_group_inaccessible_error(e):
                 logger.info(
-                    f"Group {group_id} already inaccessible during rights check, "
+                    f"Group {format_chat_log(group_id)} already inaccessible during rights check, "
                     "proceeding with stale cleanup"
                 )
             else:
                 logger.warning(
-                    f"Error checking rights in group {group_id}: {e}",
+                    f"Error checking rights in group {format_chat_log(group_id)}: {e}",
                     exc_info=True,
                 )
 
@@ -98,13 +100,13 @@ async def leave_no_rights_groups() -> None:
                     group_id, admin_to_left_groups
                 )
                 if success:
-                    logger.info(f"Left no-rights group {group_id}")
+                    logger.info(f"Left no-rights group {format_chat_log(group_id)}")
                 else:
                     logger.warning(
-                        f"Failed to leave group {group_id} (unexpected cleanup failure)"
+                        f"Failed to leave group {format_chat_log(group_id)} (unexpected cleanup failure)"
                     )
             except Exception as cleanup_e:
-                logger.warning(f"Cleanup failed for {group_id}: {cleanup_e}")
+                logger.warning(f"Cleanup failed for {format_chat_log(group_id)}: {cleanup_e}")
 
     # Notify each admin about their left groups
     for admin_id, groups_list in admin_to_left_groups.items():
@@ -125,5 +127,5 @@ async def leave_no_rights_groups() -> None:
         )
         await send_admin_dm(admin_id, text, log_context="no-rights")
         logger.info(
-            f"Notified admin {admin_id} about {len(groups_list)} no-rights leaves"
+            f"Notified admin {format_user_log(admin_id)} about {len(groups_list)} no-rights leaves"
         )

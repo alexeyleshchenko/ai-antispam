@@ -13,7 +13,7 @@ from aiogram.client.bot import Bot
 from aiogram.exceptions import TelegramForbiddenError
 
 from ...common.userbot_messaging import send_userbot_dm
-from ...common.utils import format_chat_or_channel_display, retry_on_network_error
+from ...common.utils import format_chat_log, format_chat_or_channel_display, format_user_log, retry_on_network_error
 from ...i18n import normalize_lang, t
 
 logger = logging.getLogger(__name__)
@@ -60,7 +60,7 @@ async def get_discussion_username(chat: types.Chat, bot: Bot) -> str | None:
             return getattr(discussion_chat, "username", None)
         except Exception as e:
             logger.warning(
-                f"Failed to get linked discussion group {linked_chat_id}: {e}"
+                f"Failed to get linked discussion group {format_chat_log(linked_chat_id)}: {e}"
             )
     return None
 
@@ -148,7 +148,7 @@ async def notify_channel_admins(
         admins = await bot.get_chat_administrators(chat.id)
     except Exception as e:
         logger.warning(
-            f"Failed to get channel admins for {chat.id}: {e}", exc_info=True
+            f"Failed to get channel admins for {format_chat_log(chat.id, chat.title, getattr(chat, 'username', None))}: {e}", exc_info=True
         )
         return notified_admins
 
@@ -167,7 +167,7 @@ async def notify_channel_admins(
             notified_admins.append(admin_id)
         except Exception as e:
             logger.warning(
-                f"Failed to send instruction to admin {admin_id}: {e}", exc_info=True
+                f"Failed to send instruction to admin {format_user_log(admin_id, admin.user.full_name, getattr(admin.user, 'username', None))}: {e}", exc_info=True
             )
 
     return notified_admins
@@ -224,11 +224,11 @@ async def notify_channel_admins_and_leave(
         notified_admins = await notify_channel_admins(chat, instruction, bot)
         await bot.leave_chat(chat.id)
         logger.info(
-            f"Bot left channel {chat.id} after notifying {len(notified_admins)} admins."
+            f"Bot left channel {format_chat_log(chat.id, channel_title, channel_username)} after notifying {len(notified_admins)} admins."
         )
     except TelegramForbiddenError as e:
         logger.warning(
-            f"Bot API failed for channel {chat.id} (e.g. bot not a member): {e}"
+            f"Bot API failed for channel {format_chat_log(chat.id, channel_title, channel_username)} (e.g. bot not a member): {e}"
         )
         # Fallback: userbot DM to adding user if they have username
         adding_username = (

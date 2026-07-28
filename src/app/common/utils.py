@@ -194,6 +194,38 @@ def format_chat_or_channel_display(
     return f"{display_title} (@{username})" if username else display_title
 
 
+def format_chat_log(
+    chat_id: int,
+    title: Optional[str] = None,
+    username: Optional[str] = None,
+) -> str:
+    """Format a chat ID for log messages: "-100123 ('My Group' @mygroup)" or "-100123"."""
+    if title or username:
+        parts = []
+        if title:
+            parts.append(f"'{title}'")
+        if username:
+            parts.append(f"@{username}")
+        return f"{chat_id} ({' '.join(parts)})"
+    return str(chat_id)
+
+
+def format_user_log(
+    user_id: int,
+    name: Optional[str] = None,
+    username: Optional[str] = None,
+) -> str:
+    """Format a user ID for log messages: "123 ('John' @john)" or "123"."""
+    if name or username:
+        parts = []
+        if name:
+            parts.append(f"'{name}'")
+        if username:
+            parts.append(f"@{username}")
+        return f"{user_id} ({' '.join(parts)})"
+    return str(user_id)
+
+
 def sanitize_llm_html(text: str) -> str:
     """
     Sanitizes LLM-generated HTML content, allowing only safe Telegram HTML tags.

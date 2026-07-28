@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 from aiogram import types
 
 from ...common.bot import bot
+from ...common.utils import format_chat_log
 from ...database import get_group
 from ...database.group_operations import is_trusted_member
 from ...database.models import Group
@@ -90,7 +91,7 @@ async def check_skip_channel_bot_message(message: types.Message) -> Tuple[bool, 
     # Attempt API fetch if needed
     if should_attempt_api_fetch(message, linked_chat_id):
         linked_chat_id = await fetch_linked_chat_id(message.chat.id)
-        logger.debug(f"Fetched linked_chat_id via API: {linked_chat_id}")
+        logger.debug(f"Fetched linked_chat_id via API: {format_chat_log(linked_chat_id) if linked_chat_id is not None else 'None'}")
 
         if is_channel_bot_in_discussion(message, linked_chat_id):
             logger.debug(
@@ -130,7 +131,7 @@ async def fetch_linked_chat_id(chat_id: int) -> Optional[int]:
         chat_info = await bot.get_chat(chat_id)
         return getattr(chat_info, "linked_chat_id", None)
     except Exception as e:
-        logger.warning(f"Failed to fetch linked_chat_id via API: {e}")
+        logger.warning(f"Failed to fetch linked_chat_id via API for {format_chat_log(chat_id)}: {e}")
         return None
 
 
@@ -188,7 +189,7 @@ async def get_and_check_group(chat_id: int) -> Tuple[Optional[Group], str]:
     group = await get_group(chat_id)
 
     if not group:
-        logger.info(f"Group not found for chat {chat_id}")
+        logger.info(f"Group not found for chat {format_chat_log(chat_id)}")
         return None, "error_message_group_not_found"
 
     if not group.moderation_enabled:

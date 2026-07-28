@@ -8,7 +8,7 @@ from ..common.telegram_errors import is_message_not_found_error, is_permission_e
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from ..common.bot import bot
-from ..common.utils import get_add_to_group_url, retry_on_network_error
+from ..common.utils import get_add_to_group_url, format_chat_log, retry_on_network_error
 from ..database import get_admin, get_group, update_admin_language
 from ..common.utils import load_config
 from ..database.group_operations import add_member, set_moderation_events
@@ -276,12 +276,12 @@ async def handle_spam_confirm_callback(callback: CallbackQuery) -> str:
         except TelegramBadRequest as e:
             if is_message_not_found_error(e):
                 logger.info(
-                    f"Message to delete not found (likely already deleted): {chat_id}:{message_id}"
+                    f"Message to delete not found (likely already deleted): {format_chat_log(chat_id)}:{message_id}"
                 )
                 delete_succeeded = True
             elif is_permission_error(e):
                 logger.info(
-                    f"Cannot delete message (no permission or too old): {chat_id}:{message_id}: {e}"
+                    f"Cannot delete message (no permission or too old): {format_chat_log(chat_id)}:{message_id}: {e}"
                 )
                 await callback.answer(
                     t(lang, "callback.delete_no_permission"), show_alert=True
