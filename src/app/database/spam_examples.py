@@ -96,7 +96,13 @@ async def cleanup_pending_spam_examples(days: int = 3) -> int:
 async def confirm_pending_example_as_not_spam(
     pending_id: int, admin_id: int
 ) -> Optional[Dict[str, Any]]:
-    """Mark pending example as not spam. Returns chat_id, message_id, effective_user_id or None."""
+    """Mark pending example as not spam.
+
+    Returns:
+        dict with chat_id/message_id/effective_user_id on success,
+        {"already_confirmed": True} if the record was already handled (double-tap),
+        None if the record doesn't exist at all.
+    """
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -110,6 +116,13 @@ async def confirm_pending_example_as_not_spam(
             pending_id,
         )
         if not row or row["chat_id"] is None:
+            # Distinguish double-tap (record exists, already confirmed)
+            # from genuinely missing record.
+            exists = await conn.fetchval(
+                "SELECT true FROM spam_examples WHERE id = $1", pending_id
+            )
+            if exists:
+                return {"already_confirmed": True}
             return None
         return {
             "chat_id": row["chat_id"],
