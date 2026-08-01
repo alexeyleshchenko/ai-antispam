@@ -67,6 +67,8 @@ async def handle_update(request: web.Request) -> web.Response:
             status=400,
         )
 
+    log_update_received(json)
+
     start_time = time.time()
 
     with logfire.span(extract_chat_or_user(json), update=json) as span:
@@ -106,6 +108,39 @@ async def handle_update(request: web.Request) -> web.Response:
                 serve_time = max(0.0, time.time() - update_time)
                 span.set_attribute("serve_time", serve_time)
                 serve_time_histogram.record(serve_time)
+
+
+def _update_type(json: dict) -> str:
+    """Return the Telegram update type (the single non-update_id key)."""
+    keys = [k for k in json if k != "update_id"]
+    if len(keys) == 1:
+        return keys[0]
+    return "unknown" if not keys else "multiple"
+
+
+def log_update_received(json: dict) -> None:
+    """Log update_id so duplicate Telegram deliveries can be correlated in the logs.
+
+    callback_query updates (admin button presses — rare) log at INFO with context;
+    every other update type logs at DEBUG to avoid flooding the log stream.
+    """
+    update_id = json.get("update_id")
+    utype = _update_type(json)
+    if utype == "callback_query":
+        cb = json.get("callback_query") or {}
+        from_user = cb.get("from") or {}
+        chat_id = ((cb.get("message") or {}).get("chat") or {}).get("id")
+        logger.info(
+            "Webhook callback_query received: update_id=%s chat=%s from=%s data=%s",
+            update_id,
+            chat_id,
+            from_user.get("username") or from_user.get("id"),
+            cb.get("data"),
+        )
+    else:
+        logger.debug(
+            "Webhook update received: update_id=%s type=%s", update_id, utype
+        )
 
 
 def extract_update_type_ignored(json: dict) -> str:

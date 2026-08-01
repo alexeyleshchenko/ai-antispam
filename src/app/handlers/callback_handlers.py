@@ -354,7 +354,13 @@ async def handle_spam_confirm_callback(callback: CallbackQuery) -> str:
                 )
             except TelegramBadRequest as e:
                 if not is_message_not_found_error(e) and not is_message_not_modified_error(e):
-                    logger.warning(f"Failed to edit notification message: {e}")
+                    logger.warning(
+                        "Failed to edit notification message %s:%s (admin=%s): %s",
+                        msg.chat.id,
+                        msg.message_id,
+                        callback.from_user.id if callback.from_user else None,
+                        e,
+                    )
 
         return "callback_spam_message_deleted"
 
