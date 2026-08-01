@@ -4,7 +4,11 @@ import logging
 
 from aiogram import F, types
 from aiogram.exceptions import TelegramBadRequest
-from ..common.telegram_errors import is_message_not_found_error, is_permission_error
+from ..common.telegram_errors import (
+    is_message_not_found_error,
+    is_message_not_modified_error,
+    is_permission_error,
+)
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from ..common.bot import bot
@@ -349,7 +353,7 @@ async def handle_spam_confirm_callback(callback: CallbackQuery) -> str:
                     reply_markup=None,
                 )
             except TelegramBadRequest as e:
-                if "message to edit not found" not in e.message:
+                if not is_message_not_found_error(e) and not is_message_not_modified_error(e):
                     logger.warning(f"Failed to edit notification message: {e}")
 
         return "callback_spam_message_deleted"
