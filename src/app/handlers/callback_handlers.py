@@ -27,6 +27,23 @@ from .handle_spam import ban_user_for_spam
 logger = logging.getLogger(__name__)
 
 
+async def _answer_safe(
+    callback: CallbackQuery, text: str | None = None, *, show_alert: bool = False
+) -> None:
+    """Answer a callback, swallowing errors (already answered / query too old).
+
+    The Delete-spam handler acks the callback immediately (before any network
+    work) so the Telegram client stops retrying the press — a slow answer causes
+    duplicate updates with fresh update_ids (see #33). Any later outcome popup is
+    then a no-op, so all answers go through this safe wrapper.
+    """
+    with contextlib.suppress(Exception):
+        if text is None:
+            await callback.answer()
+        else:
+            await callback.answer(text, show_alert=show_alert)
+
+
 @dp.callback_query(F.data.startswith("lang_set:"))
 async def handle_lang_set_callback(callback: CallbackQuery) -> str:
     """Handle language selection. Callback data: lang_set:ru or lang_set:en."""
@@ -281,6 +298,11 @@ async def handle_spam_confirm_callback(callback: CallbackQuery) -> str:
             await callback.answer(t(lang, "callback.invalid_callback"), show_alert=True)
             return "callback_invalid_message"
 
+        # Ack immediately, before any network work, so the Telegram client stops
+        # retrying the press (duplicate updates — see #33). Outcome feedback is
+        # conveyed via the notification-message edit below.
+        await _answer_safe(callback)
+
         delete_succeeded = False
         try:
 
@@ -300,26 +322,28 @@ async def handle_spam_confirm_callback(callback: CallbackQuery) -> str:
                 logger.info(
                     f"Cannot delete message (no permission or too old): {format_chat_log(chat_id)}:{message_id}: {e}"
                 )
-                await callback.answer(
-                    t(lang, "callback.delete_no_permission"), show_alert=True
+                await _answer_safe(
+                    callback, t(lang, "callback.delete_no_permission"), show_alert=True
                 )
             else:
                 logger.warning(
                     f"Failed to delete original spam message: {e}", exc_info=True
                 )
-                await callback.answer(
-                    t(lang, "callback.delete_failed"), show_alert=True
+                await _answer_safe(
+                    callback, t(lang, "callback.delete_failed"), show_alert=True
                 )
                 return "callback_error_deleting_original"
         except Exception as e:
             logger.warning(
                 f"Failed to delete original spam message: {e}", exc_info=True
             )
-            await callback.answer(t(lang, "callback.delete_failed"), show_alert=True)
+            await _answer_safe(
+                callback, t(lang, "callback.delete_failed"), show_alert=True
+            )
             return "callback_error_deleting_original"
 
         if delete_succeeded:
-            await callback.answer(f"✅ {t(lang, 'callback.spam_deleted')}")
+            await _answer_safe(callback, f"✅ {t(lang, 'callback.spam_deleted')}")
 
         await confirm_pending_example_as_spam(
             chat_id, message_id, callback.from_user.id
