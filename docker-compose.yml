@@ -2,7 +2,11 @@ services:
   ai-antispam:
     image: ${GHCR_IMAGE:-ghcr.io/leshchenko1979/ai-antispam}:${IMAGE_TAG:-main}
     container_name: ai-antispam
-    mem_limit: 256mb
+    # aiogram 3.30 alone needs ~234 MiB (it compiles the entire Bot API as
+    # pydantic models); idle footprint is ~293 MiB. A 256mb limit caused an OOM
+    # crash-loop (RestartCount=9) -> webhook retries -> "duplicate taps".
+    # See docs/memos/2026-08-01-aiogram-memory-memo.md. Do not lower below 512mb.
+    mem_limit: 512mb
     mem_reservation: 128mb
     cpus: 0.5
     restart: unless-stopped
