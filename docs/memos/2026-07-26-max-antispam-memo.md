@@ -106,6 +106,8 @@ We accept a 30–40% accuracy hit on spam detection in exchange for entering the
 | Green-API wrapper (most stable) is SaaS / commercial; lock-in risk | Low | Don't use it; direct REST is stable |
 | Inline button `payload` not restricted to 64 bytes like Telegram's `callback_data` | Low | Store full state in `pending` row keyed by id; send only id in payload |
 | No payment means free spam checks eat real LLM cost | Medium | Rate-limit by IP/chat_id; require admin to set monthly cap; show "remaining checks" counter |
+| User stories Trojan horse | **High** | Stories invisible to Bot API; spammer posts benign comments + ads in stories. No MTProto fallback (ESIA ban risk). Compounds comment showstopper. |
+| Channel stories (end of summer 2026) | Medium | Second vector: spam ads in channel stories, also invisible to bots. |
 
 ## Estimated effort
 
@@ -382,6 +384,34 @@ user_id `190126855` (Алексей Лещенко) = owner, NEVER moderate/dele
 
 ---
 
+---
+
+## User stories — zero Bot API surface (investigated 2026-07-31)
+
+User stories GA'd on MAX **15 July 2026** (mobile/web clients only). Channel stories announced for "end of summer 2026". As of 31 July 2026, **no Bot API endpoint, SDK method, update type, or changelog entry exists for stories** — confirmed across all five independent SDK sources:
+
+| Source | Stories? |
+|---|---|
+| Official Go SDK (`max-messenger/max-bot-api-client-go`) | ❌ No `/stories` path in `const.go` |
+| Official TS SDK (`max-messenger/max-bot-api-client-ts`) | ❌ No stories module |
+| Python SDK (`love-apples/maxapi`) | ❌ `ApiPath` enum: 12 paths, none stories; `UpdateType`: 17 types, none story-related |
+| Rust SDK (`maxoxide`) + PHP port | ❌ Full 31-method table, no stories |
+| Java SDK (`wilidon/max-bot-api-java`) | ❌ "all 31 MAX Bot API methods" — no stories |
+
+The complete API surface is: `/me`, `/chats`, `/messages`, `/updates`, `/videos`, `/answers`, `/actions`, `/pin`, `/members`, `/admins`, `/uploads`, `/subscriptions`. No `/stories`.
+
+**Trojan horse attack vector:** A spammer posts benign comments (passes LLM + keyword checks) while their **stories carry the actual ads**. On Telegram this is mitigated because `stories.py` feeds story content into the LLM prompt via the `tg-mcp.l1979.ru` MTProto bridge. On MAX, stories are a **completely blind spot** — no Bot API, no MTProto equivalent, and mobile-API reverse-engineering carries permanent ban risk (ESIA/Gosuslugi identity). This compounds the existing 30–40% accuracy hit from the comment showstopper.
+
+**Compensating signals (all that's available on MAX):** bio-text heuristics, username shape (`id<digits>`), `join_time` recency, `is_bot` flag. A user matching `id<digits>` + empty bio + recent join + benign comments is the exact Trojan horse profile — and unverifiable via stories.
+
+**Channel stories** (coming "end of summer 2026") will open a second vector: spam ads in channel stories, also invisible to bots.
+
+**Sources (added this update):**
+44. https://github.com/max-messenger/max-bot-api-client-go/blob/main/internal/api/const.go
+45. https://github.com/love-apples/maxapi/blob/main/maxapi/api/client.py (ApiPath + UpdateType enums)
+46. https://github.com/maxoxide/maxoxide/blob/main/src/client.rs (full method table)
+47. https://github.com/wilidon/max-bot-api-java (31-method inventory)
+48. https://telegraphyx.ru/blog/istorii-v-max-2026/ (stories GA timeline)
 ## STATUS: POSTPONED — 2026-07-28
 
 **Decision:** Do not build. Re-test on or after **11 August 2026**.
@@ -406,7 +436,8 @@ user_id `190126855` (Алексей Лещенко) = owner, NEVER moderate/dele
 2. Check official SDK repos for new methods (`get_comments`, `get_replies`, comment event types)
 3. Restart webhook listener + tunnel, re-register subscription
 4. Post + comment in test channel, verify `message_created` with `sender` field
-5. If events arrive → proceed to implementation. If not → postpone another 2 weeks or pivot.
+5. **Stories API** — probe for `/stories` endpoints, story update types, and SDK methods across all five SDKs (Go, TS, Python, Rust, Java). Check dev.max.ru changelog. If stories endpoints appear, assess Trojan horse mitigation.
+6. If events arrive → proceed to implementation. If not → postpone another 2 weeks or pivot.
 
 **Cron reminder set:** 11 Aug 2026, this session.
 
