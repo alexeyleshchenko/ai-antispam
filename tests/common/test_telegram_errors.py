@@ -14,7 +14,6 @@ from src.app.common.telegram_errors import (
     is_bot_to_bot_disabled_error,
     is_group_inaccessible_error,
     is_message_not_found_error,
-    is_message_not_modified_error,
     is_permission_error,
     is_user_blocked_error,
     is_webhook_retryable,
@@ -224,40 +223,3 @@ def test_is_bot_kicked_error_wrong_type():
 def test_is_bot_kicked_error_non_telegram():
     """Non-Telegram errors should not match."""
     assert is_bot_kicked_error(RuntimeError("network")) is False
-
-
-# ─── is_message_not_modified_error ───────────────────────────────────────────
-
-
-def test_is_message_not_modified_error_true():
-    """'message is not modified' (no-op edit) should match TelegramBadRequest."""
-    err = TelegramBadRequest(
-        method=MagicMock(),
-        message=(
-            "Bad Request: message is not modified: specified new message content "
-            "and reply markup are exactly the same as a current content and reply "
-            "markup of the message"
-        ),
-    )
-    assert is_message_not_modified_error(err) is True
-
-
-def test_is_message_not_modified_error_case_insensitive():
-    """Matching should be case-insensitive."""
-    err = TelegramBadRequest(
-        method=MagicMock(), message="Bad Request: MESSAGE IS NOT MODIFIED"
-    )
-    assert is_message_not_modified_error(err) is True
-
-
-def test_is_message_not_modified_error_unrelated():
-    """Unrelated BadRequest should not match."""
-    err = TelegramBadRequest(
-        method=MagicMock(), message="Bad Request: message to edit not found"
-    )
-    assert is_message_not_modified_error(err) is False
-
-
-def test_is_message_not_modified_error_non_telegram():
-    """Non-Telegram errors should not match."""
-    assert is_message_not_modified_error(RuntimeError("network")) is False

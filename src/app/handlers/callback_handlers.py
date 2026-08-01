@@ -4,11 +4,7 @@ import logging
 
 from aiogram import F, types
 from aiogram.exceptions import TelegramBadRequest
-from ..common.telegram_errors import (
-    is_message_not_found_error,
-    is_message_not_modified_error,
-    is_permission_error,
-)
+from ..common.telegram_errors import is_message_not_found_error, is_permission_error
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from ..common.bot import bot
@@ -203,7 +199,7 @@ async def handle_spam_ignore_callback(callback: CallbackQuery) -> str:
             f"{message_text}\n\n✅ <b>{t(lang, 'callback.safe_added')}</b>"
         )
 
-        if row and "chat_id" in row:
+        if row:
             group_id = row["chat_id"]
             effective_user_id = row["effective_user_id"]
 
@@ -236,23 +232,10 @@ async def handle_spam_ignore_callback(callback: CallbackQuery) -> str:
                         reply_markup=None,
                     )
                 )
-        elif row and row.get("already_confirmed"):
-            logger.debug(
-                "mark_as_not_spam: pending %s already handled (duplicate tap), skipping",
-                pending_id,
-            )
-            with contextlib.suppress(Exception):
-                await bot.edit_message_text(
-                    chat_id=callback.message.chat.id,
-                    message_id=callback.message.message_id,
-                    text=updated_message_text,
-                    parse_mode="HTML",
-                    reply_markup=None,
-                )
         else:
             logger.warning(
-                "mark_as_not_spam: pending record %s not found, skipping unban/add",
-                pending_id,
+                "mark_as_not_spam: pending record not found, skipping unban/add",
+                extra={"pending_id": pending_id},
             )
             with contextlib.suppress(Exception):
                 await bot.edit_message_text(
@@ -377,7 +360,7 @@ async def handle_spam_confirm_callback(callback: CallbackQuery) -> str:
                     reply_markup=None,
                 )
             except TelegramBadRequest as e:
-                if not is_message_not_found_error(e) and not is_message_not_modified_error(e):
+                if not is_message_not_found_error(e):
                     logger.warning(
                         "Failed to edit notification message %s:%s (admin=%s): %s",
                         msg.chat.id,

@@ -38,8 +38,6 @@ _MESSAGE_NOT_FOUND_MARKERS = (
     "message not found",
 )
 
-_MESSAGE_NOT_MODIFIED_MARKERS = ("message is not modified",)
-
 _BOT_TO_BOT_DISABLED_MARKERS = (
     "user_bot_to_bot_disabled",
 )
@@ -71,18 +69,6 @@ def is_message_not_found_error(error: Exception) -> bool:
     if isinstance(error, (TelegramBadRequest, TelegramNotFound)):
         return _error_message_contains(error, _MESSAGE_NOT_FOUND_MARKERS)
     return False
-
-
-def is_message_not_modified_error(error: Exception) -> bool:
-    """True when an edit is a no-op (message already has the desired content/markup).
-
-    Benign: raised when a callback update is processed more than once (Telegram
-    webhook redelivery) and an earlier pass already applied the edit. Safe to
-    downgrade to DEBUG — no genuine failure hides inside this error.
-    """
-    if not isinstance(error, TelegramBadRequest):
-        return False
-    return _error_message_contains(error, _MESSAGE_NOT_MODIFIED_MARKERS)
 
 
 def is_bot_to_bot_disabled_error(error: Exception) -> bool:
