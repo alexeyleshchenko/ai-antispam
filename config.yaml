@@ -29,7 +29,8 @@ llm:
   http_client_timeout_seconds: 60 # httpx client total (retries / transport)
   openrouter_models:
     - nvidia/nemotron-3-super-120b-a12b:free
-    - openai/gpt-oss-120b:free
+    - nvidia/nemotron-3-ultra-550b-a55b:free
+    - inclusionai/ling-3.0-flash:free
 
 spam:
   high_confidence_threshold: 90
