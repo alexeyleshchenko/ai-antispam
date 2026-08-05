@@ -11,10 +11,13 @@ RUN pip install --no-cache-dir uv
 COPY pyproject.toml ./
 COPY uv.lock ./
 
-# Install deps with BuildKit cache mount for wheel cache
-# Cache persists across builds
+# Install deps strictly from the lockfile for reproducible builds.
+# `uv export --no-emit-project` materializes a requirements.txt of pure deps
+# from uv.lock (no project build needed), so the deps layer stays cached
+# independently of src/ changes.
 RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
-    uv pip install --system -r pyproject.toml
+    uv export --frozen --no-dev --no-editable --no-emit-project -o /tmp/requirements.txt && \
+    pip install --no-cache-dir -r /tmp/requirements.txt
 
 # Stage 2: runner
 FROM python:3.14-alpine
