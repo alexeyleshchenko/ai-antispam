@@ -521,3 +521,35 @@ async def update_group_admins(
                     group_id,
                     admin_id,
                 )
+
+
+async def upsert_awaiting_rights_group(
+    group_id: int,
+    group_title: Optional[str] = None,
+    group_username: Optional[str] = None,
+) -> None:
+    """Upsert a group row as known-but-inactive (awaiting admin rights).
+
+    Used when Telegram auto-adds the bot to a channel's linked discussion group:
+    the bot is a plain member with no moderation rights yet. The row is registered
+    with moderation_enabled=false so the group is tracked but not moderated until
+    the owner promotes the bot to admin; promotion flips it active via the normal
+    permission-update path. Idempotent: re-running (auto-add before/after the
+    channel handler) never errors and never resets an active group.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                INSERT INTO groups (group_id, title, username, moderation_enabled, created_at, last_active)
+                VALUES ($1, $2, $3, FALSE, NOW(), NOW())
+                ON CONFLICT (group_id) DO UPDATE
+                SET last_active = NOW(),
+                    title = COALESCE(EXCLUDED.title, groups.title),
+                    username = COALESCE(EXCLUDED.username, groups.username)
+                """,
+                group_id,
+                group_title,
+                group_username,
+            )

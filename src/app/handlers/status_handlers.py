@@ -26,7 +26,13 @@ from ..common.utils import (
     get_add_to_group_url,
     retry_on_network_error,
 )
-from ..database import deactivate_admin, get_admin, get_group, update_group_admins
+from ..database import (
+    deactivate_admin,
+    get_admin,
+    get_group,
+    update_group_admins,
+    upsert_awaiting_rights_group,
+)
 from ..database.group_operations import (
     clear_no_rights_detected_at,
     set_no_rights_detected_at,
@@ -46,6 +52,53 @@ async def _resolve_lang(admin_ids: list[int] | None, fallback: str = "en") -> st
     if admin and admin.language_code:
         return normalize_lang(admin.language_code)
     return fallback
+
+
+async def _get_bot_id() -> int:
+    """Resolve the bot's own Telegram user id (needed for auto-add detection)."""
+    me = await bot.get_me()
+    return me.id
+
+
+async def _is_auto_add_discussion_update(event: types.ChatMemberUpdated) -> bool:
+    """True when Telegram auto-adds the bot to a channel's linked discussion group.
+
+    Spike-verified signature (issue #34): the update targets a supergroup (the
+    linked discussion chat), the actor is the bot ITSELF (Telegram emits the event
+    from the bot), and the transition is left → member/administrator. NOTE: the
+    payload has NO `linked_chat_id` (spike-0 finding) — it cannot be part of the
+    signature; only `getChat` exposes it.
+    """
+    return (
+        event.chat.type == "supergroup"
+        and event.from_user.id == await _get_bot_id()
+        and event.old_chat_member.status == "left"
+        and event.new_chat_member.status in ("member", "administrator", "restricted")
+    )
+
+
+async def _handle_auto_added_discussion(
+    event: types.ChatMemberUpdated,
+    chat_id: int,
+    chat_title: str,
+) -> None:
+    """Register a discussion group Telegram auto-added the bot to (awaiting rights).
+
+    Never destructive: the actor is the bot itself, so the normal no-rights DM
+    path would DM the bot, fail, and trigger group cleanup (the Valeri trace
+    wiped the discussion row). Instead, upsert the group as known-but-inactive
+    (moderation_enabled=false); a later human promotion to admin flips it active
+    via the existing permission-update path. Idempotent vs the channel handler.
+    """
+    logger.info(
+        "Bot auto-added to linked discussion group %s ('%s') — registering as awaiting rights",
+        chat_id, chat_title,
+    )
+    await upsert_awaiting_rights_group(
+        chat_id,
+        chat_title if chat_title != "Unnamed Group" else None,
+        getattr(event.chat, "username", None),
+    )
 
 
 @dp.my_chat_member()
@@ -70,6 +123,14 @@ async def handle_bot_status_update(event: types.ChatMemberUpdated) -> str:
         return "bot_status_private_other"
 
     try:
+        # Telegram auto-add: the bot was silently added to a channel's linked
+        # discussion group. Handle BEFORE the generic add path — the actor is the
+        # bot itself, so the normal no-rights DM flow would DM the bot, fail, and
+        # wipe the group row (the Valeri bug).
+        if await _is_auto_add_discussion_update(event):
+            await _handle_auto_added_discussion(event, chat_id, chat_title)
+            return "bot_auto_added_discussion"
+
         if new_status == old_status:
             await _handle_permission_update(event, chat_id, admin_id, chat_title)
             return "bot_permissions_updated"
