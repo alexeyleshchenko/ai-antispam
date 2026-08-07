@@ -8,6 +8,7 @@ to administrators when the bot is incorrectly added to channels.
 import asyncio
 import contextlib
 import logging
+from typing import Set
 
 from aiogram import types
 from aiogram.client.bot import Bot
@@ -19,6 +20,44 @@ from ...i18n import normalize_lang, t
 
 logger = logging.getLogger(__name__)
 
+# Channel ids whose linked discussion groups the bot is actively protecting.
+# Seeded at startup from the DB; protects against a channel_post self-leave
+# when the bot is correctly placed (protect mode) rather than wrongly added.
+_protected_channel_ids: Set[int] = set()
+
+
+async def _seed_protected_channels() -> None:
+    """Load protected channel ids from the DB at startup."""
+    try:
+        from ...database.group_operations import get_protected_channel_ids
+
+        protected = await get_protected_channel_ids()
+        _protected_channel_ids.clear()
+        _protected_channel_ids.update(protected)
+        logger.info(f"Seeded {len(protected)} protected channel(s) from DB")
+    except Exception as e:
+        logger.warning(f"Failed to seed protected channels: {e}", exc_info=True)
+
+
+async def _is_protected_channel(chat_id: int) -> bool:
+    """True when the channel has a discussion group the bot protects.
+
+    In-memory set first (cheap); on a miss, re-check the DB in case the set was
+    seeded before this channel was registered (e.g. a fresh protect registration
+    after startup).
+    """
+    if chat_id in _protected_channel_ids:
+        return True
+    try:
+        from ...database.group_operations import get_protected_channel_ids
+
+        if chat_id in await get_protected_channel_ids():
+            _protected_channel_ids.add(chat_id)
+            return True
+    except Exception as e:
+        logger.debug(f"Protected-channel DB re-check failed for {chat_id}: {e}")
+    return False
+
 
 async def handle_channel_post(message: types.Message) -> str:
     """
@@ -27,6 +66,11 @@ async def handle_channel_post(message: types.Message) -> str:
     When the bot is added to a channel instead of a discussion group,
     it notifies channel administrators with instructions and leaves the channel.
 
+    If the channel is linked to a discussion group the bot is actively
+    protecting (protect mode), the post is ignored — the bot must NOT leave,
+    because leaving the channel would cascade into leaving the discussion group
+    and end protection (Valeri trace, issue #34).
+
     Args:
         message: The channel post message
 
@@ -34,6 +78,9 @@ async def handle_channel_post(message: types.Message) -> str:
         Result identifier string for logging
     """
     try:
+        if await _is_protected_channel(message.chat.id):
+            return "channel_post_ignored_protected"
+
         from ...common.bot import bot
 
         await notify_channel_admins_and_leave(message.chat, bot)
@@ -330,6 +377,7 @@ async def _notify_discussion_added_and_stay(
         discussion_id,
         discussion_title,
         discussion_username,
+        linked_channel_id=chat.id,
     )
 
     discussion_link = (

@@ -186,9 +186,12 @@ class TestDecisionFlowProtectBranch:
 
             # Never leaves
             bot.leave_chat.assert_not_awaited()
-            # Registers the discussion group as awaiting-rights
+            # Registers the discussion group as awaiting-rights (linked to channel)
             mock_upsert.assert_awaited_once_with(
-                -1002222222222, "My Discussion", "discuss"
+                -1002222222222,
+                "My Discussion",
+                "discuss",
+                linked_channel_id=-1001297263491,
             )
             # Sent message is the discussion_added (protect) instruction
             sent = bot.send_message.call_args.args[1]
@@ -394,3 +397,100 @@ class TestPollDiscussionMembership:
             -1002222222222, bot, attempts=3, interval=0.01
         )
         assert result is False
+
+
+class TestProtectedChannelGuard:
+    """handle_channel_post: protected channel never self-leaves."""
+
+    @pytest.mark.asyncio
+    async def test_protected_channel_ignored_no_leave(self):
+        """Protected channel → ignored, no notify/leave."""
+        from src.app.handlers.message.channel_management import (
+            handle_channel_post,
+            _protected_channel_ids,
+        )
+
+        _protected_channel_ids.add(-1001111111111)
+        try:
+            message = MagicMock()
+            message.chat.id = -1001111111111
+
+            with patch(
+                "src.app.handlers.message.channel_management._is_protected_channel",
+                new_callable=AsyncMock,
+                return_value=True,
+            ):
+                result = await handle_channel_post(message)
+            assert result == "channel_post_ignored_protected"
+        finally:
+            _protected_channel_ids.discard(-1001111111111)
+
+    @pytest.mark.asyncio
+    async def test_unprotected_channel_triggers_leave_flow(self):
+        """Unprotected channel → existing leave flow fires."""
+        from src.app.handlers.message.channel_management import (
+            handle_channel_post,
+            _protected_channel_ids,
+        )
+
+        _protected_channel_ids.discard(-1009999999999)
+        try:
+            message = MagicMock()
+            message.chat.id = -1009999999999
+
+            with (
+                patch(
+                    "src.app.handlers.message.channel_management._is_protected_channel",
+                    new_callable=AsyncMock,
+                    return_value=False,
+                ),
+                patch(
+                    "src.app.handlers.message.channel_management.notify_channel_admins_and_leave",
+                    new_callable=AsyncMock,
+                ) as mock_notify,
+            ):
+                result = await handle_channel_post(message)
+            assert result == "channel_post_left_channel"
+            mock_notify.assert_awaited_once()
+        finally:
+            _protected_channel_ids.discard(-1009999999999)
+
+    @pytest.mark.asyncio
+    async def test_is_protected_channel_db_recheck_on_miss(self):
+        """Miss in memory → DB re-check discovers and caches the channel."""
+        from src.app.handlers.message.channel_management import (
+            _is_protected_channel,
+            _protected_channel_ids,
+        )
+
+        _protected_channel_ids.discard(-1001231231231)
+        with patch(
+            "src.app.database.group_operations.get_protected_channel_ids",
+            new_callable=AsyncMock,
+            return_value=[-1001231231231],
+        ):
+            try:
+                assert await _is_protected_channel(-1001231231231) is True
+                assert -1001231231231 in _protected_channel_ids
+            finally:
+                _protected_channel_ids.discard(-1001231231231)
+
+    @pytest.mark.asyncio
+    async def test_seed_protected_channels_from_db(self):
+        """Startup seeding loads distinct protected channel ids."""
+        from src.app.handlers.message.channel_management import (
+            _seed_protected_channels,
+            _protected_channel_ids,
+        )
+
+        _protected_channel_ids.add(-1000000000001)  # stale entry
+        with patch(
+            "src.app.database.group_operations.get_protected_channel_ids",
+            new_callable=AsyncMock,
+            return_value=[-1005555555555, -1006666666666],
+        ):
+            await _seed_protected_channels()
+        try:
+            assert _protected_channel_ids == {-1005555555555, -1006666666666}
+        finally:
+            _protected_channel_ids.clear()

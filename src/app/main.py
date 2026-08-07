@@ -208,6 +208,18 @@ async def _on_startup_scheduled_jobs(app: web.Application) -> None:
     logger.info("Scheduled jobs loop started")
 
 
+async def _on_startup_seed_protected_channels(app: web.Application) -> None:
+    """Seed the in-memory protected-channel set from the DB.
+
+    A channel whose linked discussion group the bot protects must never trigger a
+    self-leave on channel_post (leaving the channel cascades into leaving the
+    discussion group, ending protection — issue #34).
+    """
+    from .handlers.message.channel_management import _seed_protected_channels
+
+    await _seed_protected_channels()
+
+
 async def _on_startup_log_server_started(app: web.Application) -> None:
     logging.warning("Server started")
 
@@ -239,6 +251,7 @@ async def _shutdown(app: web.Application) -> None:
 app.on_startup.append(_on_startup_validate_config)
 app.on_startup.append(_on_startup_setup_bot)
 app.on_startup.append(_on_startup_scheduled_jobs)
+app.on_startup.append(_on_startup_seed_protected_channels)
 app.on_startup.append(_on_startup_log_server_started)
 app.on_shutdown.append(_shutdown)
 

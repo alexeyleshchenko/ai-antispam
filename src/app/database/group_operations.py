@@ -527,6 +527,7 @@ async def upsert_awaiting_rights_group(
     group_id: int,
     group_title: Optional[str] = None,
     group_username: Optional[str] = None,
+    linked_channel_id: Optional[int] = None,
 ) -> None:
     """Upsert a group row as known-but-inactive (awaiting admin rights).
 
@@ -536,20 +537,45 @@ async def upsert_awaiting_rights_group(
     the owner promotes the bot to admin; promotion flips it active via the normal
     permission-update path. Idempotent: re-running (auto-add before/after the
     channel handler) never errors and never resets an active group.
+
+    Args:
+        group_id: The discussion group id
+        group_title: Title of the discussion group
+        group_username: Username of the discussion group, if public
+        linked_channel_id: The channel this discussion group is linked to (used by
+            the channel_post guard to detect protected channels)
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(
                 """
-                INSERT INTO groups (group_id, title, username, moderation_enabled, created_at, last_active)
-                VALUES ($1, $2, $3, FALSE, NOW(), NOW())
+                INSERT INTO groups (group_id, title, username, moderation_enabled, linked_channel_id, created_at, last_active)
+                VALUES ($1, $2, $3, FALSE, $4, NOW(), NOW())
                 ON CONFLICT (group_id) DO UPDATE
                 SET last_active = NOW(),
                     title = COALESCE(EXCLUDED.title, groups.title),
-                    username = COALESCE(EXCLUDED.username, groups.username)
+                    username = COALESCE(EXCLUDED.username, groups.username),
+                    linked_channel_id = COALESCE(EXCLUDED.linked_channel_id, groups.linked_channel_id)
                 """,
                 group_id,
                 group_title,
                 group_username,
+                linked_channel_id,
             )
+
+
+async def get_protected_channel_ids() -> list[int]:
+    """Return distinct channel ids whose discussion groups the bot protects.
+
+    A group row with `linked_channel_id` set means the bot was (auto-)added to
+    the linked discussion group of that channel and registered it for protection
+    (moderation_enabled may be false while awaiting admin rights). Used to seed
+    the in-memory protected-channel set for the channel_post guard.
+    """
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT DISTINCT linked_channel_id FROM groups "
+        "WHERE linked_channel_id IS NOT NULL"
+    )
+    return [row["linked_channel_id"] for row in rows]

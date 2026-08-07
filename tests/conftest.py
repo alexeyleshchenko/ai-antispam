@@ -339,6 +339,7 @@ async def create_sqlite_schema(conn):
             title TEXT,
             username TEXT,
             moderation_enabled BOOLEAN DEFAULT 1,
+            linked_channel_id INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             no_rights_detected_at TIMESTAMP
