@@ -1,10 +1,14 @@
 import pytest
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timezone
 
 from aiogram import types
 
-from src.app.handlers.private_handlers import extract_original_message_info
+from src.app.handlers.private_handlers import (
+    _append_spam_cleanup_tasks,
+    extract_original_message_info,
+)
 
 
 class TestExtractOriginalMessageInfo:
@@ -261,3 +265,62 @@ class TestExtractOriginalMessageInfo:
         # Should raise OriginalMessageExtractionError
         with pytest.raises(Exception):  # OriginalMessageExtractionError
             await extract_original_message_info(callback_message, admin_id)
+
+
+class TestAppendSpamCleanupTasks:
+    """Cleanup warnings must carry forward_origin_type + candidate_chats in the message."""
+
+    def test_user_missing_warning_includes_context(self, caplog):
+        info = {
+            "user_id": None,
+            "group_chat_id": None,
+            "group_message_id": None,
+            "forward_origin_type": "hidden_user",
+            "candidate_chats": 1,
+        }
+        with caplog.at_level(logging.WARNING, logger="app.handlers.private_handlers"):
+            _append_spam_cleanup_tasks([], info)
+        assert "User ID not found in info" in caplog.text
+        assert "forward_origin_type=hidden_user" in caplog.text
+        assert "candidate_chats=1" in caplog.text
+
+    def test_group_missing_warning_includes_context(self, caplog):
+        info = {
+            "user_id": 12345,
+            "group_chat_id": None,
+            "group_message_id": None,
+            "forward_origin_type": "hidden_user",
+            "candidate_chats": 2,
+        }
+        with caplog.at_level(logging.WARNING, logger="app.handlers.private_handlers"):
+            _append_spam_cleanup_tasks([], info)
+        assert "Group chat ID or message ID not found" in caplog.text
+        assert "forward_origin_type=hidden_user" in caplog.text
+        assert "candidate_chats=2" in caplog.text
+
+    def test_warnings_without_context_render_none(self, caplog):
+        """No origin/lookup ran -> fields absent from info -> render as None, not crash."""
+        info = {
+            "user_id": None,
+            "group_chat_id": None,
+            "group_message_id": None,
+            "forward_origin_type": None,
+            "candidate_chats": None,
+        }
+        with caplog.at_level(logging.WARNING, logger="app.handlers.private_handlers"):
+            _append_spam_cleanup_tasks([], info)
+        assert "User ID not found in info" in caplog.text
+        assert "forward_origin_type=None" in caplog.text
+        assert "candidate_chats=None" in caplog.text
+
+    def test_user_present_no_warning_task_appended(self):
+        info = {
+            "user_id": 12345,
+            "group_chat_id": None,
+            "group_message_id": None,
+            "forward_origin_type": "user",
+            "candidate_chats": None,
+        }
+        tasks = []
+        _append_spam_cleanup_tasks(tasks, info)
+        assert len(tasks) == 1  # removal task only, no user warning

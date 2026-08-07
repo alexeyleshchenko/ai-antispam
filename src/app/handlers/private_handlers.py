@@ -400,7 +400,17 @@ def _append_spam_cleanup_tasks(
     if user_id := info.get("user_id"):
         tasks.append(remove_member_from_group(member_id=user_id))
     else:
-        logger.warning("User ID not found in info, skipping removal from group")
+        logger.warning(
+            "User ID not found in info, skipping removal from group "
+            "(forward_origin_type=%s, candidate_chats=%s)",
+            info.get("forward_origin_type"),
+            info.get("candidate_chats"),
+            extra={
+                "cleanup": "user_skip",
+                "forward_origin_type": info.get("forward_origin_type"),
+                "candidate_chats": info.get("candidate_chats"),
+            },
+        )
 
     group_chat_id = info.get("group_chat_id")
     group_message_id = info.get("group_message_id")
@@ -418,11 +428,16 @@ def _append_spam_cleanup_tasks(
         return
 
     logger.warning(
-        "Group chat ID or message ID not found in info, skipping message deletion",
+        "Group chat ID or message ID not found in info, skipping message deletion "
+        "(forward_origin_type=%s, candidate_chats=%s)",
+        info.get("forward_origin_type"),
+        info.get("candidate_chats"),
         extra={
             "message_deletion": "skipped",
             "group_chat_id": group_chat_id,
             "group_message_id": group_message_id,
+            "forward_origin_type": info.get("forward_origin_type"),
+            "candidate_chats": info.get("candidate_chats"),
         },
     )
 
@@ -527,6 +542,8 @@ def _build_base_forwarded_info(original_message: types.Message) -> Dict[str, Any
         "username": None,
         "group_chat_id": None,
         "group_message_id": None,
+        "forward_origin_type": None,
+        "candidate_chats": None,
         "stories_context": None,
         "reply_context": None,
         "account_signals_context": None,
@@ -543,6 +560,7 @@ async def _enrich_with_forward_metadata(
     original_message: types.Message,
 ) -> None:
     origin = original_message.forward_origin
+    info["forward_origin_type"] = getattr(origin, "type", None) if origin else None
 
     if original_message.forward_from:
         user = original_message.forward_from
@@ -590,6 +608,7 @@ async def _fill_lookup_context_if_needed(
 
     admin_groups = await get_admin_groups(admin_id)
     admin_group_ids = [group["id"] for group in admin_groups]
+    info["candidate_chats"] = len(admin_group_ids)
     if not admin_group_ids:
         logger.info(
             "Admin has no managed groups, skipping message lookup",
