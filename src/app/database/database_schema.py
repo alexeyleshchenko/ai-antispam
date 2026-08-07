@@ -194,6 +194,9 @@ async def create_schema(conn: asyncpg.Connection):
         await conn.execute(
             "ALTER TABLE groups ADD COLUMN IF NOT EXISTS username VARCHAR(255)"
         )
+        await conn.execute(
+            "ALTER TABLE groups ADD COLUMN IF NOT EXISTS linked_channel_id BIGINT"
+        )
     except Exception as e:
         raise RuntimeError(f"Failed to run migrations: {e}") from e
 

@@ -494,3 +494,61 @@ class TestProtectedChannelGuard:
             assert _protected_channel_ids == {-1005555555555, -1006666666666}
         finally:
             _protected_channel_ids.clear()
+
+    @pytest.mark.asyncio
+    async def test_seed_failure_sets_flag(self):
+        """DB down at seeding -> _seed_failed set True."""
+        import src.app.handlers.message.channel_management as cm
+
+        cm._seed_failed = False
+        with patch(
+            "src.app.database.group_operations.get_protected_channel_ids",
+            new_callable=AsyncMock,
+            side_effect=Exception("db down"),
+        ):
+            await cm._seed_protected_channels()
+        assert cm._seed_failed is True
+
+    @pytest.mark.asyncio
+    async def test_db_unavailable_refuses_to_leave(self):
+        """DB unavailable on re-check -> skip leave, distinct tag, no notify."""
+        from src.app.handlers.message.channel_management import (
+            handle_channel_post,
+            ProtectedChannelCheckUnavailable,
+        )
+
+        message = MagicMock()
+        message.chat.id = -1008888888888
+        message.chat.title = "Test Channel"
+        message.chat.username = None
+
+        with patch(
+            "src.app.handlers.message.channel_management._is_protected_channel",
+            new_callable=AsyncMock,
+            side_effect=ProtectedChannelCheckUnavailable("db down"),
+        ), patch(
+            "src.app.handlers.message.channel_management.notify_channel_admins_and_leave",
+            new_callable=AsyncMock,
+        ) as mock_notify:
+            result = await handle_channel_post(message)
+        assert result == "channel_post_skipped_db_unavailable"
+        mock_notify.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_is_protected_channel_raises_on_db_error(self):
+        """DB error in re-check raises ProtectedChannelCheckUnavailable (not False)."""
+        from src.app.handlers.message.channel_management import (
+            _is_protected_channel,
+            _protected_channel_ids,
+            ProtectedChannelCheckUnavailable,
+        )
+
+        _protected_channel_ids.discard(-1007777777777)
+        with patch(
+            "src.app.database.group_operations.get_protected_channel_ids",
+            new_callable=AsyncMock,
+            side_effect=Exception("db down"),
+        ):
+            with pytest.raises(ProtectedChannelCheckUnavailable):
+                await _is_protected_channel(-1007777777777)
+        _protected_channel_ids.discard(-1007777777777)

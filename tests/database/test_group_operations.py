@@ -464,3 +464,77 @@ async def test_update_group_admins_excludes_group_anonymous_bot(patched_db_conn,
         f"GROUP_ANONYMOUS_BOT_ID ({GROUP_ANONYMOUS_BOT_ID}) must not be stored in "
         "group_administrators — it cannot receive DMs from bots"
     )
+
+
+@pytest.mark.asyncio
+async def test_activate_discussion_group_flips_awaiting_rights(patched_db_conn, clean_db):
+    """Awaiting-rights row (linked_channel_id set, moderation off) flips active."""
+    from app.database import upsert_awaiting_rights_group, activate_discussion_group
+
+    group_id = -1003001
+    channel_id = -1004352022427
+
+    await upsert_awaiting_rights_group(
+        group_id, "Discussion", None, linked_channel_id=channel_id
+    )
+    async with clean_db.acquire() as conn:
+        before = await conn.fetchval(
+            "SELECT moderation_enabled FROM groups WHERE group_id = $1", group_id
+        )
+    assert before is False or before == 0
+
+    activated = await activate_discussion_group(group_id)
+    assert activated is True
+
+    async with clean_db.acquire() as conn:
+        after = await conn.fetchval(
+            "SELECT moderation_enabled FROM groups WHERE group_id = $1", group_id
+        )
+    assert after is True or after == 1
+
+
+@pytest.mark.asyncio
+async def test_activate_discussion_group_leaves_disabled_group_alone(patched_db_conn, clean_db):
+    """A group without linked_channel_id (deliberately disabled) is untouched."""
+    from app.database import set_group_moderation, activate_discussion_group
+
+    group_id = -1003002
+    await set_group_moderation(group_id, False)
+
+    activated = await activate_discussion_group(group_id)
+    assert activated is False
+
+    async with clean_db.acquire() as conn:
+        after = await conn.fetchval(
+            "SELECT moderation_enabled FROM groups WHERE group_id = $1", group_id
+        )
+    assert after is False or after == 0
+
+
+@pytest.mark.asyncio
+async def test_activate_discussion_group_active_with_channel_stays_active(patched_db_conn, clean_db):
+    """Already-active linked group: no-op, still returns True."""
+    from app.database import activate_discussion_group, upsert_awaiting_rights_group
+
+    group_id = -1003003
+    channel_id = -1004352022428
+    await upsert_awaiting_rights_group(
+        group_id, "Discussion", None, linked_channel_id=channel_id
+    )
+    # Simulate "already active" (owner enabled moderation) WITHOUT wiping
+    # linked_channel_id — direct UPDATE, matching Postgres ON CONFLICT DO UPDATE
+    # semantics (the SQLite adapter's INSERT OR REPLACE would drop the column).
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            "UPDATE groups SET moderation_enabled = 1 WHERE group_id = ?",
+            group_id,
+        )
+
+    activated = await activate_discussion_group(group_id)
+    assert activated is True
+
+    async with clean_db.acquire() as conn:
+        after = await conn.fetchval(
+            "SELECT moderation_enabled FROM groups WHERE group_id = $1", group_id
+        )
+    assert after is True or after == 1

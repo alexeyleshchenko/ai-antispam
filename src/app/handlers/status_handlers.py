@@ -1,5 +1,6 @@
 """Handlers for bot status updates in chats."""
 
+import contextlib
 import logging
 from datetime import datetime, timezone
 from typing import List
@@ -27,6 +28,7 @@ from ..common.utils import (
     retry_on_network_error,
 )
 from ..database import (
+    activate_discussion_group,
     deactivate_admin,
     get_admin,
     get_group,
@@ -272,6 +274,19 @@ async def _handle_bot_added(
         and event.new_chat_member.can_delete_messages
         and event.new_chat_member.can_restrict_members
     )
+
+    if has_admin_rights:
+        # Scoped activation (issue #35): if this group was registered via the
+        # channel-protect awaiting-rights path (linked_channel_id set,
+        # moderation_enabled FALSE), a human promotion to admin now flips it
+        # active. No-op for normal groups and for groups where the owner
+        # deliberately disabled moderation (no linked_channel_id).
+        with contextlib.suppress(Exception):
+            if await activate_discussion_group(chat_id):
+                logger.info(
+                    f"Activated awaiting-rights discussion group {chat_id} "
+                    f"('{chat_title}') after admin promotion"
+                )
 
     if not has_admin_rights:
         await set_no_rights_detected_at(chat_id)

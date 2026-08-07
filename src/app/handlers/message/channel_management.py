@@ -10,6 +10,7 @@ import contextlib
 import logging
 from typing import Set
 
+import logfire
 from aiogram import types
 from aiogram.client.bot import Bot
 from aiogram.exceptions import TelegramForbiddenError
@@ -25,17 +26,30 @@ logger = logging.getLogger(__name__)
 # when the bot is correctly placed (protect mode) rather than wrongly added.
 _protected_channel_ids: Set[int] = set()
 
+# True when startup seeding failed (e.g. DB down at boot). While set, the
+# in-memory set may be empty/stale — handle_channel_post must refuse to leave
+# (leaving cascades into evicting the bot from protected discussion groups)
+# until the DB positively confirms the channel is not protected.
+_seed_failed: bool = False
+
+
+class ProtectedChannelCheckUnavailable(Exception):
+    """Raised when the protected-channel state cannot be confirmed (DB down)."""
+
 
 async def _seed_protected_channels() -> None:
     """Load protected channel ids from the DB at startup."""
+    global _seed_failed
     try:
         from ...database.group_operations import get_protected_channel_ids
 
         protected = await get_protected_channel_ids()
         _protected_channel_ids.clear()
         _protected_channel_ids.update(protected)
+        _seed_failed = False
         logger.info(f"Seeded {len(protected)} protected channel(s) from DB")
     except Exception as e:
+        _seed_failed = True
         logger.warning(f"Failed to seed protected channels: {e}", exc_info=True)
 
 
@@ -45,6 +59,12 @@ async def _is_protected_channel(chat_id: int) -> bool:
     In-memory set first (cheap); on a miss, re-check the DB in case the set was
     seeded before this channel was registered (e.g. a fresh protect registration
     after startup).
+
+    Raises:
+        ProtectedChannelCheckUnavailable: when the DB cannot confirm either way
+            (connection error). Callers MUST NOT treat this as "not protected" —
+            leaving on an unavailable DB is how a transient outage cascades into
+            mass self-leave of protected channels.
     """
     if chat_id in _protected_channel_ids:
         return True
@@ -54,9 +74,14 @@ async def _is_protected_channel(chat_id: int) -> bool:
         if chat_id in await get_protected_channel_ids():
             _protected_channel_ids.add(chat_id)
             return True
+        return False
+    except ProtectedChannelCheckUnavailable:
+        raise
     except Exception as e:
         logger.debug(f"Protected-channel DB re-check failed for {chat_id}: {e}")
-    return False
+        raise ProtectedChannelCheckUnavailable(
+            f"DB unavailable while checking protected status of channel {chat_id}"
+        ) from e
 
 
 async def handle_channel_post(message: types.Message) -> str:
@@ -78,8 +103,20 @@ async def handle_channel_post(message: types.Message) -> str:
         Result identifier string for logging
     """
     try:
-        if await _is_protected_channel(message.chat.id):
-            return "channel_post_ignored_protected"
+        try:
+            if await _is_protected_channel(message.chat.id):
+                return "channel_post_ignored_protected"
+        except ProtectedChannelCheckUnavailable as e:
+            # DB cannot confirm whether this channel is protected. Leaving here
+            # would cascade into evicting the bot from protected discussion
+            # groups (Valeri trace) on a transient outage — refuse instead. The
+            # post is skipped; the next channel_post (or a manual check) retries.
+            logger.error(
+                f"Skipping channel_post for {format_chat_log(message.chat.id, getattr(message.chat, 'title', None), getattr(message.chat, 'username', None))}: "
+                f"protected-channel state unavailable ({e}). Refusing to leave — "
+                f"leaving could end protection of linked discussion groups."
+            )
+            return "channel_post_skipped_db_unavailable"
 
         from ...common.bot import bot
 
@@ -434,10 +471,29 @@ async def _notify_discussion_added_and_stay(
                 f"Posted discussion_added notice into discussion group {format_chat_log(discussion_id, discussion_title, discussion_username)} (owner DM failed)"
             )
         except Exception as e:
-            logger.warning(
-                f"Failed to post discussion_added notice into discussion group {discussion_id}: {e}",
+            # Total notification failure: owner DM AND discussion-group post both
+            # failed. The bot stays (leaving would cascade into leaving the
+            # discussion group and end protection), but the dead-end must be
+            # LOUD — the owner never learns the bot is awaiting rights here, so
+            # the group would stay awaiting-rights forever. Record a logfire
+            # span + ERROR log with full context for alerting/investigation.
+            logger.error(
+                f"FAILED to notify owner or discussion group that bot protects "
+                f"linked discussion {format_chat_log(discussion_id, discussion_title, discussion_username)} "
+                f"of channel {format_chat_log(chat.id, channel_title, channel_username)} "
+                f"(owner DM failed, discussion post failed: {e}). Bot stays but "
+                f"the group will NOT be moderated until the owner is reached.",
                 exc_info=True,
             )
+            with logfire.span(
+                "discussion_added_notification_failed",
+                channel_id=chat.id,
+                channel_title=channel_title,
+                discussion_id=discussion_id,
+                discussion_title=discussion_title,
+                target_admin_ids=[str(t) for t in dict.fromkeys(target_ids)],
+            ):
+                pass
 
     logger.info(
         f"Bot stays in channel {format_chat_log(chat.id, channel_title, channel_username)} "

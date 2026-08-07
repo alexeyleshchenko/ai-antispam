@@ -565,6 +565,46 @@ async def upsert_awaiting_rights_group(
             )
 
 
+async def activate_discussion_group(group_id: int) -> bool:
+    """Flip an awaiting-rights discussion group to active moderation.
+
+    Scoped activation for the channel-protect flow (issue #34/#35): when the
+    owner promotes the bot to admin in the linked discussion group, the
+    awaiting-rights row (moderation_enabled=FALSE, linked_channel_id set) must
+    become active — otherwise the bot registers the group, tells the owner to
+    promote it, and then never moderates (validation returns
+    message_moderation_disabled forever).
+
+    Deliberately NOT a blanket `moderation_enabled = TRUE` on the upsert's
+    ON CONFLICT: that would clobber groups where the owner explicitly disabled
+    moderation (they have no linked_channel_id). This function only touches rows
+    registered via the awaiting-rights path, i.e. linked_channel_id IS NOT NULL
+    AND moderation_enabled = FALSE. Idempotent and safe to call repeatedly.
+
+    Args:
+        group_id: The discussion group id to activate
+
+    Returns:
+        True if the group is a linked-channel discussion group (flipped from
+        awaiting-rights, or already active), False if it is not a linked-channel
+        discussion group
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            updated = await conn.fetchval(
+                """
+                UPDATE groups
+                SET moderation_enabled = TRUE, last_active = NOW()
+                WHERE group_id = $1
+                  AND linked_channel_id IS NOT NULL
+                RETURNING 1
+                """,
+                group_id,
+            )
+            return updated is not None
+
+
 async def get_protected_channel_ids() -> list[int]:
     """Return distinct channel ids whose discussion groups the bot protects.
 
