@@ -307,6 +307,7 @@ callback:
 
 channel:
   wrong_place: "❗️ The bot was added to channel <b>{channel}</b> instead of the discussion group.\n\nFor proper operation, add the bot to the discussion group linked to your channel.\n\nThe bot will then protect your posts from spam in comments.\n\n"
+  discussion_added: "You added me to the channel <b>{channel}</b>. Telegram automatically added me to its discussion group <b>{discussion}</b> as a regular member — but without admin rights I can't moderate comments. Please promote me to <b>administrator</b> in the discussion group and enable <b>delete messages</b> and <b>restrict members</b> — then I'll protect it from spam.\n\n"
   more_info: "More info: https://t.me/ai_antispam/14"
   userbot_preamble: "Message from the @ai_antispam_blocker_bot team.\n\nThe bot couldn't message you from its account (maybe you haven't started a chat with it, or it was removed from the channel). So we're sending this from this account.\n\n"
 
