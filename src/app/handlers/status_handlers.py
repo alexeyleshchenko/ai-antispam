@@ -1,7 +1,10 @@
 """Handlers for bot status updates in chats."""
 
+import asyncio
 import contextlib
 import logging
+import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import List
 
@@ -44,6 +47,33 @@ from .dp import dp
 from .message.channel_management import notify_channel_admins_and_leave
 
 logger = logging.getLogger(__name__)
+
+# Settle window before deciding a channel-add: Telegram is eventually consistent
+# — the my_chat_member update arrives BEFORE the API sees the bot as a member —
+# and the linked-discussion auto-add piece lands ~0.9s later (observed). A module
+# constant so tests can shrink it without sleeping.
+_CHANNEL_SETTLE_SECONDS = 2.0
+
+
+@dataclass
+class _PendingComposite:
+    """State for an in-flight channel-add composite decision."""
+
+    seen_at: float
+    decision_started: bool = True
+
+
+# Channel-add composite correlation, keyed by (channel_id, actor_id). Telegram
+# delivers a channel add (and possibly the linked-discussion auto-add) as a batch
+# of my_chat_member updates in RANDOM order, and the update arrives BEFORE the
+# API sees the bot as a member. The settle window lets propagation + the sibling
+# piece land before ONE decision runs; the registry dedupes webhook redeliveries
+# while a decision is in flight. Entries are deleted on completion, so a later
+# legit re-add (even seconds after a leave) finds no entry and gets a fresh
+# decision. Per-process only: a redelivery hitting another worker re-runs the
+# decision, which is safe because it is DB-idempotent (upserts).
+_pending_composites: dict[tuple[int, int], _PendingComposite] = {}
+_composites_lock: asyncio.Lock = asyncio.Lock()
 
 
 async def _resolve_lang(admin_ids: list[int] | None, fallback: str = "en") -> str:
@@ -91,6 +121,19 @@ async def _handle_auto_added_discussion(
     wiped the discussion row). Instead, upsert the group as known-but-inactive
     (moderation_enabled=false); a later human promotion to admin flips it active
     via the existing permission-update path. Idempotent vs the channel handler.
+
+    RANDOM-ORDER CONVERGENCE (composite event, issue #34/#36): the channel add
+    and this discussion auto-add arrive as a batch of my_chat_member updates in
+    random order, and neither payload carries a correlation key (spike-0 — no
+    `linked_chat_id`). Both orderings converge to the SAME end state:
+    - discussion-first: THIS upsert (no linked_channel_id) → channel piece's
+      _notify_discussion_added_and_stay re-upserts WITH linked_channel_id →
+      ON CONFLICT COALESCE fills the column in place.
+    - channel-first: _notify_discussion_added_and_stay upserts WITH the key →
+      THIS upsert re-runs WITHOUT it → COALESCE keeps the existing value.
+    Both end at: awaiting-rights row (moderation_enabled=false) with
+    linked_channel_id set. Verified by
+    tests/database/test_group_operations.py::test_discussion_order_convergence_awaiting_rights.
     """
     logger.info(
         "Bot auto-added to linked discussion group %s ('%s') — registering as awaiting rights",
@@ -140,21 +183,43 @@ async def handle_bot_status_update(event: types.ChatMemberUpdated) -> str:
         result_tag = "bot_status_updated"
 
         if new_status in ["administrator", "member", "restricted"]:
-            await _handle_bot_added(event, chat_id, admin_id, chat_title, new_status)
-            result_tag = "bot_added_group"
+            # Channels never run the group onboarding path (no promo, no
+            # setup_done, no `groups` upsert for a channel — the 09:28 "защищаю
+            # группу test" lie). Channel adds go straight to the composite +
+            # notify_channel_admins_and_leave decision flow below.
+            if event.chat.type != "channel":
+                await _handle_bot_added(event, chat_id, admin_id, chat_title, new_status)
+                result_tag = "bot_added_group"
         elif new_status in ["left", "kicked"]:
             await _handle_bot_removed(event, chat_id, admin_id, chat_title, new_status)
             result_tag = "bot_removed_group"
 
-        # Если бот добавлен в канал, отправляем инструкцию с ссылкой на обсуждение (если есть)
+        # Если бот добавлен в канал — это составное событие: Telegram шлёт батч
+        # my_chat_member апдейтов (канал + возможно авто-добавление в связанное
+        # обсуждение) в случайном порядке, причём апдейт приходит ДО того, как
+        # API видит бота участником канала (eventual consistency). Ждём
+        # settle-окно, чтобы распространение членства и sibling-апдейт успели
+        # дойти, и принимаем ОДНО решение. Повторные доставки того же события
+        # (webhook retry) дедуплицируются, пока решение в полёте.
         if event.chat.type == "channel" and new_status in [
             "administrator",
             "member",
             "restricted",
         ]:
-            await notify_channel_admins_and_leave(
-                event.chat, bot, adding_user=event.from_user
-            )
+            key = (chat_id, admin_id)
+            async with _composites_lock:
+                if key in _pending_composites:
+                    # Повторная доставка того же channel-add — решение уже идёт.
+                    return "bot_channel_add_deduped"
+                _pending_composites[key] = _PendingComposite(seen_at=time.time())
+            try:
+                await asyncio.sleep(_CHANNEL_SETTLE_SECONDS)
+                await notify_channel_admins_and_leave(
+                    event.chat, bot, adding_user=event.from_user
+                )
+            finally:
+                async with _composites_lock:
+                    _pending_composites.pop(key, None)
 
         return result_tag
 
@@ -175,6 +240,12 @@ async def _handle_permission_update(
     chat_title: str,
 ) -> None:
     """Handle updates to bot's permissions."""
+    # Channels: a rights change must never fire the group promo/setup path —
+    # a channel update here would post the promo INTO the channel and send the
+    # "group protected" setup lie (R7). The channel decision flow (composite +
+    # notify_channel_admins_and_leave) owns channels.
+    if event.chat.type == "channel":
+        return
     if not (
         isinstance(event.old_chat_member, types.ChatMemberAdministrator)
         and isinstance(event.new_chat_member, types.ChatMemberAdministrator)
