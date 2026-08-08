@@ -1,5 +1,6 @@
 """Tests for status_handlers: Telegram auto-add detection + awaiting-rights upsert."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -64,10 +65,16 @@ def _real_event(
     chat_id: int = DISCUSSION_ID,
     can_delete: bool = True,
     can_restrict: bool = True,
+    old_can_delete: bool | None = None,
+    old_can_restrict: bool | None = None,
 ) -> ChatMemberUpdated:
     """Build a REAL ChatMemberUpdated (logfire extract_args needs real models)."""
     chat = Chat(id=chat_id, type=chat_type, title="Discussion")
     from_user = User(id=from_id, is_bot=False, first_name="Admin")
+    if old_can_delete is None:
+        old_can_delete = can_delete
+    if old_can_restrict is None:
+        old_can_restrict = can_restrict
     if new_status == "administrator":
         new_member = ChatMemberAdministrator(
             user=User(id=BOT_ID, is_bot=True, first_name="Bot"),
@@ -97,9 +104,9 @@ def _real_event(
             can_be_edited=False,
             is_anonymous=False,
             can_manage_chat=True,
-            can_delete_messages=can_delete,
+            can_delete_messages=old_can_delete,
             can_manage_video_chats=False,
-            can_restrict_members=can_restrict,
+            can_restrict_members=old_can_restrict,
             can_promote_members=False,
             can_change_info=False,
             can_invite_users=True,
@@ -254,6 +261,216 @@ class TestHandleBotStatusUpdateAutoAdd:
             result = await handle_bot_status_update(event)
             mock_added.assert_awaited_once()
             assert result == "bot_added_group"
+
+
+class TestChannelAddCompositeSettle:
+    """Composite-event settle window: dedupe redeliveries, decide once, delete on completion.
+
+    Regression for the 09:28 incident (issue: channel-add processed per-update
+    racing Telegram propagation): the channel branch must settle, dedupe the same
+    add's redeliveries while a decision is in flight, and delete the entry on
+    completion so a later legit re-add gets a fresh decision.
+    """
+
+    def _channel_add_event(self) -> ChatMemberUpdated:
+        """Channel add: human actor, left -> administrator, on the test channel."""
+        return _event(
+            chat_type="channel",
+            from_id=HUMAN_ID,
+            old_status="left",
+            new_status="administrator",
+            chat_id=CHANNEL_ID,
+        )
+
+    @pytest.mark.asyncio
+    async def test_duplicate_add_within_window_decides_once(self):
+        """Two webhook calls for the same channel-add -> decision runs exactly once."""
+        event = self._channel_add_event()
+        with (
+            patch(
+                "src.app.handlers.status_handlers._get_bot_id",
+                AsyncMock(return_value=BOT_ID),
+            ),
+            patch(
+                "src.app.handlers.status_handlers._handle_bot_added",
+                AsyncMock(),
+            ),
+            patch(
+                "src.app.handlers.status_handlers.notify_channel_admins_and_leave",
+                AsyncMock(),
+            ) as mock_notify,
+            patch(
+                "src.app.handlers.status_handlers._CHANNEL_SETTLE_SECONDS",
+                0.01,
+            ),
+        ):
+            results = await asyncio.gather(
+                handle_bot_status_update(event),
+                handle_bot_status_update(event),
+            )
+        # One decision, one redelivery deduped
+        assert mock_notify.await_count == 1
+        assert results.count("bot_channel_add_deduped") == 1
+
+    @pytest.mark.asyncio
+    async def test_entry_deleted_after_completion_re_runs(self):
+        """After the decision completes, a new call for the same add runs again."""
+        event = self._channel_add_event()
+        with (
+            patch(
+                "src.app.handlers.status_handlers._get_bot_id",
+                AsyncMock(return_value=BOT_ID),
+            ),
+            patch(
+                "src.app.handlers.status_handlers._handle_bot_added",
+                AsyncMock(),
+            ),
+            patch(
+                "src.app.handlers.status_handlers.notify_channel_admins_and_leave",
+                AsyncMock(),
+            ) as mock_notify,
+            patch(
+                "src.app.handlers.status_handlers._CHANNEL_SETTLE_SECONDS",
+                0.01,
+            ),
+        ):
+            await handle_bot_status_update(event)
+            await handle_bot_status_update(event)
+        # Entry was deleted in `finally` -> second call is a fresh decision
+        assert mock_notify.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_non_channel_add_never_touches_registry(self):
+        """A supergroup add must not register a composite or settle."""
+        event = _event(from_id=HUMAN_ID)  # supergroup, human add
+        with (
+            patch(
+                "src.app.handlers.status_handlers._get_bot_id",
+                AsyncMock(return_value=BOT_ID),
+            ),
+            patch(
+                "src.app.handlers.status_handlers._handle_bot_added",
+                AsyncMock(),
+            ),
+            patch(
+                "src.app.handlers.status_handlers.notify_channel_admins_and_leave",
+                AsyncMock(side_effect=AssertionError("must not run for groups")),
+            ),
+            patch(
+                "src.app.handlers.status_handlers._pending_composites",
+                {},
+            ) as mock_registry,
+        ):
+            result = await handle_bot_status_update(event)
+        assert result == "bot_added_group"
+        assert mock_registry == {}
+
+
+class TestChannelAddGatesGroupPath:
+    """Channel adds never run the group onboarding path (09:28 regression).
+
+    The 09:28 incident: `_handle_bot_added` ran on a channel update FIRST —
+    upserted the channel into `groups` via `update_group_admins`, sent promo +
+    "Настройка завершена… защищаю группу test" — before the channel branch
+    decided to leave. Channels must go straight to the channel decision flow.
+    """
+
+    def _channel_add_event(self) -> ChatMemberUpdated:
+        """Channel add: human actor, left -> administrator, on the test channel."""
+        return _event(
+            chat_type="channel",
+            from_id=HUMAN_ID,
+            old_status="left",
+            new_status="administrator",
+            chat_id=CHANNEL_ID,
+        )
+
+    @pytest.mark.asyncio
+    async def test_channel_add_skips_group_path(self):
+        """Channel add -> group onboarding + groups upsert never run; channel flow once."""
+        event = self._channel_add_event()
+        with (
+            patch(
+                "src.app.handlers.status_handlers._get_bot_id",
+                AsyncMock(return_value=BOT_ID),
+            ),
+            patch(
+                "src.app.handlers.status_handlers._handle_bot_added",
+                AsyncMock(
+                    side_effect=AssertionError("group add path must not run for channel")
+                ),
+            ),
+            patch(
+                "src.app.handlers.status_handlers.update_group_admins",
+                AsyncMock(side_effect=AssertionError("no groups upsert for channel")),
+            ),
+            patch(
+                "src.app.handlers.status_handlers._send_promo_message",
+                AsyncMock(side_effect=AssertionError("no promo for channel")),
+            ),
+            patch(
+                "src.app.handlers.status_handlers.bot.send_message",
+                AsyncMock(side_effect=AssertionError("no setup_done for channel")),
+            ),
+            patch(
+                "src.app.handlers.status_handlers.notify_channel_admins_and_leave",
+                AsyncMock(),
+            ) as mock_notify,
+            patch(
+                "src.app.handlers.status_handlers._CHANNEL_SETTLE_SECONDS",
+                0.01,
+            ),
+        ):
+            result = await handle_bot_status_update(event)
+        mock_notify.assert_awaited_once()
+        assert result == "bot_status_updated"
+
+    @pytest.mark.asyncio
+    async def test_channel_permission_update_no_promo(self):
+        """A rights change on a channel must not fire promo/setup_done (R7)."""
+        # Real models — logfire extract_args and the isinstance gate in
+        # _handle_permission_update need them; a MagicMock would silently pass
+        # the old isinstance gate and miss the bug. Rights go False->True, so
+        # WITHOUT the channel gate the promo+setup_done path WOULD fire.
+        event = _real_event(
+            chat_type="channel",
+            from_id=HUMAN_ID,
+            old_status="administrator",
+            new_status="administrator",
+            chat_id=CHANNEL_ID,
+            can_delete=True,
+            can_restrict=True,
+            old_can_delete=False,
+            old_can_restrict=False,
+        )
+        with (
+            patch(
+                "src.app.handlers.status_handlers._get_bot_id",
+                AsyncMock(return_value=BOT_ID),
+            ),
+            patch(
+                "src.app.handlers.status_handlers._send_promo_message",
+                AsyncMock(side_effect=AssertionError("no promo for channel")),
+            ),
+            patch(
+                "src.app.handlers.status_handlers._notify_admins_about_rights",
+                AsyncMock(side_effect=AssertionError("no rights DM for channel")),
+            ),
+            patch(
+                "src.app.handlers.status_handlers.set_no_rights_detected_at",
+                AsyncMock(side_effect=AssertionError("no no-rights flow for channel")),
+            ),
+            patch(
+                "src.app.handlers.status_handlers.clear_no_rights_detected_at",
+                AsyncMock(side_effect=AssertionError("no clear-rights flow for channel")),
+            ),
+            patch(
+                "src.app.handlers.status_handlers.bot.send_message",
+                AsyncMock(side_effect=AssertionError("no setup_done for channel")),
+            ),
+        ):
+            result = await handle_bot_status_update(event)
+        assert result == "bot_permissions_updated"
 
 
 class TestActivateDiscussionGroup:

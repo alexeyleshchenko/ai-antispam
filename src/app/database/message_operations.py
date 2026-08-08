@@ -1,5 +1,4 @@
 import logging
-from typing import List
 
 from .postgres_connection import get_pool
 
@@ -12,29 +11,28 @@ MESSAGE_TTL = 60 * 60 * 24  # 24 hours
 async def save_message(admin_id: int, role: str, content: str) -> None:
     """Save a message to the admin's conversation history"""
     pool = await get_pool()
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            await conn.execute(
-                """
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            """
                 INSERT INTO message_history (admin_id, role, content, created_at)
                 VALUES ($1, $2, $3, NOW())
             """,
-                admin_id,
-                role,
-                content,
-            )
+            admin_id,
+            role,
+            content,
+        )
 
-            count = await conn.fetchval(
-                """
+        count = await conn.fetchval(
+            """
                 SELECT COUNT(*) FROM message_history
                 WHERE admin_id = $1
             """,
-                admin_id,
-            )
+            admin_id,
+        )
 
-            if count > MESSAGE_HISTORY_SIZE:
-                await conn.execute(
-                    """
+        if count > MESSAGE_HISTORY_SIZE:
+            await conn.execute(
+                """
                     DELETE FROM message_history
                     WHERE id IN (
                         SELECT id FROM message_history
@@ -43,9 +41,9 @@ async def save_message(admin_id: int, role: str, content: str) -> None:
                         LIMIT $2
                     )
                 """,
-                    admin_id,
-                    count - MESSAGE_HISTORY_SIZE,
-                )
+                admin_id,
+                count - MESSAGE_HISTORY_SIZE,
+            )
 
 
 async def cleanup_old_message_history(days: int = 1) -> int:
@@ -62,7 +60,7 @@ async def cleanup_old_message_history(days: int = 1) -> int:
     return count
 
 
-async def get_message_history(admin_id: int) -> List[dict]:
+async def get_message_history(admin_id: int) -> list[dict]:
     """Retrieve admin's conversation history"""
     pool = await get_pool()
     async with pool.acquire() as conn:

@@ -4,13 +4,17 @@ import logging
 
 from aiogram import F, types
 from aiogram.exceptions import TelegramBadRequest
-from ..common.telegram_errors import is_message_not_found_error, is_permission_error
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from ..common.bot import bot
-from ..common.utils import get_add_to_group_url, format_chat_log, retry_on_network_error
+from ..common.telegram_errors import is_message_not_found_error, is_permission_error
+from ..common.utils import (
+    format_chat_log,
+    get_add_to_group_url,
+    load_config,
+    retry_on_network_error,
+)
 from ..database import get_admin, get_group, update_admin_language
-from ..common.utils import load_config
 from ..database.group_operations import add_member, set_moderation_events
 from ..database.spam_examples import (
     confirm_pending_example_as_not_spam,
@@ -247,8 +251,8 @@ async def handle_spam_ignore_callback(callback: CallbackQuery) -> str:
                 )
         return "callback_marked_as_not_spam"
 
-    except Exception as e:
-        logger.error(f"Error in spam ignore callback: {e}", exc_info=True)
+    except Exception:
+        logger.exception("Error in spam ignore callback")
         with contextlib.suppress(Exception):
             admin = (
                 await get_admin(callback.from_user.id) if callback.from_user else None
@@ -371,8 +375,8 @@ async def handle_spam_confirm_callback(callback: CallbackQuery) -> str:
 
         return "callback_spam_message_deleted"
 
-    except Exception as e:
-        logger.error(f"Error in spam confirm callback: {e}", exc_info=True)
+    except Exception:
+        logger.exception("Error in spam confirm callback")
         with contextlib.suppress(Exception):
             await callback.answer(t(lang, "callback.error_generic"), show_alert=True)
         return "callback_error_deleting_spam"

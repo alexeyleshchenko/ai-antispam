@@ -2,8 +2,9 @@
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Sequence
+from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 LogfireQueryClient: Any = None
 
@@ -49,12 +50,12 @@ def _get_client() -> LogfireQueryClient:
     return _client
 
 
-async def get_weekly_stats(chat_ids: Sequence[int]) -> Dict[int, Dict[str, int]]:
+async def get_weekly_stats(chat_ids: Sequence[int]) -> dict[int, dict[str, int]]:
     """Query Logfire for weekly stats (last 7 days). Returns dict of chat_id -> {processed, spam}."""
     if not chat_ids:
         return {}
 
-    start_time = datetime.now(timezone.utc) - timedelta(days=7)
+    start_time = datetime.now(UTC) - timedelta(days=7)
     chat_ids_str = ", ".join(f"'{chat_id}'" for chat_id in chat_ids)
 
     # Tags indicating different outcomes
@@ -81,7 +82,7 @@ async def get_weekly_stats(chat_ids: Sequence[int]) -> Dict[int, Dict[str, int]]
     GROUP BY 1, 2
     """
 
-    stats: Dict[int, Dict[str, int]] = {
+    stats: dict[int, dict[str, int]] = {
         chat_id: {"processed": 0, "spam": 0} for chat_id in chat_ids
     }
 

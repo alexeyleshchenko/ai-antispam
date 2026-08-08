@@ -1,7 +1,7 @@
 import logging
 import os
 import ssl
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import aiohttp
 import logfire
@@ -22,14 +22,14 @@ class MtprotoHttpClient:
         bearer_token: str,
         *,
         disable_ssl_verify: bool = False,
-        ca_bundle: Optional[str] = None,
+        ca_bundle: str | None = None,
     ):
         if not bearer_token:
             raise ValueError("MTProto HTTP bearer token is not configured")
 
         self._base_url = base_url.rstrip("/")
         self._bearer_token = bearer_token
-        self._session_ssl_kwargs: Dict[str, Any] = {}
+        self._session_ssl_kwargs: dict[str, Any] = {}
 
         if disable_ssl_verify:
             # Disable SSL verification entirely (debug only)
@@ -50,7 +50,7 @@ class MtprotoHttpClient:
         default_base_url: str = "https://tg-mcp.l1979.ru",
         disable_ssl_verify_env: str = "MTPROTO_HTTP_DISABLE_SSL_VERIFY",
         ca_bundle_env: str = "MTPROTO_HTTP_CA_BUNDLE",
-    ) -> "MtprotoHttpClient":
+    ) -> MtprotoHttpClient:
         base_url = os.getenv(base_url_env, default_base_url)
         bearer_token = os.getenv(token_env)
         if bearer_token is None:
@@ -72,13 +72,13 @@ class MtprotoHttpClient:
         self,
         method: str,
         *,
-        params: Optional[Dict[str, Any]] = None,
-        params_json: Optional[str] = None,
+        params: dict[str, Any] | None = None,
+        params_json: str | None = None,
         resolve: bool = True,
         timeout: int = 15,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Make a single MTProto API call"""
-        payload: Dict[str, Any] = {"resolve": resolve}
+        payload: dict[str, Any] = {"resolve": resolve}
         if params is not None:
             payload["params"] = params
         if params_json is not None:
@@ -89,13 +89,13 @@ class MtprotoHttpClient:
     async def call_with_fallback(
         self,
         method: str,
-        identifiers: List[Any],
+        identifiers: list[Any],
         identifier_param: str,
         *,
-        params: Optional[Dict[str, Any]] = None,
+        params: dict[str, Any] | None = None,
         resolve: bool = True,
         timeout: int = 15,
-    ) -> tuple[Dict[str, Any], Any]:
+    ) -> tuple[dict[str, Any], Any]:
         """
         Try multiple identifiers for a parameter until one succeeds.
         Returns (result, successful_identifier).
@@ -131,8 +131,8 @@ class MtprotoHttpClient:
 
     @retry_on_network_error
     async def _post(
-        self, method: str, payload: Dict[str, Any], *, timeout: int = 15
-    ) -> Dict[str, Any]:
+        self, method: str, payload: dict[str, Any], *, timeout: int = 15
+    ) -> dict[str, Any]:
         url = f"{self._base_url}/mtproto-api/{method}"
         headers = {
             "Authorization": f"Bearer {self._bearer_token}",
@@ -144,7 +144,7 @@ class MtprotoHttpClient:
         if "ssl" in self._session_ssl_kwargs:
             connector = aiohttp.TCPConnector(ssl=self._session_ssl_kwargs["ssl"])
 
-        session_kwargs: Dict[str, Any] = {"timeout": client_timeout}
+        session_kwargs: dict[str, Any] = {"timeout": client_timeout}
         if connector:
             session_kwargs["connector"] = connector
 
@@ -181,7 +181,7 @@ class MtprotoHttpClient:
                     return data.get("result", data)
 
 
-_client: Optional[MtprotoHttpClient] = None
+_client: MtprotoHttpClient | None = None
 
 
 def get_mtproto_client() -> MtprotoHttpClient:

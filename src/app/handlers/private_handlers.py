@@ -4,24 +4,21 @@ import logging
 import pathlib
 from collections.abc import Coroutine
 from datetime import timedelta
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, cast
 
 from aiogram import F, types
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import or_f
-
-from ..common.bot import bot
-from ..common.telegram_errors import is_message_not_found_error
-from ..spam.account_signals import build_account_signals_body
-from ..spam.user_profile import collect_user_context
 from pydantic_ai import ModelSettings
 
 from ..agents import (
-    get_chat_agent,
-    get_openrouter_chat_agent,
     _get_openrouter_chat_agents,
     _next_openrouter_chat_agent,
+    get_chat_agent,
+    get_openrouter_chat_agent,
 )
+from ..common.bot import bot
+from ..common.telegram_errors import is_message_not_found_error
 from ..common.utils import get_llm_route_timeout, sanitize_llm_html
 from ..database import (
     add_spam_example,
@@ -36,6 +33,8 @@ from ..database import (
 )
 from ..database.group_operations import get_admin_groups
 from ..i18n import normalize_lang, t
+from ..spam.account_signals import build_account_signals_body
+from ..spam.user_profile import collect_user_context
 from ..types import SpamClassificationContext
 from .dp import dp
 
@@ -53,7 +52,7 @@ def _resolve_admin_lang(admin: Any) -> str:
     )
 
 
-def _premium_from_forward(msg: types.Message) -> Optional[bool]:
+def _premium_from_forward(msg: types.Message) -> bool | None:
     if msg.forward_from:
         return getattr(msg.forward_from, "is_premium", None)
     origin = msg.forward_origin
@@ -71,7 +70,7 @@ def _read_prd() -> str:
     """Read PRD.md content for system prompt."""
     try:
         return pathlib.Path("PRD.md").read_text()
-    except Exception:
+    except OSError:
         return ""
 
 
@@ -273,7 +272,7 @@ async def handle_private_message(message: types.Message) -> str:
         )
     except asyncio.CancelledError:
         raise
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         last_error = e
         logger.warning(f"Gateway chat failed: {e}")
 
@@ -300,7 +299,7 @@ async def handle_private_message(message: types.Message) -> str:
             )
         except asyncio.CancelledError:
             raise
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             last_error = e
             logger.warning(f"{provider_label} chat agent failed: {e}")
             _next_openrouter_chat_agent()
@@ -341,7 +340,7 @@ async def handle_forwarded_message(message: types.Message) -> str:
     return "private_forward_prompt_sent"
 
 
-async def _load_channel_fragment(info: Dict[str, Any]) -> Optional[str]:
+async def _load_channel_fragment(info: dict[str, Any]) -> str | None:
     """Best-effort linked channel fragment extraction for forwarded user."""
     user_id = info.get("user_id")
     if not user_id:
@@ -393,8 +392,8 @@ async def _delete_message_safely(chat_id: int, message_id: int) -> None:
 
 
 def _append_spam_cleanup_tasks(
-    tasks: List[Coroutine[Any, Any, Any]],
-    info: Dict[str, Any],
+    tasks: list[Coroutine[Any, Any, Any]],
+    info: dict[str, Any],
 ) -> None:
     """Add best-effort cleanup tasks for spam confirmations."""
     if user_id := info.get("user_id"):
@@ -466,7 +465,7 @@ async def process_spam_example_callback(callback: types.CallbackQuery) -> str:
         with contextlib.suppress(Exception):
             await callback.answer(answer_text)
 
-        tasks: List[Coroutine[Any, Any, Any]] = [
+        tasks: list[Coroutine[Any, Any, Any]] = [
             add_spam_example(
                 info["text"],
                 name=info["name"],
@@ -506,8 +505,8 @@ async def process_spam_example_callback(callback: types.CallbackQuery) -> str:
         lang = _resolve_admin_lang(admin)
         await callback.answer(t(lang, "private.error_forward_info"), show_alert=True)
         return "spam_example_extraction_error"
-    except Exception as e:
-        logger.error(f"Error processing spam example: {e}", exc_info=True)
+    except Exception:
+        logger.exception("Error processing spam example")
         admin = await get_admin(admin_id)
         lang = _resolve_admin_lang(admin)
         await callback.answer(t(lang, "private.error_generic"), show_alert=True)
@@ -517,7 +516,7 @@ async def process_spam_example_callback(callback: types.CallbackQuery) -> str:
 async def extract_original_message_info(
     callback_message: types.Message,
     admin_id: int,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Extract original message info from forwarded message for spam example creation."""
     if not callback_message.reply_to_message:
         raise OriginalMessageExtractionError("No reply_to_message found")
@@ -533,7 +532,7 @@ async def extract_original_message_info(
     return info
 
 
-def _build_base_forwarded_info(original_message: types.Message) -> Dict[str, Any]:
+def _build_base_forwarded_info(original_message: types.Message) -> dict[str, Any]:
     return {
         "text": original_message.text or original_message.caption or "[MEDIA_MESSAGE]",
         "name": None,
@@ -550,13 +549,13 @@ def _build_base_forwarded_info(original_message: types.Message) -> Dict[str, Any
     }
 
 
-async def _safe_get_chat_bio(user_id: int) -> Optional[str]:
+async def _safe_get_chat_bio(user_id: int) -> str | None:
     user_info = await bot.get_chat(user_id)
     return user_info.bio if user_info else None
 
 
 async def _enrich_with_forward_metadata(
-    info: Dict[str, Any],
+    info: dict[str, Any],
     original_message: types.Message,
 ) -> None:
     origin = original_message.forward_origin
@@ -583,7 +582,7 @@ async def _enrich_with_forward_metadata(
 
 
 def _log_missing_forwarded_user_id(
-    info: Dict[str, Any],
+    info: dict[str, Any],
     original_message: types.Message,
 ) -> None:
     if info["user_id"]:
@@ -599,7 +598,7 @@ def _log_missing_forwarded_user_id(
 
 
 async def _fill_lookup_context_if_needed(
-    info: Dict[str, Any],
+    info: dict[str, Any],
     original_message: types.Message,
     admin_id: int,
 ) -> None:
@@ -645,10 +644,10 @@ async def _fill_lookup_context_if_needed(
 
 
 async def _find_message_lookup_result(
-    info: Dict[str, Any],
+    info: dict[str, Any],
     original_message: types.Message,
-    admin_group_ids: List[int],
-) -> Optional[Dict[str, Any]]:
+    admin_group_ids: list[int],
+) -> dict[str, Any] | None:
     forward_date = original_message.forward_date or original_message.date
     from_date = forward_date - timedelta(days=3)
     to_date = forward_date + timedelta(days=1)
@@ -662,8 +661,8 @@ async def _find_message_lookup_result(
 
 
 def _merge_lookup_result_into_info(
-    info: Dict[str, Any],
-    lookup_result: Dict[str, Any],
+    info: dict[str, Any],
+    lookup_result: dict[str, Any],
 ) -> None:
     info["group_chat_id"] = lookup_result["chat_id"]
     info["group_message_id"] = lookup_result["message_id"]
@@ -679,7 +678,7 @@ def _merge_lookup_result_into_info(
 
 
 async def _backfill_account_signals_if_missing(
-    info: Dict[str, Any],
+    info: dict[str, Any],
     original_message: types.Message,
 ) -> None:
     if not info["user_id"]:
@@ -699,7 +698,7 @@ async def _backfill_account_signals_if_missing(
         )
         if body := build_account_signals_body(merge_ctx):
             info["account_signals_context"] = body
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.debug(
             "On-demand context collection failed",
             extra={"user_id": info["user_id"], "error": str(e)},

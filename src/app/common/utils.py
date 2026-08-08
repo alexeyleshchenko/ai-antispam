@@ -3,7 +3,7 @@ import logging
 import os
 import re
 from functools import cache
-from typing import Any, Dict, Optional
+from typing import Any
 
 import yaml
 from aiogram import types
@@ -82,7 +82,7 @@ async def _retry_before_sleep(retry_state: RetryCallState) -> None:
         logger.warning(
             "All retries failed with error: %s",
             exc,
-            exc_info=True,
+            exc_info=exc,
         )
 
 
@@ -121,7 +121,7 @@ async def send_admin_dm(admin_id: int, text: str, log_context: str = "message") 
 
 
 @cache
-def load_config() -> Dict[str, Any]:
+def load_config() -> dict[str, Any]:
     """Load config from config.yaml."""
     with open("config.yaml", "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
@@ -161,7 +161,7 @@ def remove_lines_to_fit_len(text: str, max_len: int) -> str:
     return text
 
 
-def determine_effective_user_id(message: types.Message) -> Optional[int]:
+def determine_effective_user_id(message: types.Message) -> int | None:
     """
     Determine the effective user ID for moderation.
 
@@ -182,8 +182,8 @@ def determine_effective_user_id(message: types.Message) -> Optional[int]:
 
 
 def format_chat_or_channel_display(
-    title: Optional[str],
-    username: Optional[str],
+    title: str | None,
+    username: str | None,
     default_title: str = "Группа",
 ) -> str:
     """
@@ -196,8 +196,8 @@ def format_chat_or_channel_display(
 
 def format_chat_log(
     chat_id: int,
-    title: Optional[str] = None,
-    username: Optional[str] = None,
+    title: str | None = None,
+    username: str | None = None,
 ) -> str:
     """Format a chat ID for log messages: "-100123 ('My Group' @mygroup)" or "-100123"."""
     if title or username:
@@ -212,8 +212,8 @@ def format_chat_log(
 
 def format_user_log(
     user_id: int,
-    name: Optional[str] = None,
-    username: Optional[str] = None,
+    name: str | None = None,
+    username: str | None = None,
 ) -> str:
     """Format a user ID for log messages: "123 ('John' @john)" or "123"."""
     if name or username:
@@ -354,20 +354,20 @@ def clean_alert_text(text: str | None) -> str | None:
                     )
                 ]
                 return "\n".join(lines).strip()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.error(f"Error cleaning alert text: {e}")
     return text
 
 
-def get_system_config() -> Dict[str, Any]:
+def get_system_config() -> dict[str, Any]:
     """Get system configuration from config.yaml."""
     return load_config().get("system", {})
 
 
-_system_config_cache: Dict[str, Any] | None = None
+_system_config_cache: dict[str, Any] | None = None
 
 
-def _get_cached_system_config() -> Dict[str, Any]:
+def _get_cached_system_config() -> dict[str, Any]:
     """Return lazily loaded system config. Shared by all get_* URL/timeout helpers."""
     global _system_config_cache
     if _system_config_cache is None:
@@ -415,7 +415,7 @@ def get_webhook_timeout() -> int:
     return _get_cached_system_config().get("webhook_timeout", 55)
 
 
-_validated_llm: Dict[str, Any] | None = None
+_validated_llm: dict[str, Any] | None = None
 
 
 def reset_llm_config_validation() -> None:
@@ -436,7 +436,7 @@ def _parse_positive_number(value: Any, field: str) -> float:
     return parsed
 
 
-def validate_llm_config(config: Dict[str, Any] | None = None) -> None:
+def validate_llm_config(config: dict[str, Any] | None = None) -> None:
     """Validate llm section; store result for getters. Raises ValueError on failure."""
     global _validated_llm
     if config is None:
@@ -444,7 +444,7 @@ def validate_llm_config(config: Dict[str, Any] | None = None) -> None:
 
     llm = config.get("llm")
     if not isinstance(llm, dict):
-        raise ValueError(
+        raise ValueError(  # noqa: TRY004 — established public contract (tested)
             "config.yaml: missing or invalid 'llm' section (expected mapping)"
         )
 
@@ -467,7 +467,7 @@ def validate_llm_config(config: Dict[str, Any] | None = None) -> None:
     validated_models: list[str] = []
     for index, model in enumerate(models):
         if not isinstance(model, str):
-            raise ValueError(
+            raise ValueError(  # noqa: TRY004 — established public contract (tested)
                 f"config.yaml: llm.openrouter_models[{index}] must be a string"
             )
         model_id = model.strip()
@@ -485,7 +485,7 @@ def validate_llm_config(config: Dict[str, Any] | None = None) -> None:
     }
 
 
-def _require_validated_llm() -> Dict[str, Any]:
+def _require_validated_llm() -> dict[str, Any]:
     if _validated_llm is None:
         raise RuntimeError(
             "LLM config not validated; server must call validate_llm_config() at startup"
@@ -493,7 +493,7 @@ def _require_validated_llm() -> Dict[str, Any]:
     return _validated_llm
 
 
-def get_llm_config() -> Dict[str, Any]:
+def get_llm_config() -> dict[str, Any]:
     """Validated LLM config (gateway route ai-antispam mirror)."""
     return dict(_require_validated_llm())
 

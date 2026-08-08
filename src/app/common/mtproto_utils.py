@@ -6,12 +6,11 @@ particularly for converting between different chat ID formats.
 """
 
 import logging
-from typing import Union, Optional
 
 logger = logging.getLogger(__name__)
 
 
-def bot_api_chat_id_to_mtproto(chat_id: int) -> Union[int, str]:
+def bot_api_chat_id_to_mtproto(chat_id: int) -> int | str:
     """
     Convert a Bot API chat ID to MTProto format.
 
@@ -51,8 +50,8 @@ def bot_api_chat_id_to_mtproto(chat_id: int) -> Union[int, str]:
 
 
 def get_mtproto_chat_identifier(
-    chat_id: int, username: Optional[str] = None
-) -> Union[int, str]:
+    chat_id: int, username: str | None = None
+) -> int | str:
     """
     Get the appropriate MTProto identifier for a chat, preferring username over ID.
 

@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, List, Optional, cast
+from typing import cast
 
 from aiogram.exceptions import TelegramBadRequest
 
@@ -13,7 +13,7 @@ from .postgres_connection import get_pool
 logger = logging.getLogger(__name__)
 
 
-async def get_group(group_id: int) -> Optional[Group]:
+async def get_group(group_id: int) -> Group | None:
     """Retrieve group information"""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -88,7 +88,7 @@ async def is_moderation_enabled(group_id: int) -> bool:
         return bool(enabled)
 
 
-async def get_paying_admins(group_id: int) -> List[int]:
+async def get_paying_admins(group_id: int) -> list[int]:
     """Get list of admins with positive credits"""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -111,11 +111,10 @@ async def deduct_credits_from_admins(group_id: int, amount: int) -> int:
         int: admin_id if credits were successfully deducted, 0 if deduction failed
     """
     pool = await get_pool()
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            # Find admin with highest balance
-            admin_row = await conn.fetchrow(
-                """
+    async with pool.acquire() as conn, conn.transaction():
+        # Find admin with highest balance
+        admin_row = await conn.fetchrow(
+            """
                 SELECT a.admin_id, a.credits
                 FROM administrators a
                 JOIN group_administrators ga ON a.admin_id = ga.admin_id
@@ -123,15 +122,15 @@ async def deduct_credits_from_admins(group_id: int, amount: int) -> int:
                 ORDER BY a.credits DESC
                 LIMIT 1
             """,
-                group_id,
-            )
+            group_id,
+        )
 
-            if not admin_row or admin_row["credits"] < amount:
-                return 0
+        if not admin_row or admin_row["credits"] < amount:
+            return 0
 
-            # Deduct credits and record transaction
-            await conn.execute(
-                """
+        # Deduct credits and record transaction
+        await conn.execute(
+            """
                 UPDATE administrators
                 SET credits = credits - $1, last_active = NOW(),
                     credits_depleted_at = CASE
@@ -139,21 +138,21 @@ async def deduct_credits_from_admins(group_id: int, amount: int) -> int:
                         THEN NOW() ELSE credits_depleted_at END
                 WHERE admin_id = $3
             """,
-                amount,
-                amount,
-                admin_row["admin_id"],
-            )
+            amount,
+            amount,
+            admin_row["admin_id"],
+        )
 
-            await conn.execute(
-                """
+        await conn.execute(
+            """
                 INSERT INTO transactions (admin_id, amount, type, description)
                 VALUES ($1, $2, 'deduct', 'Group moderation credit deduction')
             """,
-                admin_row["admin_id"],
-                -amount,
-            )
+            admin_row["admin_id"],
+            -amount,
+        )
 
-            return admin_row["admin_id"]
+        return admin_row["admin_id"]
 
 
 async def cleanup_group_data(group_id: int) -> None:
@@ -220,7 +219,7 @@ async def clear_no_rights_detected_at(group_id: int) -> None:
         )
 
 
-async def get_groups_with_no_rights_past_grace(grace_days: int) -> List[int]:
+async def get_groups_with_no_rights_past_grace(grace_days: int) -> list[int]:
     """Return group IDs where no_rights_detected_at is set and past grace period."""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -236,7 +235,7 @@ async def get_groups_with_no_rights_past_grace(grace_days: int) -> List[int]:
         return [row["group_id"] for row in rows]
 
 
-async def get_admin_group_ids(admin_id: int) -> List[int]:
+async def get_admin_group_ids(admin_id: int) -> list[int]:
     """Get list of group IDs where admin is a member (DB only, no Telegram API)."""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -249,7 +248,7 @@ async def get_admin_group_ids(admin_id: int) -> List[int]:
         return [row["group_id"] for row in rows]
 
 
-async def get_admin_groups(admin_id: int) -> List[Dict]:
+async def get_admin_groups(admin_id: int) -> list[dict]:
     """Get list of groups where user is an admin"""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -284,14 +283,12 @@ async def get_admin_groups(admin_id: int) -> List[Dict]:
                     )
                     inaccessible_groups.append(row["group_id"])
                 elif isinstance(e, TelegramBadRequest):
-                    logger.error(
-                        f"Telegram error getting chat {row['group_id']}: {e}",
-                        exc_info=True,
+                    logger.exception(
+                        f"Telegram error getting chat {row['group_id']}",
                     )
                 else:
-                    logger.error(
-                        f"Error getting chat {row['group_id']}: {e}",
-                        exc_info=True,
+                    logger.exception(
+                        f"Error getting chat {row['group_id']}",
                     )
                 continue
 
@@ -299,7 +296,7 @@ async def get_admin_groups(admin_id: int) -> List[Dict]:
         for group_id in inaccessible_groups:
             try:
                 await cleanup_group_data(group_id)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 logger.error(f"Failed to cleanup inaccessible group {format_chat_log(group_id)}: {e}")
 
         return groups
@@ -310,7 +307,7 @@ def get_probation_min_events() -> int:
     return int(load_config().get("spam", {}).get("probation_min_events", 3))
 
 
-async def get_moderation_event_count(group_id: int, member_id: int) -> Optional[int]:
+async def get_moderation_event_count(group_id: int, member_id: int) -> int | None:
     """Return moderation_event_count if member is approved, else None."""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -397,137 +394,135 @@ async def add_member(group_id: int, member_id: int) -> bool:
 
 
 async def remove_member_from_group(
-    member_id: int, group_id: Optional[int] = None
+    member_id: int, group_id: int | None = None
 ) -> None:
     """Remove a member from a group or all groups"""
     pool = await get_pool()
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            if group_id is not None:
-                # Remove from specific group
-                await conn.execute(
-                    """
+    async with pool.acquire() as conn, conn.transaction():
+        if group_id is not None:
+            # Remove from specific group
+            await conn.execute(
+                """
                     DELETE FROM approved_members
                     WHERE group_id = $1 AND member_id = $2
                 """,
-                    group_id,
-                    member_id,
-                )
+                group_id,
+                member_id,
+            )
 
-                await conn.execute(
-                    """
+            await conn.execute(
+                """
                     UPDATE groups SET last_active = NOW()
                     WHERE group_id = $1
                 """,
-                    group_id,
-                )
-            else:
-                # Remove from all groups
-                groups = await conn.fetch(
-                    """
+                group_id,
+            )
+        else:
+            # Remove from all groups
+            groups = await conn.fetch(
+                """
                     SELECT DISTINCT group_id
                     FROM approved_members
                     WHERE member_id = $1
                 """,
-                    member_id,
-                )
+                member_id,
+            )
 
-                await conn.execute(
-                    """
+            await conn.execute(
+                """
                     DELETE FROM approved_members WHERE member_id = $1
                 """,
-                    member_id,
-                )
+                member_id,
+            )
 
-                if groups:
-                    await conn.execute(
-                        """
+            if groups:
+                await conn.execute(
+                    """
                         UPDATE groups SET last_active = NOW()
                         WHERE group_id = ANY($1::bigint[])
                     """,
-                        [g["group_id"] for g in groups],
-                    )
+                    [g["group_id"] for g in groups],
+                )
 
 
 async def update_group_admins(
     group_id: int,
-    admin_ids: List[int],
-    admin_usernames: Optional[List[Optional[str]]] = None,
-    group_title: Optional[str] = None,
-    group_username: Optional[str] = None,
+    admin_ids: list[int],
+    admin_usernames: list[str | None] | None = None,
+    group_title: str | None = None,
+    group_username: str | None = None,
 ) -> None:
     """Update list of group administrators with optional usernames"""
     pool = await get_pool()
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            # Ensure group exists, updating title/username when provided
+    async with pool.acquire() as conn, conn.transaction():
+        # Ensure group exists, updating title/username when provided
+        await conn.execute(
+            """
+            INSERT INTO groups (group_id, title, username, moderation_enabled, created_at, last_active)
+            VALUES ($1, $2, $3, TRUE, NOW(), NOW())
+            ON CONFLICT (group_id) DO UPDATE
+            SET last_active = NOW(),
+                title = COALESCE(EXCLUDED.title, groups.title),
+                username = COALESCE(EXCLUDED.username, groups.username)
+            """,
+            group_id,
+            group_title,
+            group_username,
+        )
+
+        # Handle both old format (just IDs) and new format (IDs with usernames)
+        usernames = cast(
+            "list[str | None]",
+            admin_usernames
+            if admin_usernames is not None
+            else [None] * len(admin_ids),
+        )
+
+        # Ensure we have usernames for all admins
+        if len(usernames) != len(admin_ids):
+            raise ValueError(
+                "admin_ids and admin_usernames must have the same length"
+            )
+
+        # Add/update admins
+        for admin_id, username in zip(admin_ids, usernames):
+            # Skip GROUP_ANONYMOUS_BOT_ID — it appears in admin lists for groups with
+            # anonymous admin enabled but cannot receive bot-to-bot DMs.
+            if admin_id == GROUP_ANONYMOUS_BOT_ID:
+                continue
+
+            # Save or update admin with username if provided
+            admin = await admin_operations.get_admin(admin_id)
+            if admin is None:
+                # Create new admin
+                admin = admin_operations.Administrator(
+                    admin_id=admin_id,
+                    username=username,
+                    credits=admin_operations.INITIAL_CREDITS,
+                    moderation_mode=admin_operations.ModerationMode.NOTIFY,
+                )
+            elif admin.username is None and username is not None:
+                admin.username = username
+
+            await admin_operations.save_admin(admin)
+
+            # Add as group administrator
             await conn.execute(
                 """
-                INSERT INTO groups (group_id, title, username, moderation_enabled, created_at, last_active)
-                VALUES ($1, $2, $3, TRUE, NOW(), NOW())
-                ON CONFLICT (group_id) DO UPDATE
-                SET last_active = NOW(),
-                    title = COALESCE(EXCLUDED.title, groups.title),
-                    username = COALESCE(EXCLUDED.username, groups.username)
+                INSERT INTO group_administrators (group_id, admin_id)
+                VALUES ($1, $2)
+                ON CONFLICT DO NOTHING
                 """,
                 group_id,
-                group_title,
-                group_username,
+                admin_id,
             )
-
-            # Handle both old format (just IDs) and new format (IDs with usernames)
-            usernames = cast(
-                "List[Optional[str]]",
-                admin_usernames
-                if admin_usernames is not None
-                else [None] * len(admin_ids),
-            )
-
-            # Ensure we have usernames for all admins
-            if len(usernames) != len(admin_ids):
-                raise ValueError(
-                    "admin_ids and admin_usernames must have the same length"
-                )
-
-            # Add/update admins
-            for admin_id, username in zip(admin_ids, usernames):
-                # Skip GROUP_ANONYMOUS_BOT_ID — it appears in admin lists for groups with
-                # anonymous admin enabled but cannot receive bot-to-bot DMs.
-                if admin_id == GROUP_ANONYMOUS_BOT_ID:
-                    continue
-
-                # Save or update admin with username if provided
-                admin = await admin_operations.get_admin(admin_id)
-                if admin is None:
-                    # Create new admin
-                    admin = admin_operations.Administrator(
-                        admin_id=admin_id,
-                        username=username,
-                        credits=admin_operations.INITIAL_CREDITS,
-                        moderation_mode=admin_operations.ModerationMode.NOTIFY,
-                    )
-                elif admin.username is None and username is not None:
-                    admin.username = username
-
-                await admin_operations.save_admin(admin)
-
-                # Add as group administrator
-                await conn.execute(
-                    """
-                    INSERT INTO group_administrators (group_id, admin_id)
-                    VALUES ($1, $2)
-                    ON CONFLICT DO NOTHING
-                    """,
-                    group_id,
-                    admin_id,
-                )
 
 
 async def upsert_awaiting_rights_group(
     group_id: int,
-    group_title: Optional[str] = None,
-    group_username: Optional[str] = None,
-    linked_channel_id: Optional[int] = None,
+    group_title: str | None = None,
+    group_username: str | None = None,
+    linked_channel_id: int | None = None,
 ) -> None:
     """Upsert a group row as known-but-inactive (awaiting admin rights).
 
@@ -546,23 +541,22 @@ async def upsert_awaiting_rights_group(
             the channel_post guard to detect protected channels)
     """
     pool = await get_pool()
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            await conn.execute(
-                """
-                INSERT INTO groups (group_id, title, username, moderation_enabled, linked_channel_id, created_at, last_active)
-                VALUES ($1, $2, $3, FALSE, $4, NOW(), NOW())
-                ON CONFLICT (group_id) DO UPDATE
-                SET last_active = NOW(),
-                    title = COALESCE(EXCLUDED.title, groups.title),
-                    username = COALESCE(EXCLUDED.username, groups.username),
-                    linked_channel_id = COALESCE(EXCLUDED.linked_channel_id, groups.linked_channel_id)
-                """,
-                group_id,
-                group_title,
-                group_username,
-                linked_channel_id,
-            )
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            """
+            INSERT INTO groups (group_id, title, username, moderation_enabled, linked_channel_id, created_at, last_active)
+            VALUES ($1, $2, $3, FALSE, $4, NOW(), NOW())
+            ON CONFLICT (group_id) DO UPDATE
+            SET last_active = NOW(),
+                title = COALESCE(EXCLUDED.title, groups.title),
+                username = COALESCE(EXCLUDED.username, groups.username),
+                linked_channel_id = COALESCE(EXCLUDED.linked_channel_id, groups.linked_channel_id)
+            """,
+            group_id,
+            group_title,
+            group_username,
+            linked_channel_id,
+        )
 
 
 async def activate_discussion_group(group_id: int) -> bool:
@@ -590,19 +584,18 @@ async def activate_discussion_group(group_id: int) -> bool:
         discussion group
     """
     pool = await get_pool()
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            updated = await conn.fetchval(
-                """
+    async with pool.acquire() as conn, conn.transaction():
+        updated = await conn.fetchval(
+            """
                 UPDATE groups
                 SET moderation_enabled = TRUE, last_active = NOW()
                 WHERE group_id = $1
                   AND linked_channel_id IS NOT NULL
                 RETURNING 1
                 """,
-                group_id,
-            )
-            return updated is not None
+            group_id,
+        )
+        return updated is not None
 
 
 async def get_protected_channel_ids() -> list[int]:

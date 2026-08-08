@@ -2,17 +2,19 @@
 
 import html
 import logging
-from typing import Optional
 
 from aiogram import types
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from ..common.bot import bot
-from ..common.telegram_errors import is_group_inaccessible_error, is_message_not_found_error, is_permission_error
 from ..common.mcp_client import McpHttpError, get_mcp_client
 from ..common.notifications import notify_admins_with_fallback_and_cleanup
-
+from ..common.telegram_errors import (
+    is_group_inaccessible_error,
+    is_message_not_found_error,
+    is_permission_error,
+)
 from ..common.utils import (
     determine_effective_user_id,
     format_chat_log,
@@ -25,13 +27,13 @@ from ..common.utils import (
     spam_notify_spammers_via_mcp_enabled,
 )
 from ..database import get_admin, get_admins_map
-from ..database.models import Administrator
-from ..i18n import normalize_lang, resolve_lang, t
 from ..database.group_operations import (
     remove_member_from_group,
     set_no_rights_detected_at,
 )
+from ..database.models import Administrator
 from ..database.spam_examples import insert_pending_spam_example
+from ..i18n import normalize_lang, resolve_lang, t
 from ..spam.account_signals import build_account_signals_body
 from ..types import MessageContextResult, MessageNotificationContext
 
@@ -40,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 async def _get_notification_lang(
     admin_ids: list[int],
-    fallback_user: Optional[types.User] = None,
+    fallback_user: types.User | None = None,
 ) -> str:
     """Resolve language for spam notifications from admin preferences or user fallback."""
     if not admin_ids:
@@ -55,7 +57,7 @@ async def handle_spam(
     message: types.Message,
     admin_ids: list[int],
     reason: str | None = None,
-    message_context_result: Optional["MessageContextResult"] = None,
+    message_context_result: MessageContextResult | None = None,
     skip_auto_delete: bool = False,
     is_low_confidence_not_spam: bool = False,
     confidence: int | None = None,
@@ -128,7 +130,7 @@ def filter_admins_for_auto_delete_notification(
 def create_admin_notification_keyboard(
     message: types.Message,
     all_admins_delete: bool,
-    pending_id: Optional[int] = None,
+    pending_id: int | None = None,
     *,
     lang: str = "en",
 ) -> InlineKeyboardMarkup:
@@ -164,7 +166,7 @@ def create_admin_notification_keyboard(
 def format_missing_permission_message(
     chat_title: str,
     permission_name: str,
-    chat_username: Optional[str] = None,
+    chat_username: str | None = None,
     *,
     lang: str = "en",
 ) -> str:
@@ -195,7 +197,7 @@ async def handle_permission_error(
     group_title: str | None,
     permission_name: str,
     action_description: str,
-    group_username: Optional[str] = None,
+    group_username: str | None = None,
     *,
     lang: str = "en",
 ) -> bool:
@@ -205,7 +207,7 @@ async def handle_permission_error(
 
     logger.warning(
         f"Cannot {action_description} in chat {format_chat_log(chat_id, group_title, group_username)}: {error}",
-        exc_info=True,
+        exc_info=error,
     )
     await set_no_rights_detected_at(chat_id)
     if admin_ids:
@@ -229,7 +231,7 @@ async def handle_permission_error(
                 cleanup_if_group_fails=True,
                 parse_mode="HTML",
             )
-        except Exception as notify_exc:
+        except Exception as notify_exc:  # noqa: BLE001
             logger.warning(
                 f"Failed to notify admins about missing rights for {action_description}: {notify_exc}"
             )
@@ -243,7 +245,7 @@ def format_admin_notification_message(
     *,
     lang: str = "en",
     is_low_confidence_not_spam: bool = False,
-    confidence: Optional[int] = None,
+    confidence: int | None = None,
     include_mode_tip: bool = True,
 ) -> str:
     """Format spam notification text for admins."""
@@ -315,9 +317,9 @@ async def notify_admins(
     all_admins_delete: bool,
     admin_ids: list[int],
     reason: str | None = None,
-    message_context_result: Optional["MessageContextResult"] = None,
+    message_context_result: MessageContextResult | None = None,
     is_low_confidence_not_spam: bool = False,
-    confidence: Optional[int] = None,
+    confidence: int | None = None,
 ) -> bool:
     """Notify admins about spam. Returns True if at least one notification succeeded."""
     if not message.from_user:
@@ -573,7 +575,7 @@ def build_spam_block_notification_message(
 async def send_mcp_message_to_user(
     *,
     user_id: int,
-    username: Optional[str],
+    username: str | None,
     message: str,
     message_type: str,
 ) -> bool:
@@ -604,10 +606,9 @@ async def send_mcp_message_to_user(
         )
         return False
     except Exception as e:
-        logger.error(
+        logger.exception(
             "Unexpected error sending MCP message",
             extra={**log_extra, "error": str(e)},
-            exc_info=True,
         )
         return False
 
@@ -615,7 +616,7 @@ async def send_mcp_message_to_user(
 async def notify_spam_contacts_via_mcp(
     message: types.Message,
     reason: str | None = None,
-    message_context_result: Optional["MessageContextResult"] = None,
+    message_context_result: MessageContextResult | None = None,
 ) -> None:
     """Send MCP promotional notifications to spammers and spamming channel admins."""
     if not spam_notify_spammers_via_mcp_enabled():

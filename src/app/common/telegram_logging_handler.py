@@ -4,7 +4,6 @@ import logging
 import threading
 import time
 from collections import deque
-from typing import Deque, Optional
 
 from aiogram import Bot
 
@@ -34,17 +33,17 @@ class TelegramLogHandler(logging.Handler):
         super().__init__(level=logging.WARNING)
         self._bot = bot
         self._chat_id = chat_id
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._lock = threading.Lock()
-        self._message_queue: Deque[str] = deque(maxlen=100)
-        self._sent_timestamps: Deque[float] = deque(maxlen=throttling_capacity)
+        self._message_queue: deque[str] = deque(maxlen=100)
+        self._sent_timestamps: deque[float] = deque(maxlen=throttling_capacity)
         self._throttling_window = throttling_window
         self._dedupe_window = dedupe_window
         # Deduplicate by rendered message content across the whole dedupe window.
         # The previous implementation deduped only *consecutive* identical messages,
         # which still allowed "repetitive logs" when interleaved with other messages.
         self._text_last_sent_at: dict[str, float] = {}
-        self._send_task: Optional[asyncio.Task] = None
+        self._send_task: asyncio.Task | None = None
         self._shutdown_flag = False
 
     def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -63,7 +62,7 @@ class TelegramLogHandler(logging.Handler):
 
         try:
             text = self._render_message(record)
-        except Exception:
+        except Exception:  # noqa: BLE001
             self.handleError(record)
             return
 
@@ -141,7 +140,7 @@ class TelegramLogHandler(logging.Handler):
             task.cancel()
             try:
                 await asyncio.wait_for(task, timeout=timeout)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger = logging.getLogger(__name__)
                 logger.warning(
                     f"TelegramLogHandler stop() timed out after {timeout}s, task may not have completed"

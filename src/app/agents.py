@@ -2,7 +2,7 @@
 
 import logging
 import os
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 from openai import AsyncOpenAI
@@ -109,7 +109,7 @@ def _create_openrouter_model(model_name: str) -> OpenAIChatModel:
 
 
 # Gateway agent (single model, high retry count via transport)
-_gateway_model: Optional[OpenAIChatModel] = None
+_gateway_model: OpenAIChatModel | None = None
 
 
 def get_gateway_model() -> OpenAIChatModel:
@@ -201,7 +201,7 @@ def get_openrouter_chat_agent() -> Agent[str]:
 
 
 # Chat agent (plain text, gateway first, fallback to OpenRouter)
-_chat_agent: Optional[Agent[str]] = None
+_chat_agent: Agent[str] | None = None
 
 
 def get_chat_agent() -> Agent[str]:

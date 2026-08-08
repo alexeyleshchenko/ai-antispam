@@ -38,19 +38,17 @@ async def perform_complete_group_cleanup(
                 f"Group {format_chat_log(group_id, group_title, group_username)} already inaccessible during leave, proceeding with DB cleanup"
             )
         else:
-            logger.error(
-                f"Failed to leave group {format_chat_log(group_id, group_title, group_username)}: {leave_e}",
-                exc_info=True,
+            logger.exception(
+                f"Failed to leave group {format_chat_log(group_id, group_title, group_username)}",
             )
             return False
 
     try:
         await cleanup_group_data(group_id)
         return True
-    except Exception as db_e:
-        logger.error(
-            f"Failed to clean DB for group {format_chat_log(group_id, group_title, group_username)}: {db_e}",
-            exc_info=True,
+    except Exception:
+        logger.exception(
+            f"Failed to clean DB for group {format_chat_log(group_id, group_title, group_username)}",
         )
         return False
 
@@ -90,7 +88,7 @@ async def notify_admins_with_fallback_and_cleanup(
             else:
                 # Get admin chat info with retry (expensive API call)
                 @retry_on_network_error
-                async def get_chat_info():
+                async def get_chat_info(admin_id=admin_id):
                     return await bot.get_chat(admin_id)
 
                 admin_chat = await get_chat_info()
@@ -131,7 +129,7 @@ async def notify_admins_with_fallback_and_cleanup(
 
             # Send message with retry
             @retry_on_network_error
-            async def send_private_message():
+            async def send_private_message(admin_id=admin_id, msg_text=msg_text):
                 return await bot.send_message(
                     admin_id,
                     msg_text,
@@ -160,10 +158,9 @@ async def notify_admins_with_fallback_and_cleanup(
                     "can't parse entities" in error_msg
                     or "Unsupported start tag" in error_msg
                 ):
-                    logger.error(
+                    logger.exception(
                         f"Content parsing error when notifying admin {admin_id}: {e}. "
                         "This indicates malformed HTML in the notification message content.",
-                        exc_info=True,
                         extra={
                             "error_message": error_msg,
                             "private_message": msg_text,
@@ -216,7 +213,7 @@ async def notify_admins_with_fallback_and_cleanup(
             with contextlib.suppress(Exception):
 
                 @retry_on_network_error
-                async def get_chat_info_fallback():
+                async def get_chat_info_fallback(admin_id=admin_id):
                     return await bot.get_chat(admin_id)
 
                 admin_chat = await get_chat_info_fallback()

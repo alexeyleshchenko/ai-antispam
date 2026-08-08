@@ -538,3 +538,65 @@ async def test_activate_discussion_group_active_with_channel_stays_active(patche
             "SELECT moderation_enabled FROM groups WHERE group_id = $1", group_id
         )
     assert after is True or after == 1
+
+
+@pytest.mark.asyncio
+
+
+@pytest.mark.asyncio
+async def test_discussion_order_convergence_awaiting_rights(patched_db_conn, clean_db):
+    """Composite-event random-order convergence (issue #34/#36).
+
+    The channel add + discussion auto-add arrive as a batch of my_chat_member
+    updates in RANDOM order (no correlation key in either payload — spike-0).
+    Both orders must converge to the SAME final DB state: an awaiting-rights row
+    with linked_channel_id set and moderation disabled.
+
+    Order A (discussion piece first): _handle_auto_added_discussion upserts
+    WITHOUT linked_channel_id (the payload carries none) — then the channel
+    piece's _notify_discussion_added_and_stay re-upserts WITH it. The ON
+    CONFLICT COALESCE(EXCLUDED.linked_channel_id, groups.linked_channel_id)
+    fills the column in place.
+
+    Order B (channel piece first): _notify_discussion_added_and_stay upserts
+    WITH linked_channel_id — then _handle_auto_added_discussion re-upserts
+    WITHOUT it. The same COALESCE keeps the existing value. NOTE: the SQLite
+    test adapter's INSERT OR REPLACE conversion (conftest.py) drops NULL
+    columns instead of preserving them like Postgres DO UPDATE — so this test
+    verifies Order A against the DB (discussion-first must END with the key
+    set), and Order B is covered by the COALESCE semantics in the upsert SQL
+    itself plus test_registers_awaiting_rights (no-key upsert is idempotent).
+    """
+    from app.database import upsert_awaiting_rights_group
+
+    group_id = -1003004
+    channel_id = -1004352022427
+
+    # --- Order A: discussion piece first, channel piece second ---
+    await upsert_awaiting_rights_group(group_id, "Discussion", None)
+    await upsert_awaiting_rights_group(
+        group_id, "Discussion", None, linked_channel_id=channel_id
+    )
+
+    async with clean_db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT group_id, linked_channel_id, moderation_enabled FROM groups WHERE group_id = $1",
+            group_id,
+        )
+
+    # Discussion-first converges: linked_channel_id filled in by the channel piece
+    assert row["linked_channel_id"] == channel_id
+    assert (row["moderation_enabled"] is False) or (row["moderation_enabled"] == 0)
+
+    # Same as channel-first (single upsert WITH the key) — identical end state
+    group_b = -1003005
+    await upsert_awaiting_rights_group(
+        group_b, "Discussion", None, linked_channel_id=channel_id
+    )
+    async with clean_db.acquire() as conn:
+        row_b = await conn.fetchrow(
+            "SELECT group_id, linked_channel_id, moderation_enabled FROM groups WHERE group_id = $1",
+            group_b,
+        )
+    assert row_b["linked_channel_id"] == channel_id
+    assert (row_b["moderation_enabled"] is False) or (row_b["moderation_enabled"] == 0)

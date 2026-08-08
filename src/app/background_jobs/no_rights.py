@@ -43,7 +43,7 @@ async def _leave_group_and_record_for_notification(
         display = format_chat_or_channel_display(
             title, username, t("en", "common.group")
         )
-    except Exception:
+    except Exception:  # noqa: BLE001
         display = str(group_id)
     success = await perform_complete_group_cleanup(group_id, title, username)
     if success and group and group.admin_ids:
@@ -105,7 +105,7 @@ async def leave_no_rights_groups() -> None:
                     logger.warning(
                         f"Failed to leave group {format_chat_log(group_id)} (unexpected cleanup failure)"
                     )
-            except Exception as cleanup_e:
+            except Exception as cleanup_e:  # noqa: BLE001
                 logger.warning(f"Cleanup failed for {format_chat_log(group_id)}: {cleanup_e}")
 
     # Notify each admin about their left groups

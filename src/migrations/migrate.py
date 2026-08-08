@@ -4,7 +4,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 import asyncio
-from typing import Any, List
+from typing import Any
 
 import asyncpg
 
@@ -45,7 +45,7 @@ async def create_database():
         await system_conn.close()
 
 
-async def migrate(conn: Any) -> List[str]:
+async def migrate(conn: Any) -> list[str]:
     """
     Perform database migration operations.
 
@@ -69,7 +69,7 @@ async def migrate(conn: Any) -> List[str]:
     return operations
 
 
-async def add_context_columns_migration(conn: Any) -> List[str]:
+async def add_context_columns_migration(conn: Any) -> list[str]:
     """
     Add context columns to existing spam_examples table.
     This migration adds stories_context, reply_context, and account_age_context columns.
@@ -105,7 +105,7 @@ async def add_context_columns_migration(conn: Any) -> List[str]:
     return operations
 
 
-async def add_pending_spam_example_columns_migration(conn: Any) -> List[str]:
+async def add_pending_spam_example_columns_migration(conn: Any) -> list[str]:
     """
     Add pending spam example columns: confirmed, chat_id, message_id, effective_user_id.
     """
@@ -169,7 +169,7 @@ async def add_pending_spam_example_columns_migration(conn: Any) -> List[str]:
     return operations
 
 
-async def add_low_balance_columns_migration(conn: Any) -> List[str]:
+async def add_low_balance_columns_migration(conn: Any) -> list[str]:
     """
     Add credits_depleted_at and low_balance_warned_at to administrators.
     Backfill credits_depleted_at = NOW() for existing admins with credits = 0.
@@ -217,7 +217,7 @@ async def add_low_balance_columns_migration(conn: Any) -> List[str]:
     return operations
 
 
-async def add_language_code_migration(conn: Any) -> List[str]:
+async def add_language_code_migration(conn: Any) -> list[str]:
     """
     Add language_code column to administrators.
     Backfill: all existing admins get language_code = 'ru'.
@@ -251,7 +251,7 @@ async def add_language_code_migration(conn: Any) -> List[str]:
     return operations
 
 
-async def add_message_lookup_cache_migration(conn: Any) -> List[str]:
+async def add_message_lookup_cache_migration(conn: Any) -> list[str]:
     """
     Create message_lookup_cache table for PostgreSQL message lookup (replaces Logfire).
     """
@@ -293,12 +293,12 @@ async def add_message_lookup_cache_migration(conn: Any) -> List[str]:
     return operations
 
 
-async def rename_account_signals_context_migration(conn: Any) -> List[str]:
+async def rename_account_signals_context_migration(conn: Any) -> list[str]:
     """
     Rename account_age_context -> account_signals_context on spam_examples and message_lookup_cache.
     Idempotent: only renames when the old column exists.
     """
-    operations: List[str] = []
+    operations: list[str] = []
     print("Starting account_signals_context column rename...")
 
     async with conn.transaction():
@@ -326,7 +326,7 @@ async def rename_account_signals_context_migration(conn: Any) -> List[str]:
     return operations
 
 
-async def add_timestamptz_migration(conn: Any) -> List[str]:
+async def add_timestamptz_migration(conn: Any) -> list[str]:
     """
     Convert all TIMESTAMP columns to TIMESTAMPTZ.
     Existing values are interpreted as UTC. Enables timezone-aware datetime from Python/asyncpg.
@@ -423,7 +423,7 @@ async def add_timestamptz_migration(conn: Any) -> List[str]:
     return operations
 
 
-async def add_is_active_column_migration(conn: Any) -> List[str]:
+async def add_is_active_column_migration(conn: Any) -> list[str]:
     """
     Ensure administrators table has the is_active column.
     Needed for broadcast scripts and cleanup logic.
@@ -466,7 +466,7 @@ async def add_is_active_column_migration(conn: Any) -> List[str]:
     return operations
 
 
-async def add_depletion_warning_flags_migration(conn: Any) -> List[str]:
+async def add_depletion_warning_flags_migration(conn: Any) -> list[str]:
     """
     Add depletion_day_1_warned_at and depletion_day_6_warned_at to avoid sending
     duplicate day-1/day-6 warnings on each deploy or job run.
@@ -499,7 +499,7 @@ async def add_depletion_warning_flags_migration(conn: Any) -> List[str]:
     return operations
 
 
-async def add_no_rights_column_migration(conn: Any) -> List[str]:
+async def add_no_rights_column_migration(conn: Any) -> list[str]:
     """
     Add no_rights_detected_at to groups. Used for grace period before leaving
     groups where bot has no required rights.
@@ -631,12 +631,12 @@ async def run_no_rights_column_migration():
         await add_no_rights_column_migration(conn)
 
 
-async def add_moderation_mode_migration(conn: Any) -> List[str]:
+async def add_moderation_mode_migration(conn: Any) -> list[str]:
     """
     Phase 1: CREATE TYPE moderation_mode, add column, backfill from delete_spam.
     Keeps delete_spam for rollback / old image compatibility.
     """
-    operations: List[str] = []
+    operations: list[str] = []
     print("Starting moderation_mode migration (phase 1)...")
 
     async with conn.transaction():
@@ -692,9 +692,9 @@ async def add_moderation_mode_migration(conn: Any) -> List[str]:
     return operations
 
 
-async def drop_delete_spam_migration(conn: Any) -> List[str]:
+async def drop_delete_spam_migration(conn: Any) -> list[str]:
     """Phase 3: drop legacy delete_spam column (moderation_mode remains)."""
-    operations: List[str] = []
+    operations: list[str] = []
     print("Starting drop delete_spam migration (phase 3)...")
 
     async with conn.transaction():
@@ -738,7 +738,7 @@ async def run_drop_delete_spam_migration():
         await drop_delete_spam_migration(conn)
 
 
-async def add_moderation_event_count_migration(conn: Any) -> List[str]:
+async def add_moderation_event_count_migration(conn: Any) -> list[str]:
     """
     Add moderation_event_count to approved_members and grandfather existing rows
     to probation_min_events so legacy members keep trusted skip on edits.

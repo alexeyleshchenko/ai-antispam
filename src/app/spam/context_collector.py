@@ -9,7 +9,7 @@ process while delegating specific collection tasks to specialized modules.
 import asyncio
 import contextlib
 import logging
-from typing import Optional, cast
+from typing import cast
 
 import logfire
 
@@ -21,14 +21,14 @@ from ..types import (
     SpamClassificationContext,
 )
 from .stories import collect_user_stories
-from .user_profile import collect_user_context, collect_channel_summary_by_id
 from .user_context_utils import establish_peer_resolution_context
+from .user_profile import collect_channel_summary_by_id, collect_user_context
 
 logger = logging.getLogger(__name__)
 
 
 def _to_stories_context(
-    result: object, user_id: int, username: Optional[str]
+    result: object, user_id: int, username: str | None
 ) -> ContextResult[str]:
     """Convert gather result to ContextResult for stories."""
     if isinstance(result, Exception):
@@ -41,7 +41,7 @@ def _to_stories_context(
 
 
 def _to_profile_context(
-    result: object, user_id: int, username: Optional[str]
+    result: object, user_id: int, username: str | None
 ) -> SpamClassificationContext:
     """Convert gather result to SpamClassificationContext from profile collection."""
     if isinstance(result, Exception):
@@ -59,7 +59,7 @@ def _to_profile_context(
 async def collect_user_context_with_stories(
     message,
     user_id: int,
-    username: Optional[str] = None,
+    username: str | None = None,
 ) -> SpamClassificationContext:
     """
     Collect user context (profile and account info) and stories in parallel.
@@ -121,7 +121,7 @@ async def collect_user_context_with_stories(
                 stories=stories_context,
             )
 
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             # Fallback in case gather itself fails
             logger.info(
                 "Failed to collect stories and profile data in parallel",

@@ -1,16 +1,15 @@
 import logging
-from typing import Optional
 
 import logfire
 
-from ..types import ContextResult, ContextStatus, StorySummary
 from ..common.mtproto_client import MtprotoHttpError, get_mtproto_client
+from ..types import ContextResult, ContextStatus, StorySummary
 
 logger = logging.getLogger(__name__)
 
 
 async def collect_user_stories(
-    user_id: int, username: Optional[str] = None, chat_id: Optional[int] = None
+    user_id: int, username: str | None = None, chat_id: int | None = None
 ) -> ContextResult[str]:
     """
     Collects stories for a user and formats them into a summary string.
@@ -88,9 +87,8 @@ async def collect_user_stories(
             )
             return ContextResult(status=ContextStatus.FAILED, error=str(e))
         except Exception as e:
-            logger.error(
+            logger.exception(
                 "Unexpected error fetching user stories",
                 extra={"user_id": user_id, "error": str(e)},
-                exc_info=True,
             )
             return ContextResult(status=ContextStatus.FAILED, error=str(e))

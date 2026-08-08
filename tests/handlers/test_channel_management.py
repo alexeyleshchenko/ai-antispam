@@ -9,7 +9,10 @@ from src.app.handlers.message.channel_management import (
     build_channel_discussion_added_message,
     build_channel_instruction_message,
     build_channel_instruction_userbot_message,
+    notify_channel_admins,
     notify_channel_admins_and_leave,
+    _notify_wrong_place_and_leave,
+    _resolve_linked_discussion_id,
 )
 
 
@@ -258,6 +261,10 @@ class TestDecisionFlowUserbotFallback:
 
         with (
             patch(
+                "src.app.handlers.message.channel_management.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            patch(
                 "src.app.handlers.message.channel_management._resolve_linked_discussion_id",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -298,6 +305,10 @@ class TestDecisionFlowUserbotFallback:
 
         with (
             patch(
+                "src.app.handlers.message.channel_management.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            patch(
                 "src.app.handlers.message.channel_management._resolve_linked_discussion_id",
                 new_callable=AsyncMock,
                 return_value=None,
@@ -327,6 +338,10 @@ class TestDecisionFlowUserbotFallback:
         )
 
         with (
+            patch(
+                "src.app.handlers.message.channel_management.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
             patch(
                 "src.app.handlers.message.channel_management._resolve_linked_discussion_id",
                 new_callable=AsyncMock,
@@ -456,6 +471,62 @@ class TestProtectedChannelGuard:
             _protected_channel_ids.discard(-1009999999999)
 
     @pytest.mark.asyncio
+    async def test_channel_post_does_not_settle(self):
+        """handle_channel_post decides immediately — no composite settle/dedupe.
+
+        The settle window + _pending_composites registry live ONLY in the
+        status_handlers my_chat_member branch. handle_channel_post must NOT
+        wait for Telegram propagation: a post is a real message in a channel the
+        bot was added to long ago, not part of the add-time composite batch.
+        This test proves channel_post never reads or writes the registry and
+        calls the leave flow directly (no sleep before the decision).
+        """
+        from src.app.handlers.message.channel_management import (
+            handle_channel_post,
+            _protected_channel_ids,
+        )
+
+        _protected_channel_ids.discard(-1008888888888)
+        try:
+            message = MagicMock()
+            message.chat.id = -1008888888888
+
+            # Registry access would raise: channel_post must never touch it.
+            class _RegistryBomb(dict):
+                def __getitem__(self, k):
+                    raise AssertionError("channel_post must not read _pending_composites")
+
+            with (
+                patch(
+                    "src.app.handlers.message.channel_management._is_protected_channel",
+                    new_callable=AsyncMock,
+                    return_value=False,
+                ),
+                patch(
+                    "src.app.handlers.message.channel_management.notify_channel_admins_and_leave",
+                    new_callable=AsyncMock,
+                ) as mock_notify,
+                patch(
+                    "src.app.handlers.status_handlers._pending_composites",
+                    _RegistryBomb(),
+                ),
+                patch(
+                    "src.app.handlers.status_handlers._composites_lock",
+                    MagicMock(side_effect=AssertionError("channel_post must not lock composites")),
+                ),
+                patch(
+                    "src.app.handlers.status_handlers.asyncio.sleep",
+                    AsyncMock(side_effect=AssertionError("channel_post must not settle")),
+                ),
+            ):
+                result = await handle_channel_post(message)
+
+            assert result == "channel_post_left_channel"
+            mock_notify.assert_awaited_once()
+        finally:
+            _protected_channel_ids.discard(-1008888888888)
+
+    @pytest.mark.asyncio
     async def test_is_protected_channel_db_recheck_on_miss(self):
         """Miss in memory → DB re-check discovers and caches the channel."""
         from src.app.handlers.message.channel_management import (
@@ -552,3 +623,159 @@ class TestProtectedChannelGuard:
             with pytest.raises(ProtectedChannelCheckUnavailable):
                 await _is_protected_channel(-1007777777777)
         _protected_channel_ids.discard(-1007777777777)
+
+
+
+
+class TestWithForbiddenRetry:
+    """Propagation-aware retry: Forbidden is transient within the add window."""
+
+    @pytest.mark.asyncio
+    async def test_get_chat_retry_then_success(self):
+        """_resolve_linked_discussion_id retries Forbidden then succeeds (getChat)."""
+        chat = _make_chat()
+        bot = _make_bot()
+        forbidden = TelegramForbiddenError(
+            MagicMock(), "Forbidden: bot is not a member of the channel chat"
+        )
+        fresh = MagicMock(id=chat.id, title="C", linked_chat_id=-1002222222222)
+
+        calls = {"n": 0}
+
+        async def flaky_get_chat(chat_id):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise forbidden
+            return fresh
+
+        bot.get_chat = AsyncMock(side_effect=flaky_get_chat)
+        with patch(
+            "src.app.handlers.message.channel_management.asyncio.sleep",
+            new_callable=AsyncMock,
+        ) as mock_sleep:
+            linked = await _resolve_linked_discussion_id(chat, bot)
+
+        assert linked == -1002222222222
+        assert calls["n"] == 3
+        mock_sleep.assert_awaited()
+        assert mock_sleep.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_get_chat_administrators_retry_then_success(self):
+        """notify_channel_admins retries Forbidden then succeeds (get_chat_administrators)."""
+        chat = _make_chat()
+        bot = _make_bot()
+        forbidden = TelegramForbiddenError(
+            MagicMock(), "Forbidden: bot is not a member of the channel chat"
+        )
+
+        calls = {"n": 0}
+
+        async def flaky_get_admins(chat_id):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise forbidden
+            return []
+
+        bot.get_chat_administrators = AsyncMock(side_effect=flaky_get_admins)
+        with patch(
+            "src.app.handlers.message.channel_management.asyncio.sleep",
+            new_callable=AsyncMock,
+        ) as mock_sleep:
+            notified = await notify_channel_admins(chat, "instruction", bot)
+
+        assert notified == []
+        assert calls["n"] == 2
+        mock_sleep.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_leave_chat_retry_then_success(self):
+        """_notify_wrong_place_and_leave retries leave_chat Forbidden then leaves."""
+        chat = _make_chat()
+        bot = _make_bot()
+        forbidden = TelegramForbiddenError(
+            MagicMock(), "Forbidden: bot is not a member of the channel chat"
+        )
+
+        calls = {"n": 0}
+
+        async def flaky_leave(chat_id):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise forbidden
+            return None
+
+        bot.leave_chat = AsyncMock(side_effect=flaky_leave)
+        with (
+            patch(
+                "src.app.handlers.message.channel_management.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as mock_sleep,
+            patch(
+                "src.app.handlers.message.channel_management.get_discussion_username",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "src.app.handlers.message.channel_management.notify_channel_admins",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+        ):
+            await _notify_wrong_place_and_leave(chat, bot)
+
+        assert calls["n"] == 2
+        mock_sleep.assert_awaited_once()
+        bot.leave_chat.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_leave_chat_all_fail_loud_error_and_userbot_fallback(self):
+        """leave_chat all-fail → ERROR + logfire span channel_leave_failed, userbot fallback still attempted."""
+        chat = _make_chat()
+        bot = _make_bot(
+            leave_side_effect=TelegramForbiddenError(
+                MagicMock(), "Forbidden: bot is not a member of the channel chat"
+            )
+        )
+        adding_user = MagicMock()
+        adding_user.id = 12345
+        adding_user.username = "channeladmin"
+        adding_user.is_bot = False
+
+        with (
+            patch(
+                "src.app.handlers.message.channel_management.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "src.app.handlers.message.channel_management.get_discussion_username",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "src.app.handlers.message.channel_management.notify_channel_admins",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "src.app.handlers.message.channel_management.send_userbot_dm",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_send_userbot,
+            patch(
+                "src.app.handlers.message.channel_management.logfire.span"
+            ) as mock_span,
+            patch(
+                "src.app.handlers.message.channel_management.logger.error"
+            ) as mock_error,
+        ):
+            await _notify_wrong_place_and_leave(chat, bot, adding_user=adding_user)
+
+        # Loud failure: ERROR logged + channel_leave_failed span recorded
+        mock_error.assert_called_once()
+        mock_span.assert_called_once()
+        span_name = mock_span.call_args.args[0]
+        assert span_name == "channel_leave_failed"
+        # Userbot fallback still attempted after the loud failure
+        mock_send_userbot.assert_called_once()
+        assert mock_send_userbot.call_args.kwargs["username"] == "channeladmin"

@@ -44,7 +44,7 @@ def load_locales() -> None:
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     _LOCALES[lang] = yaml.safe_load(f) or {}
-            except Exception as e:
+            except (OSError, UnicodeDecodeError, yaml.YAMLError) as e:
                 logger.warning(f"Failed to load locale {lang}: {e}")
                 _LOCALES[lang] = {}
         else:

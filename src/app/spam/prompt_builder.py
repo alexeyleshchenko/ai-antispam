@@ -20,7 +20,7 @@ Prompt Structure:
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import logfire
 
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 @logfire.no_auto_trace  # Called per optional field on every example; avoids hot-path span noise
-def _norm_opt(value: Any) -> Optional[str]:
+def _norm_opt(value: Any) -> str | None:
     """Coerce value to stripped string, or None if empty."""
     if value is None:
         return None
@@ -44,7 +44,7 @@ def _norm_opt(value: Any) -> Optional[str]:
 
 
 @logfire.no_auto_trace
-def format_spam_example_input(example: Dict[str, Any]) -> Dict[str, Any]:
+def format_spam_example_input(example: dict[str, Any]) -> dict[str, Any]:
     """
     Build a dict for a spam_examples DB row (few-shot input only).
 
@@ -69,7 +69,7 @@ class SpamPromptBuilder:
     def __init__(self):
         self.prompt_parts = []
 
-    def build_base_instructions(self, lang: str = "en") -> "SpamPromptBuilder":
+    def build_base_instructions(self, lang: str = "en") -> SpamPromptBuilder:
         """Add the core spam classification instructions."""
         explanation_hint = t(lang, "prompt.explanation_hint")
         self.prompt_parts.append(f"""You are a spam message classifier for Telegram groups.
@@ -84,7 +84,7 @@ Few-shot examples and live requests use the same JSON structure with keys: `mess
 {explanation_hint}""")
         return self
 
-    def add_user_info_guidance(self) -> "SpamPromptBuilder":
+    def add_user_info_guidance(self) -> SpamPromptBuilder:
         """Add guidance for analyzing user profile information (name, bio)."""
         self.prompt_parts.append("""
 ## USER INFORMATION ANALYSIS
@@ -95,7 +95,7 @@ HIGH SPAM INDICATORS:
 - BIO: Links to Telegram bots (including "helpful" bots or "free tools" — often lead-gen funnels), external sites, t.me/ links to channels or bots, "consultation" offers, or phrases like "чекай канал в био".""")
         return self
 
-    def add_message_metadata_guidance(self) -> "SpamPromptBuilder":
+    def add_message_metadata_guidance(self) -> SpamPromptBuilder:
         """Add guidance for message metadata signals (via_bot, inline keyboard URLs)."""
         self.prompt_parts.append("""
 ## MESSAGE METADATA SIGNALS
@@ -106,7 +106,7 @@ The following metadata fields may appear in the message:
 - [INLINE_KEYBOARD_URLS]: URLs from inline keyboard buttons attached to the message. Spam messages often hide malicious links behind innocent-looking buttons (e.g., "Подробно" leading to phishing sites like fake government services). Treat these URLs as part of the message content for classification.""")
         return self
 
-    def add_trojan_horse_guidance(self) -> "SpamPromptBuilder":
+    def add_trojan_horse_guidance(self) -> SpamPromptBuilder:
         """Add Trojan Horse pattern guidance (clean message + dirty profile)."""
         self.prompt_parts.append("""
 ## TROJAN HORSE PATTERN (Critical)
@@ -122,7 +122,7 @@ SIGNAL HIERARCHY: Profile indicators (name, bio, stories, profile photo age, Tel
 - Missing stories, no linked channel, and photo_age=unknown are common for ordinary accounts; stack them only with real spam signals in the message or profile (bots, offers, etc.), not as standalone proof of a "coordinated" or fake account.""")
         return self
 
-    def add_linked_channel_guidance(self) -> "SpamPromptBuilder":
+    def add_linked_channel_guidance(self) -> SpamPromptBuilder:
         """Add guidance for analyzing linked channel context."""
         self.prompt_parts.append("""
 ## LINKED CHANNEL ANALYSIS
@@ -147,7 +147,7 @@ even if the current message appears innocent. Porn channels often use innocent c
 to drive traffic to their profiles.""")
         return self
 
-    def add_stories_guidance(self) -> "SpamPromptBuilder":
+    def add_stories_guidance(self) -> SpamPromptBuilder:
         """Add guidance for analyzing user stories context."""
         self.prompt_parts.append("""
 ## USER STORIES ANALYSIS
@@ -165,7 +165,7 @@ Flag as HIGH SPAM if stories contain:
 This is a strong spam indicator even if the message itself appears legitimate.""")
         return self
 
-    def add_account_signals_guidance(self) -> "SpamPromptBuilder":
+    def add_account_signals_guidance(self) -> SpamPromptBuilder:
         """Add guidance for profile photo age and Telegram Premium (Account Signals section)."""
         self.prompt_parts.append("""
 ## ACCOUNT SIGNALS ANALYSIS
@@ -182,7 +182,7 @@ Risk assessment (photo age alone — combine with message and other profile sign
 Telegram Premium (is_premium=true): weak legitimacy signal — paid accounts are somewhat less typical of disposable spam-only socks, but premium does NOT rule out spam. Do not argue "typical fake/new spam account" based only on empty stories, no linked channel, and unknown photo_age when is_premium=true unless strong indicators exist elsewhere (name, bio, bot links, bait in message, etc.).""")
         return self
 
-    def add_reply_context_guidance(self) -> "SpamPromptBuilder":
+    def add_reply_context_guidance(self) -> SpamPromptBuilder:
         """Add guidance for analyzing reply context."""
         self.prompt_parts.append("""
 ## DISCUSSION CONTEXT ANALYSIS
@@ -215,7 +215,7 @@ Some signs of irrelevant replies:
 """)
         return self
 
-    def add_knowledge_sharing_guidance(self) -> "SpamPromptBuilder":
+    def add_knowledge_sharing_guidance(self) -> SpamPromptBuilder:
         """Add guidance for detecting bait based on sharing materials or knowledge."""
         self.prompt_parts.append("""
 ## KNOWLEDGE SHARING & BAIT DETECTION
@@ -231,7 +231,7 @@ HIGH SPAM INDICATORS:
 Genuine human sharing is usually direct or occurs naturally within the conversation flow without being the primary purpose of the message.""")
         return self
 
-    def add_ai_generated_content_guidance(self) -> "SpamPromptBuilder":
+    def add_ai_generated_content_guidance(self) -> SpamPromptBuilder:
         """Add guidance for detecting AI-generated content and unusual emoji usage."""
         self.prompt_parts.append("""
 ## AI-GENERATED CONTENT & EMOJI DETECTION
@@ -248,7 +248,7 @@ These AI signatures are strong indicators of spam REGARDLESS of whether the prof
 in stories or linked channels. The goal of such posts is to lure users to a bot-controlled profile.""")
         return self
 
-    def add_response_format(self, lang: str = "en") -> "SpamPromptBuilder":
+    def add_response_format(self, lang: str = "en") -> SpamPromptBuilder:
         """Add the required response format specification."""
         reason_format = t(lang, "prompt.reason_format")
         self.prompt_parts.append(f"""
@@ -270,8 +270,8 @@ Confidence calibration policy: use medium confidence for ambiguous cases with mi
         return self
 
     async def add_spam_examples(
-        self, admin_ids: Optional[List[int]] = None
-    ) -> "SpamPromptBuilder":
+        self, admin_ids: list[int] | None = None
+    ) -> SpamPromptBuilder:
         """Add spam examples from the database as unified JSON."""
         try:
             db_examples = await get_spam_examples(admin_ids)
@@ -293,7 +293,7 @@ Confidence calibration policy: use medium confidence for ambiguous cases with mi
                 separators=(",", ":"),
             )
             self.prompt_parts.append(examples_json)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning(f"Failed to load spam examples for prompt: {e}")
 
         return self
@@ -304,8 +304,8 @@ Confidence calibration policy: use medium confidence for ambiguous cases with mi
 
 
 async def build_system_prompt(
-    admin_ids: Optional[List[int]] = None,
-    context: Optional[SpamClassificationContext] = None,
+    admin_ids: list[int] | None = None,
+    context: SpamClassificationContext | None = None,
     lang: str = "en",
 ) -> str:
     """
@@ -350,9 +350,9 @@ async def build_system_prompt(
 
 @logfire.no_auto_trace
 def _context_result_to_str(
-    context_result: Optional[ContextResult],
+    context_result: ContextResult | None,
     empty_msg: str,
-) -> Optional[str]:
+) -> str | None:
     """Convert a ContextResult to a string or null for JSON serialization."""
     if context_result is None:
         return None
@@ -374,7 +374,7 @@ def _context_result_to_str(
 @logfire.no_auto_trace
 def format_spam_request(
     text: str,
-    context: Optional[SpamClassificationContext] = None,
+    context: SpamClassificationContext | None = None,
 ) -> str:
     """
     Format a spam classification request as JSON for the LLM.

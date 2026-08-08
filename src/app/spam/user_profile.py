@@ -1,18 +1,11 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 import logfire
 
-from ..types import (
-    ContextResult,
-    ContextStatus,
-    LinkedChannelSummary,
-    SpamClassificationContext,
-    UserAccountInfo,
-)
 from ..common.bot import bot
 from ..common.mtproto_client import (
     MtprotoHttpClient,
@@ -21,17 +14,24 @@ from ..common.mtproto_client import (
 )
 from ..common.mtproto_utils import bot_api_chat_id_to_mtproto
 from ..common.utils import load_config
+from ..types import (
+    ContextResult,
+    ContextStatus,
+    LinkedChannelSummary,
+    SpamClassificationContext,
+    UserAccountInfo,
+)
 from .linked_channel_mention import extract_first_channel_mention
 
 logger = logging.getLogger(__name__)
-JsonDict = Dict[str, Any]
+JsonDict = dict[str, Any]
 
 
 def _empty_context_result() -> ContextResult:
     return ContextResult(status=ContextStatus.EMPTY)
 
 
-def _extract_is_premium(full_user: JsonDict) -> Optional[bool]:
+def _extract_is_premium(full_user: JsonDict) -> bool | None:
     """Extract is_premium from a users.getFullUser full_user dict.
 
     The response contains a 'user' object with a direct premium field.
@@ -55,7 +55,7 @@ def _get_recent_posts_limit() -> int:
     return limit if isinstance(limit, int) and limit > 0 else 5
 
 
-async def _resolve_username_to_channel_id(username: str) -> Optional[int]:
+async def _resolve_username_to_channel_id(username: str) -> int | None:
     """
     Resolve a Telegram username to a channel/supergroup chat ID via Bot API.
     Returns None if not a channel/supergroup or on error.
@@ -65,7 +65,7 @@ async def _resolve_username_to_channel_id(username: str) -> Optional[int]:
         chat_type = getattr(chat, "type", None)
         if chat_type in ("channel", "supergroup"):
             return chat.id
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.debug(
             "Could not resolve username to channel",
             extra={"username": username, "error": str(exc)},
@@ -74,8 +74,8 @@ async def _resolve_username_to_channel_id(username: str) -> Optional[int]:
 
 
 def _parse_user_context_input(
-    user_id_or_message: Any, username: Optional[str], chat_id: Optional[int]
-) -> tuple[Any, Optional[int], Optional[int], Optional[str]]:
+    user_id_or_message: Any, username: str | None, chat_id: int | None
+) -> tuple[Any, int | None, int | None, str | None]:
     if hasattr(user_id_or_message, "chat"):
         message_obj = user_id_or_message
         actual_user_id = (
@@ -100,10 +100,9 @@ def _parse_user_context_input(
 
 def _pick_first_linked_channel_mention(
     full_user: JsonDict, message: Any
-) -> tuple[Optional[str], Optional[str]]:
-    if about := full_user.get("about"):
-        if username_from_bio := extract_first_channel_mention(about):
-            return username_from_bio, "bio"
+) -> tuple[str | None, str | None]:
+    if (about := full_user.get("about")) and (username_from_bio := extract_first_channel_mention(about)):
+        return username_from_bio, "bio"
 
     if message is not None:
         msg_text = (message.text or message.caption or "") or ""
@@ -115,7 +114,7 @@ def _pick_first_linked_channel_mention(
 
 
 def _resolve_user_identifier(
-    *, actual_user_id: Optional[int], username: Optional[str]
+    *, actual_user_id: int | None, username: str | None
 ) -> str | int | None:
     return username or actual_user_id
 
@@ -124,14 +123,14 @@ async def _fetch_full_user_and_account_context(
     *,
     client: MtprotoHttpClient,
     identifier: str | int,
-    actual_user_id: Optional[int],
-    username: Optional[str],
-) -> tuple[JsonDict, JsonDict, ContextResult, Optional[bool]]:
+    actual_user_id: int | None,
+    username: str | None,
+) -> tuple[JsonDict, JsonDict, ContextResult, bool | None]:
     """Fetch full user via MTProto. Returns (full_user, full_user_response, account_info_result, is_premium)."""
     full_user: JsonDict = {}
     full_user_response: JsonDict = {}
     account_info_result = _empty_context_result()
-    is_premium: Optional[bool] = None
+    is_premium: bool | None = None
     try:
         full_user_response = await client.call(
             "users.getFullUser",
@@ -171,8 +170,8 @@ async def _collect_linked_channel_from_profile(
     *,
     full_user: JsonDict,
     full_user_response: JsonDict,
-    actual_user_id: Optional[int],
-) -> Optional[ContextResult]:
+    actual_user_id: int | None,
+) -> ContextResult | None:
     if not (personal_channel_id := full_user.get("personal_channel_id")):
         return None
 
@@ -193,7 +192,7 @@ async def _collect_linked_channel_from_mentions(
     *,
     full_user: JsonDict,
     message: Any,
-    actual_user_id: Optional[int],
+    actual_user_id: int | None,
 ) -> ContextResult:
     candidate_username, source = _pick_first_linked_channel_mention(full_user, message)
     if candidate_username and source:
@@ -224,7 +223,7 @@ async def _collect_linked_channel_from_mentions(
 
 def _extract_personal_channel_username(
     full_user_response: dict, personal_channel_id: int
-) -> Optional[str]:
+) -> str | None:
     """
     Extract username for personal channel from MTProto users.getFullUser chats array.
     The response includes the channel in chats with id and username—no Bot API needed.
@@ -249,8 +248,8 @@ def _extract_personal_channel_username(
 
 async def collect_user_context(
     user_id_or_message,
-    username: Optional[str] = None,
-    chat_id: Optional[int] = None,
+    username: str | None = None,
+    chat_id: int | None = None,
 ) -> SpamClassificationContext:
     """
     Collects user context including linked channel summary and account age signals.
@@ -318,8 +317,8 @@ async def collect_user_context(
 async def collect_channel_summary_by_id(
     channel_id: int,
     user_reference: str | int | None = "unknown",
-    username: Optional[str] = None,
-    channel_source: Optional[str] = None,
+    username: str | None = None,
+    channel_source: str | None = None,
 ) -> ContextResult[LinkedChannelSummary]:
     """
     Collects summary stats and user list for a specific channel ID.
@@ -434,8 +433,8 @@ async def _fetch_channel_edge_message(
     client: MtprotoHttpClient,
     peer_reference: int | str,
     *,
-    limit_offset: Optional[int],
-) -> tuple[Optional[JsonDict], Optional[int]]:
+    limit_offset: int | None,
+) -> tuple[JsonDict | None, int | None]:
     params = _build_history_params(
         peer_reference=peer_reference,
         add_offset=max(limit_offset or 0, 0),
@@ -458,7 +457,7 @@ async def _fetch_recent_posts_content(
     client: MtprotoHttpClient,
     peer_reference: int | str,
     limit: int = 5,
-) -> tuple[list[str], Optional[JsonDict], Optional[JsonDict], Optional[int]]:
+) -> tuple[list[str], JsonDict | None, JsonDict | None, int | None]:
     """
     Fetch content from recent posts in a channel to analyze for spam indicators.
     Returns tuple of (content_list, newest_message, oldest_message_in_batch, total_count).
@@ -495,7 +494,7 @@ async def _fetch_recent_posts_content(
     return content_list, newest_message, oldest_message_in_batch, total_count
 
 
-def _extract_message_text(message: Dict[str, Any]) -> str:
+def _extract_message_text(message: dict[str, Any]) -> str:
     """Extract text content from a Telegram message."""
     if not message:
         return ""
@@ -512,15 +511,15 @@ def _extract_message_text(message: Dict[str, Any]) -> str:
     return message_text
 
 
-def _extract_date(timestamp: Any) -> Optional[datetime]:
+def _extract_date(timestamp: Any) -> datetime | None:
     if not timestamp:
         return None
     if isinstance(timestamp, int):
-        return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        return datetime.fromtimestamp(timestamp, tz=UTC)
     if isinstance(timestamp, str):
         try:
             # Strings returned by the bridge are ISO8601 with timezone
-            return datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            return datetime.fromisoformat(timestamp)
         except ValueError:
             logger.debug(
                 "Failed to parse date from timestamp", extra={"timestamp": timestamp}
@@ -529,7 +528,7 @@ def _extract_date(timestamp: Any) -> Optional[datetime]:
     return None
 
 
-def _extract_message_date(message: Optional[Dict[str, Any]]) -> Optional[datetime]:
+def _extract_message_date(message: dict[str, Any] | None) -> datetime | None:
     return _extract_date(message.get("date")) if message else None
 
 
@@ -550,7 +549,7 @@ def _build_history_params(
 
 def _extract_first_message_and_total(
     history: JsonDict,
-) -> tuple[Optional[JsonDict], Optional[int]]:
+) -> tuple[JsonDict | None, int | None]:
     messages = history.get("messages", [])
     first_message = messages[0] if messages else None
     total = history.get("count")

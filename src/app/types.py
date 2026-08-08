@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from enum import Enum
-from typing import TYPE_CHECKING, Any, Dict, Generic, List, Optional, TypeVar
-
 import html
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from enum import Enum
+from typing import TYPE_CHECKING, Any
 
 from .common.utils import (
     determine_effective_user_id,
@@ -14,8 +13,6 @@ from .common.utils import (
 
 if TYPE_CHECKING:
     from aiogram import types
-
-T = TypeVar("T")
 
 
 class ContextStatus(Enum):
@@ -26,12 +23,12 @@ class ContextStatus(Enum):
 
 
 @dataclass
-class ContextResult(Generic[T]):
+class ContextResult[T]:
     status: ContextStatus
-    content: Optional[T] = None
-    error: Optional[str] = None
+    content: T | None = None
+    error: str | None = None
 
-    def get_fragment(self, not_found_default: Optional[str] = None) -> Optional[str]:
+    def get_fragment(self, not_found_default: str | None = None) -> str | None:
         """Extract content as prompt fragment string.
 
         Uses to_prompt_fragment if available, else str(content).
@@ -47,7 +44,7 @@ class ContextResult(Generic[T]):
         obj: Any,
         *,
         empty_marker: str = "[EMPTY]",
-    ) -> Optional[str]:
+    ) -> str | None:
         """Extract fragment string from Logfire-serialized ContextResult dict.
 
         Handles dict with status/content/error. Returns content if status=found
@@ -67,13 +64,13 @@ class ContextResult(Generic[T]):
 
 @dataclass(slots=True)
 class LinkedChannelSummary:
-    subscribers: Optional[int]
-    total_posts: Optional[int]
-    post_age_delta: Optional[int]
-    recent_posts_content: Optional[list[str]] = None
-    users: Optional[list[dict]] = None
-    channel_source: Optional[str] = None  # "linked" | "bio" | "message"
-    channel_id: Optional[int] = None  # for display/resolve in /start etc.
+    subscribers: int | None
+    total_posts: int | None
+    post_age_delta: int | None
+    recent_posts_content: list[str] | None = None
+    users: list[dict] | None = None
+    channel_source: str | None = None  # "linked" | "bio" | "message"
+    channel_id: int | None = None  # for display/resolve in /start etc.
 
     def to_prompt_fragment(self) -> str:
         if self.post_age_delta is None or self.post_age_delta < 0:
@@ -108,13 +105,13 @@ class LinkedChannelSummary:
 @dataclass(slots=True)
 class UserAccountInfo:
     user_id: int
-    profile_photo_date: Optional[datetime] = None
+    profile_photo_date: datetime | None = None
 
     @property
-    def photo_age_months(self) -> Optional[int]:
+    def photo_age_months(self) -> int | None:
         if not self.profile_photo_date:
             return None
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         return (
             (now.year - self.profile_photo_date.year) * 12
             + now.month
@@ -150,12 +147,12 @@ class UserAccountInfo:
             return "photo_age=unknown"
         try:
             if isinstance(date_val, str):
-                dt = datetime.fromisoformat(date_val.replace("Z", "+00:00"))
+                dt = datetime.fromisoformat(date_val)
             else:
                 return "photo_age=unknown"
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
+                dt = dt.replace(tzinfo=UTC)
             age_months = max(
                 0,
                 (now.year - dt.year) * 12 + now.month - dt.month,
@@ -175,13 +172,13 @@ class PeerResolutionContext:
     message_id: int
 
     # Optional context parameters
-    chat_username: Optional[str] = None
-    message_thread_id: Optional[int] = None
-    reply_to_message_id: Optional[int] = None
+    chat_username: str | None = None
+    message_thread_id: int | None = None
+    reply_to_message_id: int | None = None
     is_topic_message: bool = False
-    main_channel_id: Optional[int] = None
-    main_channel_username: Optional[str] = None
-    original_channel_post_id: Optional[int] = None
+    main_channel_id: int | None = None
+    main_channel_username: str | None = None
+    original_channel_post_id: int | None = None
 
     @classmethod
     def from_message(
@@ -243,9 +240,9 @@ class MessageContextResult:
 
     message_text: str
     is_story: bool
-    context: "SpamClassificationContext"
+    context: SpamClassificationContext
     linked_channel_found: bool = False
-    channel_users: Optional[list[dict]] = None
+    channel_users: list[dict] | None = None
 
 
 @dataclass
@@ -253,18 +250,18 @@ class SpamClassificationContext:
     """Context information for spam classification."""
 
     # Basic user info (always available from message)
-    name: Optional[str] = None
-    bio: Optional[str] = None
+    name: str | None = None
+    bio: str | None = None
 
     # Enriched context (may require additional API calls)
-    linked_channel: Optional[ContextResult[LinkedChannelSummary]] = None
-    stories: Optional[ContextResult[str]] = None
-    reply: Optional[str] = None
-    profile_photo_age: Optional[ContextResult[UserAccountInfo]] = None
-    is_premium: Optional[bool] = None
+    linked_channel: ContextResult[LinkedChannelSummary] | None = None
+    stories: ContextResult[str] | None = None
+    reply: str | None = None
+    profile_photo_age: ContextResult[UserAccountInfo] | None = None
+    is_premium: bool | None = None
     is_channel_sender: bool = False
     # DB replay: raw ACCOUNT SIGNALS body from spam_examples / cache (photo + optional is_premium lines)
-    account_signals_snapshot: Optional[str] = None
+    account_signals_snapshot: str | None = None
 
     @property
     def include_linked_channel_guidance(self) -> bool:
@@ -309,15 +306,15 @@ class SpamClassificationContext:
 class StorySummary:
     id: int
     date: int
-    caption: Optional[str] = None
-    entities: Optional[List[Dict[str, Any]]] = None
-    media: Optional[Dict[str, Any]] = None
-    media_areas: Optional[List[Dict[str, Any]]] = None
+    caption: str | None = None
+    entities: list[dict[str, Any]] | None = None
+    media: dict[str, Any] | None = None
+    media_areas: list[dict[str, Any]] | None = None
 
     @staticmethod
     def contains_links(
-        media: Optional[Dict[str, Any]],
-        media_areas: Optional[List[Dict[str, Any]]] = None,
+        media: dict[str, Any] | None,
+        media_areas: list[dict[str, Any]] | None = None,
     ) -> bool:
         """Return True if media or media_areas contain links for context."""
         if media_areas:
@@ -330,8 +327,8 @@ class StorySummary:
 
     @staticmethod
     def _link_strings_from_areas(
-        areas: Optional[List[Dict[str, Any]]],
-    ) -> List[str]:
+        areas: list[dict[str, Any]] | None,
+    ) -> list[str]:
         """Extract 'Link: url' strings from MediaAreaUrl areas."""
         if not areas:
             return []
@@ -345,18 +342,18 @@ class StorySummary:
         parts = []
         if self.caption:
             parts.append(f"Caption: {self.caption}")
-        if self.entities:
-            if entity_links := [
-                f"Link: {entity['url']}"
-                for entity in self.entities
-                if entity.get("_") == "messageEntityTextUrl" and entity.get("url")
-            ]:
-                parts.append(f"Links: {', '.join(entity_links)}")
+        if self.entities and (entity_links := [
+            f"Link: {entity['url']}"
+            for entity in self.entities
+            if entity.get("_") == "messageEntityTextUrl" and entity.get("url")
+        ]):
+            parts.append(f"Links: {', '.join(entity_links)}")
         if self.media:
             media_links = []
-            if self.media.get("_") == "messageMediaWebPage":
-                if url := self.media.get("webpage", {}).get("url"):
-                    media_links.append(f"Link: {url}")
+            if self.media.get("_") == "messageMediaWebPage" and (
+                url := self.media.get("webpage", {}).get("url")
+            ):
+                media_links.append(f"Link: {url}")
             media_links.extend(
                 self._link_strings_from_areas(self.media.get("media_areas"))
             )
@@ -369,18 +366,18 @@ class StorySummary:
 
 @dataclass(slots=True)
 class MessageNotificationContext:
-    effective_user_id: Optional[int]
+    effective_user_id: int | None
     content_text: str
     chat_title: str
-    chat_username: Optional[str]  # raw username without @
+    chat_username: str | None  # raw username without @
     is_channel_sender: bool
     violator_name: str
-    violator_username: Optional[str]  # raw username without @
+    violator_username: str | None  # raw username without @
     forward_source: str
     message_link: str
     entity_name: str
     entity_type: str
-    entity_username: Optional[str]  # raw username without @
+    entity_username: str | None  # raw username without @
 
     @classmethod
     def from_message(cls, message: types.Message) -> MessageNotificationContext:

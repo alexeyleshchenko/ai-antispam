@@ -1,18 +1,20 @@
 """Handlers for bot status updates in chats."""
 
+import asyncio
 import contextlib
 import logging
-from datetime import datetime, timezone
-from typing import List
+import time
+from dataclasses import dataclass
+from datetime import UTC, datetime
 
 import logfire
 from aiogram import F, types
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import or_f
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from ..common.trace_context import get_root_span
 
 from ..common.bot import bot
+from ..common.notifications import notify_admins_with_fallback_and_cleanup
 from ..common.telegram_errors import (
     GROUP_ANONYMOUS_BOT_ID,
     is_bot_kicked_error,
@@ -21,7 +23,7 @@ from ..common.telegram_errors import (
     is_permission_error,
     is_user_blocked_error,
 )
-from ..common.notifications import notify_admins_with_fallback_and_cleanup
+from ..common.trace_context import get_root_span
 from ..common.utils import (
     format_chat_or_channel_display,
     get_add_to_group_url,
@@ -44,6 +46,33 @@ from .dp import dp
 from .message.channel_management import notify_channel_admins_and_leave
 
 logger = logging.getLogger(__name__)
+
+# Settle window before deciding a channel-add: Telegram is eventually consistent
+# — the my_chat_member update arrives BEFORE the API sees the bot as a member —
+# and the linked-discussion auto-add piece lands ~0.9s later (observed). A module
+# constant so tests can shrink it without sleeping.
+_CHANNEL_SETTLE_SECONDS = 2.0
+
+
+@dataclass
+class _PendingComposite:
+    """State for an in-flight channel-add composite decision."""
+
+    seen_at: float
+    decision_started: bool = True
+
+
+# Channel-add composite correlation, keyed by (channel_id, actor_id). Telegram
+# delivers a channel add (and possibly the linked-discussion auto-add) as a batch
+# of my_chat_member updates in RANDOM order, and the update arrives BEFORE the
+# API sees the bot as a member. The settle window lets propagation + the sibling
+# piece land before ONE decision runs; the registry dedupes webhook redeliveries
+# while a decision is in flight. Entries are deleted on completion, so a later
+# legit re-add (even seconds after a leave) finds no entry and gets a fresh
+# decision. Per-process only: a redelivery hitting another worker re-runs the
+# decision, which is safe because it is DB-idempotent (upserts).
+_pending_composites: dict[tuple[int, int], _PendingComposite] = {}
+_composites_lock: asyncio.Lock = asyncio.Lock()
 
 
 async def _resolve_lang(admin_ids: list[int] | None, fallback: str = "en") -> str:
@@ -91,6 +120,19 @@ async def _handle_auto_added_discussion(
     wiped the discussion row). Instead, upsert the group as known-but-inactive
     (moderation_enabled=false); a later human promotion to admin flips it active
     via the existing permission-update path. Idempotent vs the channel handler.
+
+    RANDOM-ORDER CONVERGENCE (composite event, issue #34/#36): the channel add
+    and this discussion auto-add arrive as a batch of my_chat_member updates in
+    random order, and neither payload carries a correlation key (spike-0 — no
+    `linked_chat_id`). Both orderings converge to the SAME end state:
+    - discussion-first: THIS upsert (no linked_channel_id) → channel piece's
+      _notify_discussion_added_and_stay re-upserts WITH linked_channel_id →
+      ON CONFLICT COALESCE fills the column in place.
+    - channel-first: _notify_discussion_added_and_stay upserts WITH the key →
+      THIS upsert re-runs WITHOUT it → COALESCE keeps the existing value.
+    Both end at: awaiting-rights row (moderation_enabled=false) with
+    linked_channel_id set. Verified by
+    tests/database/test_group_operations.py::test_discussion_order_convergence_awaiting_rights.
     """
     logger.info(
         "Bot auto-added to linked discussion group %s ('%s') — registering as awaiting rights",
@@ -140,28 +182,49 @@ async def handle_bot_status_update(event: types.ChatMemberUpdated) -> str:
         result_tag = "bot_status_updated"
 
         if new_status in ["administrator", "member", "restricted"]:
-            await _handle_bot_added(event, chat_id, admin_id, chat_title, new_status)
-            result_tag = "bot_added_group"
+            # Channels never run the group onboarding path (no promo, no
+            # setup_done, no `groups` upsert for a channel — the 09:28 "защищаю
+            # группу test" lie). Channel adds go straight to the composite +
+            # notify_channel_admins_and_leave decision flow below.
+            if event.chat.type != "channel":
+                await _handle_bot_added(event, chat_id, admin_id, chat_title, new_status)
+                result_tag = "bot_added_group"
         elif new_status in ["left", "kicked"]:
             await _handle_bot_removed(event, chat_id, admin_id, chat_title, new_status)
             result_tag = "bot_removed_group"
 
-        # Если бот добавлен в канал, отправляем инструкцию с ссылкой на обсуждение (если есть)
+        # Если бот добавлен в канал — это составное событие: Telegram шлёт батч
+        # my_chat_member апдейтов (канал + возможно авто-добавление в связанное
+        # обсуждение) в случайном порядке, причём апдейт приходит ДО того, как
+        # API видит бота участником канала (eventual consistency). Ждём
+        # settle-окно, чтобы распространение членства и sibling-апдейт успели
+        # дойти, и принимаем ОДНО решение. Повторные доставки того же события
+        # (webhook retry) дедуплицируются, пока решение в полёте.
         if event.chat.type == "channel" and new_status in [
             "administrator",
             "member",
             "restricted",
         ]:
-            await notify_channel_admins_and_leave(
-                event.chat, bot, adding_user=event.from_user
-            )
+            key = (chat_id, admin_id)
+            async with _composites_lock:
+                if key in _pending_composites:
+                    # Повторная доставка того же channel-add — решение уже идёт.
+                    return "bot_channel_add_deduped"
+                _pending_composites[key] = _PendingComposite(seen_at=time.time())
+            try:
+                await asyncio.sleep(_CHANNEL_SETTLE_SECONDS)
+                await notify_channel_admins_and_leave(
+                    event.chat, bot, adding_user=event.from_user
+                )
+            finally:
+                async with _composites_lock:
+                    _pending_composites.pop(key, None)
 
         return result_tag
 
-    except Exception as e:
-        logger.error(
-            f"Error handling bot status update in chat '{chat_title}' ({chat_id}): {e}",
-            exc_info=True,
+    except Exception:
+        logger.exception(
+            f"Error handling bot status update in chat '{chat_title}' ({chat_id})",
         )
         raise
 
@@ -175,6 +238,12 @@ async def _handle_permission_update(
     chat_title: str,
 ) -> None:
     """Handle updates to bot's permissions."""
+    # Channels: a rights change must never fire the group promo/setup path —
+    # a channel update here would post the promo INTO the channel and send the
+    # "group protected" setup lie (R7). The channel decision flow (composite +
+    # notify_channel_admins_and_leave) owns channels.
+    if event.chat.type == "channel":
+        return
     if not (
         isinstance(event.old_chat_member, types.ChatMemberAdministrator)
         and isinstance(event.new_chat_member, types.ChatMemberAdministrator)
@@ -386,7 +455,7 @@ async def _notify_admins_about_rights(
     chat_id: int,
     chat_title: str,
     username: str | None,
-    admin_ids: List[int],
+    admin_ids: list[int],
     assume_human_admins: bool = False,
     is_already_admin: bool = False,
 ) -> None:
@@ -433,7 +502,7 @@ async def _notify_admins_about_removal(
     chat_id: int,
     chat_title: str,
     username: str | None,
-    admin_ids: List[int],
+    admin_ids: list[int],
     assume_human_admins: bool = False,
 ) -> None:
     """Notify admins when bot is removed from a group."""
@@ -465,7 +534,7 @@ async def _send_promo_message(
     chat_id: int,
     chat_title: str,
     username: str | None,
-    admin_ids: List[int],
+    admin_ids: list[int],
     added_by: int,
 ) -> None:
     """Send promotional message to the group when bot is added."""
@@ -500,7 +569,7 @@ async def _send_promo_message(
             )
 
         await send_promo_message()
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning(
             f"Failed to send promo message to chat {chat_id} ('{chat_title}'): {e}"
         )
@@ -602,7 +671,7 @@ async def handle_member_service_message(message: types.Message) -> str:
                         return "service_message_no_rights_cleanup"
                     else:
                         return "service_message_no_rights"
-                except Exception as notify_exc:
+                except Exception as notify_exc:  # noqa: BLE001
                     logger.info(
                         f"Failed to notify admins about missing rights: {notify_exc}"
                     )
@@ -636,10 +705,9 @@ async def handle_member_service_message(message: types.Message) -> str:
                 )
                 return "service_message_delete_failed"
 
-    except Exception as e:
-        logger.error(
-            f"Error handling service message in chat {chat_id} ('{message.chat.title or ''}'): {e}",
-            exc_info=True,
+    except Exception:
+        logger.exception(
+            f"Error handling service message in chat {chat_id} ('{message.chat.title or ''}')",
         )
         return "service_message_error"
 
@@ -653,7 +721,7 @@ async def _deactivate_admin_after_block(admin_id: int) -> None:
             # Calculate total time user was with bot in days
             admin = await get_admin(admin_id)
             if admin:
-                total_days = (datetime.now(timezone.utc) - admin.created_at).days
+                total_days = (datetime.now(UTC) - admin.created_at).days
 
                 # Set the total time on the root span for trace-level visibility
                 get_root_span().set_attribute("total_user_days", total_days)

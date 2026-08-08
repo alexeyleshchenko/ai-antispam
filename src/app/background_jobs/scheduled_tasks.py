@@ -12,11 +12,11 @@ import asyncio
 import logging
 
 from ..common.utils import load_config
-from .low_balance import run_low_balance_checks
-from .no_rights import leave_no_rights_groups
 from ..database.message_lookup import cleanup_old_lookup_entries
 from ..database.message_operations import cleanup_old_message_history
 from ..database.spam_examples import cleanup_pending_spam_examples
+from .low_balance import run_low_balance_checks
+from .no_rights import leave_no_rights_groups
 
 logger = logging.getLogger(__name__)
 SECONDS_PER_DAY = 86400
@@ -36,29 +36,29 @@ async def run_scheduled_jobs() -> None:
     """Run all scheduled jobs: low balance checks and cache cleanups."""
     try:
         await run_low_balance_checks()
-    except Exception as e:
-        logger.error(f"Low balance checks failed: {e}", exc_info=True)
+    except Exception:
+        logger.exception("Low balance checks failed")
 
     try:
         await leave_no_rights_groups()
-    except Exception as e:
-        logger.error(f"No-rights group leave failed: {e}", exc_info=True)
+    except Exception:
+        logger.exception("No-rights group leave failed")
 
     ttl = _get_cache_ttl_days()
     try:
         await cleanup_old_lookup_entries(days=ttl["message_lookup"])
-    except Exception as e:
-        logger.error(f"message_lookup_cache cleanup failed: {e}", exc_info=True)
+    except Exception:
+        logger.exception("message_lookup_cache cleanup failed")
 
     try:
         await cleanup_old_message_history(days=ttl["message_history"])
-    except Exception as e:
-        logger.error(f"message_history cleanup failed: {e}", exc_info=True)
+    except Exception:
+        logger.exception("message_history cleanup failed")
 
     try:
         await cleanup_pending_spam_examples(days=ttl["pending_spam"])
-    except Exception as e:
-        logger.error(f"pending spam_examples cleanup failed: {e}", exc_info=True)
+    except Exception:
+        logger.exception("pending spam_examples cleanup failed")
 
 
 async def scheduled_jobs_loop() -> None:
@@ -69,6 +69,6 @@ async def scheduled_jobs_loop() -> None:
         except asyncio.CancelledError:
             logger.info("Scheduled jobs loop cancelled")
             raise
-        except Exception as e:
-            logger.error(f"Scheduled jobs loop error: {e}", exc_info=True)
+        except Exception:
+            logger.exception("Scheduled jobs loop error")
         await asyncio.sleep(SECONDS_PER_DAY)

@@ -36,7 +36,7 @@ async def handle_dispatcher_error(event: ErrorEvent) -> None:
         logger.warning(
             "Permission error reached dispatcher (call site should handle): %s",
             exc,
-            exc_info=True,
+            exc_info=exc,
         )
         return
 
@@ -47,7 +47,7 @@ async def handle_dispatcher_error(event: ErrorEvent) -> None:
         logger.info("Ignoring blocked user interaction: %s", exc)
         return
 
-    logger.error("Unhandled exception in dispatcher: %s", exc, exc_info=True)
+    logger.error("Unhandled exception in dispatcher: %s", exc, exc_info=exc)
 
     if is_webhook_retryable(exc):
         raise exc

@@ -6,7 +6,6 @@ and performs spam analysis using the collected context.
 """
 
 import logging
-from typing import Optional, Tuple
 
 from aiogram import types
 
@@ -58,7 +57,7 @@ async def collect_message_context(
     )
 
 
-def extract_reply_context(message: types.Message) -> Optional[str]:
+def extract_reply_context(message: types.Message) -> str | None:
     """
     Extract context from the message being replied to.
 
@@ -197,7 +196,7 @@ def _collect_inline_keyboard_urls(message: types.Message) -> list[str]:
         return urls
 
 
-def _collect_via_bot_info(message: types.Message) -> Optional[str]:
+def _collect_via_bot_info(message: types.Message) -> str | None:
     """Collect information about inline bot used to send the message."""
     via_bot = getattr(message, "via_bot", None)
     if not via_bot:
@@ -222,14 +221,14 @@ def _combine_inline_urls(message_text: str, urls: list[str]) -> str:
     return message_text
 
 
-def _combine_via_bot(message_text: str, via_bot_info: Optional[str]) -> str:
+def _combine_via_bot(message_text: str, via_bot_info: str | None) -> str:
     """Append via_bot info to message text if present."""
     if via_bot_info:
         return f"{message_text}\n[VIA_BOT]: {via_bot_info}"
     return message_text
 
 
-def extract_message_with_forward_context(message: types.Message) -> Tuple[str, bool]:
+def extract_message_with_forward_context(message: types.Message) -> tuple[str, bool]:
     """
     Extract message text and forwarding context for spam analysis.
 

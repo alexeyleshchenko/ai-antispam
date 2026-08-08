@@ -16,10 +16,10 @@ from ..common.utils import (
     get_setup_guide_url,
 )
 from ..database import (
+    cycle_moderation_mode,
     get_admin,
     get_admin_credits,
     get_admin_stats,
-    cycle_moderation_mode,
     get_moderation_mode,
     get_spent_credits_last_week,
     initialize_new_admin,
@@ -27,9 +27,9 @@ from ..database import (
 )
 from ..database.models import ModerationMode
 from ..i18n import normalize_lang, resolve_lang, t
-from ..spam.user_profile import collect_user_context, collect_channel_summary_by_id
 from ..spam.linked_channel_mention import extract_first_channel_mention
-from ..types import ContextStatus, ContextResult
+from ..spam.user_profile import collect_channel_summary_by_id, collect_user_context
+from ..types import ContextResult, ContextStatus
 from .dp import dp
 
 logger = logging.getLogger(__name__)
@@ -419,8 +419,8 @@ async def handle_mode_command(message: types.Message) -> str:
         await message.reply(t(lang, message_key), parse_mode="HTML")
         return return_value
 
-    except Exception as e:
-        logger.error(f"Error handling mode command: {e}", exc_info=True)
+    except Exception:
+        logger.exception("Error handling mode command")
         await message.reply(t(lang, "mode.error"), parse_mode="HTML")
         return "command_mode_error"
 
