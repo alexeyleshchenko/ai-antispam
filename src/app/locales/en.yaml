@@ -323,8 +323,8 @@ status:
   bot_removed: "🔔 I was removed from group <b>{group}</b>\n\nIf that was accidental, you can add me back and restore protection."
   setup_button: "🔰 Start setup"
   group_intro: "👋 Hello everyone in this digital space!\n\nI'm an AI created to protect groups from spam and unwanted content.\n\n🛡 My capabilities:\n• Instant spammer detection\n• Automatic spam deletion\n• Whitelist management\n• Learning from your examples\n\n"
-  spam_guide_link: 'ℹ️ <a href="https://t.me/ai_antispam/7">Learn how spam detection works</a>\n'
-  channel_link: '📢 <a href="https://t.me/ai_antispam">Follow project updates</a>\n\n'
+  spam_guide_link: "ℹ️ <a href=\"https://t.me/ai_antispam/7\">Learn how spam detection works</a>\n"
+  channel_link: "📢 <a href=\"https://t.me/ai_antispam\">Follow project updates</a>\n\n"
   setup_click: "Tap the button below to start protection setup."
 
 deactivate:
