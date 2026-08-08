@@ -1,6 +1,5 @@
 from datetime import datetime
 from enum import StrEnum
-from typing import List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -15,11 +14,11 @@ class Administrator(BaseModel):
     """Enhanced administrator model with validation"""
 
     admin_id: int
-    username: Optional[str] = None
+    username: str | None = None
     credits: int = Field(default=0, ge=0)
     is_active: bool = True
     moderation_mode: ModerationMode = ModerationMode.NOTIFY
-    language_code: Optional[str] = None  # ru or en
+    language_code: str | None = None  # ru or en
     created_at: datetime = Field(default_factory=datetime.now)
     last_updated: datetime = Field(default_factory=datetime.now)
 
@@ -46,10 +45,10 @@ class Group(BaseModel):
     """Enhanced Group model with validation"""
 
     group_id: int
-    admin_ids: List[int]
+    admin_ids: list[int]
     moderation_enabled: bool = True
-    member_ids: List[int] = []
-    title: Optional[str] = None
-    username: Optional[str] = None
+    member_ids: list[int] = []
+    title: str | None = None
+    username: str | None = None
     created_at: datetime = Field(default_factory=datetime.now)
     last_updated: datetime = Field(default_factory=datetime.now)

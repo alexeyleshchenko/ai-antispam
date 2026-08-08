@@ -11,27 +11,26 @@ logger = logging.getLogger(__name__)
 
 # Start the server
 import asyncio
+import builtins
 import os
 import time
-from asyncio import TimeoutError
-from typing import Optional
 
 import logfire
 from aiogram.dispatcher.event.bases import UNHANDLED
 from aiohttp import web
-
-# Import all handlers to register them with the dispatcher
-from .handlers import *
+from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 
 from .background_jobs import scheduled_jobs_loop
 from .bot_commands import setup_bot_commands
 from .common.bot import bot
-from .common.trace_context import set_root_span
-from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 from .common.mcp_client import close_mcp_http_client
 from .common.telegram_errors import is_webhook_retryable
+from .common.trace_context import set_root_span
 from .common.utils import get_dotted_path, get_webhook_timeout, validate_llm_config
 from .database.postgres_connection import close_pool
+
+# Import all handlers to register them with the dispatcher
+from .handlers import *
 from .handlers.dp import dp
 from .logging_setup import get_telegram_handler, register_telegram_logging_loop
 
@@ -88,7 +87,7 @@ async def handle_update(request: web.Request) -> web.Response:
 
             return web.json_response({"message": "Processed successfully"})
 
-        except TimeoutError:
+        except builtins.TimeoutError:
             elapsed = time.time() - start_time
             return await handle_timeout(span, json, elapsed)
 
@@ -97,7 +96,7 @@ async def handle_update(request: web.Request) -> web.Response:
             remaining = WEBHOOK_TIMEOUT - elapsed
             return await handle_temporary_error(span, e, elapsed, remaining)
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             elapsed = time.time() - start_time
             return await handle_unhandled_exception(span, e, json, elapsed)
 
@@ -166,7 +165,7 @@ def extract_chat_or_user(json: dict) -> str:
     ]:
         try:
             return f"{get_dotted_path(json, path, True)}"
-        except Exception:
+        except Exception:  # noqa: BLE001, S112
             continue
 
     return "Unknown chat or user"
@@ -198,7 +197,7 @@ async def _on_startup_setup_bot(app: web.Application) -> None:
         raise
 
 
-_scheduled_jobs_task: Optional[asyncio.Task] = None
+_scheduled_jobs_task: asyncio.Task | None = None
 
 
 async def _on_startup_scheduled_jobs(app: web.Application) -> None:
@@ -221,14 +220,13 @@ async def _on_startup_seed_protected_channels(app: web.Application) -> None:
 
 
 async def _on_startup_log_server_started(app: web.Application) -> None:
-    logging.warning("Server started")
+    logger.warning("Server started")
 
 
 async def _shutdown(app: web.Application) -> None:
     """Gracefully shutdown all resources."""
     logger.info("Starting graceful shutdown...")
 
-    global _scheduled_jobs_task
     if _scheduled_jobs_task and not _scheduled_jobs_task.done():
         _scheduled_jobs_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -289,7 +287,7 @@ async def handle_temporary_error(
             "remaining": remaining,
             "status_code": status_code,
             "model": e.model_name,
-            "message": e.message,
+            "error_message": e.message,
         },
     )
 
@@ -326,7 +324,7 @@ async def handle_unhandled_exception(
             logger.warning(
                 "Transient webhook error, requesting Telegram retry: %s",
                 e,
-                exc_info=True,
+                exc_info=e,
             )
             return web.json_response(
                 {"error": "Transient processing error", "retry": True},
@@ -336,7 +334,7 @@ async def handle_unhandled_exception(
             "Transient webhook error but no time for retries (elapsed=%.2fs): %s",
             elapsed,
             e,
-            exc_info=True,
+            exc_info=e,
         )
         return web.json_response(
             {"message": "Transient error but no time for retries", "elapsed": elapsed}
@@ -346,7 +344,7 @@ async def handle_unhandled_exception(
     logger.warning(
         "Webhook error acknowledged without retry: %s",
         e,
-        exc_info=True,
+        exc_info=e,
     )
     return web.json_response({"message": "Error processing request"})
 

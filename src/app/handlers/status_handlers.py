@@ -5,17 +5,16 @@ import contextlib
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import List
+from datetime import UTC, datetime
 
 import logfire
 from aiogram import F, types
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import or_f
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from ..common.trace_context import get_root_span
 
 from ..common.bot import bot
+from ..common.notifications import notify_admins_with_fallback_and_cleanup
 from ..common.telegram_errors import (
     GROUP_ANONYMOUS_BOT_ID,
     is_bot_kicked_error,
@@ -24,7 +23,7 @@ from ..common.telegram_errors import (
     is_permission_error,
     is_user_blocked_error,
 )
-from ..common.notifications import notify_admins_with_fallback_and_cleanup
+from ..common.trace_context import get_root_span
 from ..common.utils import (
     format_chat_or_channel_display,
     get_add_to_group_url,
@@ -223,10 +222,9 @@ async def handle_bot_status_update(event: types.ChatMemberUpdated) -> str:
 
         return result_tag
 
-    except Exception as e:
-        logger.error(
-            f"Error handling bot status update in chat '{chat_title}' ({chat_id}): {e}",
-            exc_info=True,
+    except Exception:
+        logger.exception(
+            f"Error handling bot status update in chat '{chat_title}' ({chat_id})",
         )
         raise
 
@@ -457,7 +455,7 @@ async def _notify_admins_about_rights(
     chat_id: int,
     chat_title: str,
     username: str | None,
-    admin_ids: List[int],
+    admin_ids: list[int],
     assume_human_admins: bool = False,
     is_already_admin: bool = False,
 ) -> None:
@@ -504,7 +502,7 @@ async def _notify_admins_about_removal(
     chat_id: int,
     chat_title: str,
     username: str | None,
-    admin_ids: List[int],
+    admin_ids: list[int],
     assume_human_admins: bool = False,
 ) -> None:
     """Notify admins when bot is removed from a group."""
@@ -536,7 +534,7 @@ async def _send_promo_message(
     chat_id: int,
     chat_title: str,
     username: str | None,
-    admin_ids: List[int],
+    admin_ids: list[int],
     added_by: int,
 ) -> None:
     """Send promotional message to the group when bot is added."""
@@ -571,7 +569,7 @@ async def _send_promo_message(
             )
 
         await send_promo_message()
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning(
             f"Failed to send promo message to chat {chat_id} ('{chat_title}'): {e}"
         )
@@ -673,7 +671,7 @@ async def handle_member_service_message(message: types.Message) -> str:
                         return "service_message_no_rights_cleanup"
                     else:
                         return "service_message_no_rights"
-                except Exception as notify_exc:
+                except Exception as notify_exc:  # noqa: BLE001
                     logger.info(
                         f"Failed to notify admins about missing rights: {notify_exc}"
                     )
@@ -707,10 +705,9 @@ async def handle_member_service_message(message: types.Message) -> str:
                 )
                 return "service_message_delete_failed"
 
-    except Exception as e:
-        logger.error(
-            f"Error handling service message in chat {chat_id} ('{message.chat.title or ''}'): {e}",
-            exc_info=True,
+    except Exception:
+        logger.exception(
+            f"Error handling service message in chat {chat_id} ('{message.chat.title or ''}')",
         )
         return "service_message_error"
 
@@ -724,7 +721,7 @@ async def _deactivate_admin_after_block(admin_id: int) -> None:
             # Calculate total time user was with bot in days
             admin = await get_admin(admin_id)
             if admin:
-                total_days = (datetime.now(timezone.utc) - admin.created_at).days
+                total_days = (datetime.now(UTC) - admin.created_at).days
 
                 # Set the total time on the root span for trace-level visibility
                 get_root_span().set_attribute("total_user_days", total_days)

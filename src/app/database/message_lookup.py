@@ -8,8 +8,8 @@ messages to add spam examples. Replaces Logfire-based lookup.
 
 import logging
 import re
+from collections.abc import Sequence
 from datetime import datetime
-from typing import Optional, Sequence
 
 from .postgres_connection import get_pool
 
@@ -32,9 +32,9 @@ async def save_message_lookup_entry(
     effective_user_id: int,
     message_text: str,
     *,
-    reply_to_text: Optional[str] = None,
-    stories_context: Optional[str] = None,
-    account_signals_context: Optional[str] = None,
+    reply_to_text: str | None = None,
+    stories_context: str | None = None,
+    account_signals_context: str | None = None,
 ) -> None:
     """Upsert message metadata and optional classification context into lookup cache."""
     pool = await get_pool()
@@ -70,8 +70,8 @@ async def find_message_by_text_and_user(
     from_date: datetime,
     to_date: datetime,
     *,
-    user_id: Optional[int] = None,
-) -> Optional[dict]:
+    user_id: int | None = None,
+) -> dict | None:
     """Find most recent message in lookup cache by text, optional user_id, and date range."""
     if not admin_chat_ids:
         return None

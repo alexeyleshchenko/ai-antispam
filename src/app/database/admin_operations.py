@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .constants import INITIAL_CREDITS
 from .models import Administrator, ModerationMode
@@ -42,7 +42,7 @@ async def _has_delete_spam_column(conn) -> bool:
               AND column_name = 'delete_spam'
             """
         )
-    except Exception:
+    except Exception:  # noqa: BLE001
         rows = await conn.fetch("PRAGMA table_info(administrators)")
         val = next((1 for r in rows if r["name"] == "delete_spam"), None)
     _delete_spam_column_exists = val is not None
@@ -165,7 +165,7 @@ def _admin_from_row(row) -> Administrator:
     )
 
 
-async def get_admin(admin_id: int) -> Optional[Administrator]:
+async def get_admin(admin_id: int) -> Administrator | None:
     """Retrieve administrator information from PostgreSQL"""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -216,98 +216,96 @@ async def initialize_new_admin(
 ) -> bool:
     """Initialize a new administrator with initial credits"""
     pool = await get_pool()
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            exists = await conn.fetchval(
-                """
+    async with pool.acquire() as conn, conn.transaction():
+        exists = await conn.fetchval(
+            """
                 SELECT EXISTS(SELECT 1 FROM administrators WHERE admin_id = $1)
             """,
-                admin_id,
-            )
+            admin_id,
+        )
 
-            if exists:
-                return False
+        if exists:
+            return False
 
-            if await _has_delete_spam_column(conn):
-                await conn.execute(
-                    """
+        if await _has_delete_spam_column(conn):
+            await conn.execute(
+                """
                     INSERT INTO administrators (
                         admin_id, credits, moderation_mode, delete_spam,
                         is_active, language_code, created_at, last_active
                     ) VALUES ($1, $2, 'notify', false, TRUE, $3, NOW(), NOW())
                 """,
-                    admin_id,
-                    INITIAL_CREDITS,
-                    language_code,
-                )
-            else:
-                await conn.execute(
-                    """
+                admin_id,
+                INITIAL_CREDITS,
+                language_code,
+            )
+        else:
+            await conn.execute(
+                """
                     INSERT INTO administrators (
                         admin_id, credits, moderation_mode,
                         is_active, language_code, created_at, last_active
                     ) VALUES ($1, $2, 'notify', TRUE, $3, NOW(), NOW())
                 """,
-                    admin_id,
-                    INITIAL_CREDITS,
-                    language_code,
-                )
+                admin_id,
+                INITIAL_CREDITS,
+                language_code,
+            )
 
-            await conn.execute(
-                """
+        await conn.execute(
+            """
                 INSERT INTO transactions (admin_id, amount, type, description)
                 VALUES ($1, $2, 'initial', 'Initial credits')
             """,
-                admin_id,
-                INITIAL_CREDITS,
-            )
+            admin_id,
+            INITIAL_CREDITS,
+        )
 
-            return True
+        return True
 
 
 async def cycle_moderation_mode(admin_id: int) -> ModerationMode | None:
     """Cycle notify → delete → delete_silent → notify. Returns new mode."""
     pool = await get_pool()
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            row = await conn.fetchrow(
-                """
+    async with pool.acquire() as conn, conn.transaction():
+        row = await conn.fetchrow(
+            """
                 SELECT * FROM administrators WHERE admin_id = $1
             """,
-                admin_id,
-            )
+            admin_id,
+        )
 
-            if row is None:
-                return None
+        if row is None:
+            return None
 
-            current = _admin_from_row(row).moderation_mode
-            new_mode = _next_moderation_mode(current)
+        current = _admin_from_row(row).moderation_mode
+        new_mode = _next_moderation_mode(current)
 
-            if await _has_delete_spam_column(conn):
-                await conn.execute(
-                    """
+        if await _has_delete_spam_column(conn):
+            await conn.execute(
+                """
                     UPDATE administrators
                     SET moderation_mode = $1,
                         delete_spam = $2,
                         last_active = NOW()
                     WHERE admin_id = $3
                 """,
-                    new_mode.value,
-                    _legacy_delete_spam(new_mode),
-                    admin_id,
-                )
-            else:
-                await conn.execute(
-                    """
+                new_mode.value,
+                _legacy_delete_spam(new_mode),
+                admin_id,
+            )
+        else:
+            await conn.execute(
+                """
                     UPDATE administrators
                     SET moderation_mode = $1, last_active = NOW()
                     WHERE admin_id = $2
                 """,
-                    new_mode.value,
-                    admin_id,
-                )
+                new_mode.value,
+                admin_id,
+            )
 
-            return new_mode
+        return new_mode
 
 
 async def get_moderation_mode(admin_id: int) -> ModerationMode:
@@ -332,7 +330,7 @@ async def get_spent_credits_last_week(admin_id: int) -> int:
         )
 
 
-async def get_all_admins() -> List[Administrator]:
+async def get_all_admins() -> list[Administrator]:
     """Get list of all administrators"""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -422,7 +420,7 @@ async def mark_depletion_day_6_warned(admin_id: int) -> None:
 
 async def get_admins_for_low_balance_warnings(
     threshold: int,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     Get active admins who need week-ahead warning: credits < min(threshold, spent_last_week)
     and not yet warned.
@@ -478,7 +476,7 @@ async def clear_depletion_flags(admin_id: int) -> None:
         )
 
 
-async def get_admins_for_depletion_timeline() -> List[Dict[str, Any]]:
+async def get_admins_for_depletion_timeline() -> list[dict[str, Any]]:
     """Get active admins with credits_depleted_at set for timeline checks."""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -504,18 +502,17 @@ async def get_admins_for_depletion_timeline() -> List[Dict[str, Any]]:
 async def remove_admin(admin_id: int) -> None:
     """Remove administrator from database"""
     pool = await get_pool()
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            await conn.execute(
-                """
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            """
                 DELETE FROM administrators
                 WHERE admin_id = $1
                 """,
-                admin_id,
-            )
+            admin_id,
+        )
 
 
-async def get_admin_stats(admin_id: int) -> Dict[str, Any]:
+async def get_admin_stats(admin_id: int) -> dict[str, Any]:
     """
     Get comprehensive statistics for an administrator.
     Includes global stats and per-group stats with Logfire metrics.

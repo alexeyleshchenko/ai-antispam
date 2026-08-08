@@ -22,7 +22,7 @@ try:
     APPROVE_PRICE = pricing.get("approve_price", 1)
     DELETE_PRICE = pricing.get("delete_price", 1)
 
-except Exception:
+except Exception:  # noqa: BLE001
     # Fallback values if config loading fails
     INITIAL_CREDITS = 100
     SKIP_PRICE = 0

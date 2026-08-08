@@ -30,22 +30,19 @@ from .validation import (
 )
 
 __all__ = [
-    # Channel management
     "build_channel_instruction_message",
-    "get_discussion_username",
-    "handle_channel_post",
-    "notify_channel_admins",
-    "notify_channel_admins_and_leave",
-    # Pipeline
-    "handle_moderated_message",
-    "process_spam_or_approve",
-    # Validation
     "check_skip_channel_bot_message",
     "determine_effective_user_id",
     "fetch_linked_chat_id",
     "get_and_check_group",
+    "get_discussion_username",
+    "handle_channel_post",
+    "handle_moderated_message",
     "is_admin_posting_as_group",
     "is_channel_bot_in_discussion",
+    "notify_channel_admins",
+    "notify_channel_admins_and_leave",
+    "process_spam_or_approve",
     "should_attempt_api_fetch",
     "validate_group_and_check_early_exits",
 ]

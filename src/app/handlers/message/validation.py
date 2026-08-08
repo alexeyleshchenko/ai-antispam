@@ -1,7 +1,6 @@
 """Message validation and early-exit checks for moderation pipeline."""
 
 import logging
-from typing import Optional, Tuple
 
 from aiogram import types
 
@@ -16,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 async def validate_group_and_check_early_exits(
     chat_id: int, user_id: int
-) -> Tuple[Optional[Group], str]:
+) -> tuple[Group | None, str]:
     """
     Validate group exists and check for early exit conditions.
 
@@ -51,7 +50,7 @@ async def validate_group_and_check_early_exits(
     return group, ""
 
 
-async def check_skip_channel_bot_message(message: types.Message) -> Tuple[bool, str]:
+async def check_skip_channel_bot_message(message: types.Message) -> tuple[bool, str]:
     """
     Check if message from channel bot should be skipped in discussion groups.
 
@@ -117,7 +116,7 @@ def is_admin_posting_as_group(message: types.Message) -> bool:
     return message.sender_chat is not None and message.sender_chat.id == message.chat.id
 
 
-async def fetch_linked_chat_id(chat_id: int) -> Optional[int]:
+async def fetch_linked_chat_id(chat_id: int) -> int | None:
     """
     Fetch linked chat ID for a supergroup via Telegram API.
 
@@ -130,13 +129,13 @@ async def fetch_linked_chat_id(chat_id: int) -> Optional[int]:
     try:
         chat_info = await bot.get_chat(chat_id)
         return getattr(chat_info, "linked_chat_id", None)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning(f"Failed to fetch linked_chat_id via API for {format_chat_log(chat_id)}: {e}")
         return None
 
 
 def is_channel_bot_in_discussion(
-    message: types.Message, linked_chat_id: Optional[int]
+    message: types.Message, linked_chat_id: int | None
 ) -> bool:
     """
     Check if channel bot is posting in its discussion group.
@@ -156,7 +155,7 @@ def is_channel_bot_in_discussion(
 
 
 def should_attempt_api_fetch(
-    message: types.Message, linked_chat_id: Optional[int]
+    message: types.Message, linked_chat_id: int | None
 ) -> bool:
     """
     Determine if we should attempt to fetch linked_chat_id via API.
@@ -175,7 +174,7 @@ def should_attempt_api_fetch(
     )
 
 
-async def get_and_check_group(chat_id: int) -> Tuple[Optional[Group], str]:
+async def get_and_check_group(chat_id: int) -> tuple[Group | None, str]:
     """
     Get group and check if moderation is enabled.
 

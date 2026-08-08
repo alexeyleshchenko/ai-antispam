@@ -8,7 +8,6 @@ to administrators when the bot is incorrectly added to channels.
 import asyncio
 import contextlib
 import logging
-from typing import Set
 
 import logfire
 from aiogram import types
@@ -21,7 +20,12 @@ from aiogram.exceptions import (
 )
 
 from ...common.userbot_messaging import send_userbot_dm
-from ...common.utils import format_chat_log, format_chat_or_channel_display, format_user_log, retry_on_network_error
+from ...common.utils import (
+    format_chat_log,
+    format_chat_or_channel_display,
+    format_user_log,
+    retry_on_network_error,
+)
 from ...i18n import normalize_lang, t
 
 logger = logging.getLogger(__name__)
@@ -29,7 +33,7 @@ logger = logging.getLogger(__name__)
 # Channel ids whose linked discussion groups the bot is actively protecting.
 # Seeded at startup from the DB; protects against a channel_post self-leave
 # when the bot is correctly placed (protect mode) rather than wrongly added.
-_protected_channel_ids: Set[int] = set()
+_protected_channel_ids: set[int] = set()
 
 # True when startup seeding failed (e.g. DB down at boot). While set, the
 # in-memory set may be empty/stale — handle_channel_post must refuse to leave
@@ -127,8 +131,8 @@ async def handle_channel_post(message: types.Message) -> str:
 
         await notify_channel_admins_and_leave(message.chat, bot)
         return "channel_post_left_channel"
-    except Exception as e:
-        logger.error(f"Error handling channel_post: {e}", exc_info=True)
+    except Exception:
+        logger.exception("Error handling channel_post")
         return "channel_post_error"
 
 
@@ -148,7 +152,7 @@ async def get_discussion_username(chat: types.Chat, bot: Bot) -> str | None:
         try:
             discussion_chat = await bot.get_chat(int(linked_chat_id))
             return getattr(discussion_chat, "username", None)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning(
                 f"Failed to get linked discussion group {format_chat_log(linked_chat_id)}: {e}"
             )
@@ -354,7 +358,7 @@ async def notify_channel_admins(
         try:
 
             @retry_on_network_error
-            async def send_instruction() -> None:
+            async def send_instruction(admin_id=admin_id) -> None:
                 await bot.send_message(admin_id, instruction, parse_mode="HTML")
 
             await send_instruction()
@@ -428,7 +432,7 @@ async def _poll_discussion_membership(
             member = await bot.get_chat_member(discussion_id, bot.id)
             if member.status in ("member", "administrator", "restricted"):
                 return True
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             # Bot not a member yet (or transient) — keep polling
             pass
         await asyncio.sleep(interval)
@@ -472,7 +476,7 @@ async def _notify_discussion_added_and_stay(
         discussion_username = discussion_username or getattr(
             discussion_chat, "username", None
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning(
             f"Failed to fetch discussion group {format_chat_log(discussion_id)}: {e}"
         )
@@ -522,7 +526,7 @@ async def _notify_discussion_added_and_stay(
     try:
         admins = await bot.get_chat_administrators(chat.id)
         target_ids.extend(a.user.id for a in admins if not a.user.is_bot)
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
 
     for target_id in dict.fromkeys(target_ids):
@@ -530,7 +534,7 @@ async def _notify_discussion_added_and_stay(
             await bot.send_message(target_id, instruction, parse_mode="HTML")
             notified = True
             break
-        except Exception:
+        except Exception:  # noqa: BLE001, S112
             continue
 
     if not notified:
@@ -539,20 +543,19 @@ async def _notify_discussion_added_and_stay(
             logger.info(
                 f"Posted discussion_added notice into discussion group {format_chat_log(discussion_id, discussion_title, discussion_username)} (owner DM failed)"
             )
-        except Exception as e:
+        except Exception:
             # Total notification failure: owner DM AND discussion-group post both
             # failed. The bot stays (leaving would cascade into leaving the
             # discussion group and end protection), but the dead-end must be
             # LOUD — the owner never learns the bot is awaiting rights here, so
             # the group would stay awaiting-rights forever. Record a logfire
             # span + ERROR log with full context for alerting/investigation.
-            logger.error(
+            logger.exception(
                 f"FAILED to notify owner or discussion group that bot protects "
                 f"linked discussion {format_chat_log(discussion_id, discussion_title, discussion_username)} "
                 f"of channel {format_chat_log(chat.id, channel_title, channel_username)} "
-                f"(owner DM failed, discussion post failed: {e}). Bot stays but "
+                f"(owner DM failed, discussion post failed). Bot stays but "
                 f"the group will NOT be moderated until the owner is reached.",
-                exc_info=True,
             )
             with logfire.span(
                 "discussion_added_notification_failed",
@@ -599,7 +602,7 @@ async def _notify_wrong_place_and_leave(
         try:
             discussion_chat = await bot.get_chat(discussion_id)
             discussion_username = getattr(discussion_chat, "username", None)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning(
                 f"Failed to resolve discussion username for {format_chat_log(discussion_id)}: {e}"
             )
@@ -638,10 +641,9 @@ async def _notify_wrong_place_and_leave(
             # silently stayed as admin. Now it is LOUD: ERROR + logfire span
             # (channel_leave_failed), then the userbot fallback below still
             # attempts to reach the adding user.
-            logger.error(
+            logger.exception(
                 f"Failed to leave channel {format_chat_log(chat.id, channel_title, channel_username)} "
-                f"after {_FORBIDDEN_RETRY_ATTEMPTS} attempts: {e}",
-                exc_info=True,
+                f"after {_FORBIDDEN_RETRY_ATTEMPTS} attempts",
             )
             with logfire.span(
                 "channel_leave_failed",
@@ -731,7 +733,7 @@ async def notify_channel_admins_and_leave(
     try:
         discussion_chat = await bot.get_chat(discussion_id)
         discussion_username = getattr(discussion_chat, "username", None)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning(
             f"Failed to resolve discussion group {format_chat_log(discussion_id)}: {e}"
         )

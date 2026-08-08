@@ -1,17 +1,15 @@
 """Spam classification: prompt building, LLM calls, response parsing."""
 
 import logging
-from typing import List, Optional, Tuple
 
 import logfire
-
 from pydantic_ai import ModelSettings
 
 from ..agents import (
-    get_gateway_spam_agent,
-    get_openrouter_spam_agent,
     _get_openrouter_agents,
     _next_openrouter_agent,
+    get_gateway_spam_agent,
+    get_openrouter_spam_agent,
 )
 from ..common.utils import get_llm_route_timeout
 from ..database import get_admin
@@ -27,9 +25,9 @@ logger = logging.getLogger(__name__)
 
 async def is_spam(
     comment: str,
-    admin_ids: Optional[List[int]] = None,
-    context: Optional[SpamClassificationContext] = None,
-) -> Tuple[bool, int, str]:
+    admin_ids: list[int] | None = None,
+    context: SpamClassificationContext | None = None,
+) -> tuple[bool, int, str]:
     """Classify message as spam or legitimate. Returns (is_spam, confidence, reason)."""
     ctx = context or SpamClassificationContext()
 
@@ -71,7 +69,7 @@ async def is_spam(
         attempts_histogram.record(1)
         return is_spam_result, confidence_result, reason_result
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         with logfire.span("spam_classifier_gateway_failure"):
             logger.warning(
                 f"Gateway spam classification failed: {e}, trying OpenRouter"
@@ -99,7 +97,7 @@ async def is_spam(
                 )
                 attempts_histogram.record(attempt + 1)
                 return is_spam_result, confidence_result, reason_result
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 logger.warning(
                     f"OpenRouter agent {attempt + 1}/{num_models} failed: {e}"
                 )

@@ -10,7 +10,7 @@ All functions are designed to be imported without creating circular dependencies
 """
 
 import logging
-from typing import Dict, Optional, Any
+from typing import Any
 
 import logfire
 
@@ -96,13 +96,13 @@ def _should_skip_join_for_error(error_msg: str) -> bool:
 
 def _create_chat_context(
     chat_id: int,
-    user_id: Optional[int] = None,
-    message_id: Optional[int] = None,
-    chat_username: Optional[str] = None,
+    user_id: int | None = None,
+    message_id: int | None = None,
+    chat_username: str | None = None,
     **extra_fields: Any,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Create standardized logging context for chat-related operations."""
-    context: Dict[str, Any] = {"chat_id": chat_id}
+    context: dict[str, Any] = {"chat_id": chat_id}
 
     if user_id is not None:
         context["user_id"] = user_id
@@ -118,7 +118,7 @@ def _create_chat_context(
 def _log_mtproto_error(
     error: MtprotoHttpError,
     operation: str,
-    context: Dict[str, Any],
+    context: dict[str, Any],
     log_level: int = logging.WARNING,
 ) -> None:
     """Standardized logging for MTProto errors."""
@@ -131,13 +131,13 @@ def _log_mtproto_error(
 
 
 def _log_unexpected_error(
-    error: Exception, operation: str, context: Dict[str, Any]
+    error: Exception, operation: str, context: dict[str, Any]
 ) -> None:
     """Standardized logging for unexpected errors."""
     logger.error(
         f"Unexpected error during {operation}",
         extra={**context, "error": str(error)},
-        exc_info=True,
+        exc_info=error,
     )
 
 
@@ -212,7 +212,7 @@ CONTEXT_SOURCE_MAIN_CHANNEL = "main_channel"
 
 
 def determine_thread_type(
-    message_thread_id: Optional[int] = None,
+    message_thread_id: int | None = None,
     is_topic_message: bool = False,
 ) -> str:
     """
@@ -246,7 +246,7 @@ def determine_thread_type(
 @logfire.no_auto_trace
 @logfire.instrument(extract_args=True)
 async def attempt_user_bot_chat_join(
-    chat_id: int, chat_username: Optional[str] = None
+    chat_id: int, chat_username: str | None = None
 ) -> bool:
     """
     Attempt to join the user bot to a public chat (group/supergroup) using MTProto channels.joinChannel.
@@ -316,7 +316,7 @@ async def attempt_user_bot_chat_join(
             _log_mtproto_error(e, "user bot chat join", context)
             return False
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             _log_unexpected_error(e, "user bot chat join", context)
             return False
 
@@ -400,7 +400,7 @@ async def establish_context_via_group_reading(
         _log_mtproto_error(e, "group message reading", logging_context)
         return False
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         _log_unexpected_error(e, "group message reading", logging_context)
         return False
 
@@ -556,17 +556,17 @@ async def establish_context_via_thread_reading(
         _log_mtproto_error(e, "thread-based context establishment", logging_context)
         return False
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         _log_unexpected_error(e, "thread-based context establishment", logging_context)
         return False
 
 
 async def _resolve_grouped_album_anchor(
     channel_chat_id: int,
-    channel_username: Optional[str],
+    channel_username: str | None,
     msg_id: int,
-    logging_context: Dict[str, Any],
-) -> Optional[int]:
+    logging_context: dict[str, Any],
+) -> int | None:
     """Find the first message in a grouped media album containing msg_id.
 
     When GetReplies fails with MSG_ID_INVALID on a channel post that's part of
@@ -638,7 +638,7 @@ async def _resolve_grouped_album_anchor(
 
 async def _fallback_discussion_group_reading(
     context: PeerResolutionContext,
-    logging_context: Dict[str, Any],
+    logging_context: dict[str, Any],
 ) -> bool:
     """Fall back to reading the discussion group when GetReplies fails with MSG_ID_INVALID.
 
@@ -678,7 +678,7 @@ async def _fallback_discussion_group_reading(
 @logfire.instrument(extract_args=True)
 async def check_membership_via_message_read(
     context: PeerResolutionContext,
-) -> tuple[bool, Optional[str]]:
+) -> tuple[bool, str | None]:
     """
     Check if user bot has membership in a chat by attempting to read a message.
 
@@ -759,7 +759,7 @@ async def check_membership_via_message_read(
         )
         return False, error_msg
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         # Unexpected errors - treat as access failure but log
         error_msg = str(e).lower()
         _log_unexpected_error(e, "membership pre-check", logging_context)

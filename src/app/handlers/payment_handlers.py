@@ -142,6 +142,6 @@ async def process_successful_payment(message: types.Message) -> str:
         await send_payment_confirmation()
         return "payment_successful_processed"
 
-    except Exception as e:
-        logger.error(f"Error processing payment: {e}", exc_info=True)
+    except Exception:
+        logger.exception("Error processing payment")
         raise

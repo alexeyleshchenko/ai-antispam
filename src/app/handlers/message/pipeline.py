@@ -1,12 +1,12 @@
 """Message moderation pipeline: validation, spam analysis, result processing."""
 
 import logging
-from typing import Any, FrozenSet
+from typing import Any
 
 from aiogram import types
 
 from ...common.trace_context import get_root_span
-
+from ...common.utils import determine_effective_user_id, load_config
 from ...database import (
     APPROVE_PRICE,
     DELETE_PRICE,
@@ -15,22 +15,21 @@ from ...database import (
     is_member_in_group,
     save_message_lookup_entry,
 )
+from ...spam.account_signals import build_account_signals_body
+from ...spam.message_context import collect_message_context
+from ...spam.spam_classifier import is_spam as classify_spam
+from ...types import ContextStatus, MessageContextResult
 from ..handle_spam import handle_spam
 from ..try_deduct_credits import try_deduct_credits
-from ...common.utils import determine_effective_user_id, load_config
 from .validation import (
     check_skip_channel_bot_message,
     validate_group_and_check_early_exits,
 )
-from ...spam.message_context import collect_message_context
-from ...spam.spam_classifier import is_spam as classify_spam
-from ...spam.account_signals import build_account_signals_body
-from ...types import ContextStatus, MessageContextResult
 
 logger = logging.getLogger(__name__)
 
 # Results that completed moderation and may count toward probation (member still approved)
-_PROBATION_INCREMENT_RESULTS: FrozenSet[str] = frozenset(
+_PROBATION_INCREMENT_RESULTS: frozenset[str] = frozenset(
     {
         "message_user_approved",
         "message_low_confidence_review",
@@ -40,7 +39,7 @@ _PROBATION_INCREMENT_RESULTS: FrozenSet[str] = frozenset(
 
 
 def _context_to_lookup_strings(
-    message_context_result: "MessageContextResult",
+    message_context_result: MessageContextResult,
 ) -> tuple[str | None, str | None]:
     """Extract stories and account_signals body for message_lookup_cache."""
     ctx = message_context_result.context
@@ -88,7 +87,7 @@ async def _handle_trusted_member_exit(message: types.Message, user_id: int) -> N
             message_text=msg_text,
             reply_to_text=reply_text,
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning(f"Failed to save message lookup for trusted user: {e}")
 
 
@@ -97,7 +96,7 @@ def _set_classification_span_attributes(
     is_spam: bool,
     confidence: int,
     reason: str,
-    message_context_result: "MessageContextResult",
+    message_context_result: MessageContextResult,
     source: str,
 ) -> None:
     """Set Logfire span attributes from classification results."""
@@ -110,7 +109,7 @@ def _set_classification_span_attributes(
 
 async def _save_classification_lookup(
     message: types.Message,
-    message_context_result: "MessageContextResult",
+    message_context_result: MessageContextResult,
     user_id: int,
 ) -> None:
     """Save message lookup entry with context after spam classification."""
@@ -127,7 +126,7 @@ async def _save_classification_lookup(
             stories_context=stories_ctx,
             account_signals_context=account_ctx,
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning(f"Failed to save message lookup after classification: {e}")
 
 
@@ -171,7 +170,7 @@ async def handle_moderated_message(
                 admin_ids=group.admin_ids,
                 context=message_context_result.context,
             )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning(f"Failed to get spam classification: {e}")
         return "message_spam_check_failed"
 
@@ -208,7 +207,7 @@ async def process_spam_or_approve(
     confidence: int,
     admin_ids: list[int],
     reason: str,
-    message_context_result: "MessageContextResult",
+    message_context_result: MessageContextResult,
 ) -> tuple[str, bool]:
     """Apply spam result: delete/notify or approve user. Returns (result_id, member_inserted)."""
     chat_id = message.chat.id

@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import logfire
 
@@ -20,54 +20,53 @@ async def insert_pending_spam_example(
     effective_user_id: int,
     *,
     text: str = "[MEDIA_MESSAGE]",
-    name: Optional[str] = None,
-    bio: Optional[str] = None,
-    linked_channel_fragment: Optional[str] = None,
-    stories_context: Optional[str] = None,
-    reply_context: Optional[str] = None,
-    account_signals_context: Optional[str] = None,
+    name: str | None = None,
+    bio: str | None = None,
+    linked_channel_fragment: str | None = None,
+    stories_context: str | None = None,
+    reply_context: str | None = None,
+    account_signals_context: str | None = None,
 ) -> int:
     """
     Insert a pending spam example. Run TTL cleanup, return new row id.
     """
     pool = await get_pool()
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            row = await conn.fetchrow(
-                """
-                INSERT INTO spam_examples (
-                    text, name, bio, score,
-                    linked_channel_fragment, stories_context, reply_context, account_signals_context,
-                    confirmed, chat_id, message_id, effective_user_id
-                )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, false, $9, $10, $11)
-                ON CONFLICT (chat_id, message_id) WHERE confirmed = false
-                DO UPDATE SET
-                    text = EXCLUDED.text,
-                    name = EXCLUDED.name,
-                    bio = EXCLUDED.bio,
-                    score = EXCLUDED.score,
-                    linked_channel_fragment = EXCLUDED.linked_channel_fragment,
-                    stories_context = EXCLUDED.stories_context,
-                    reply_context = EXCLUDED.reply_context,
-                    account_signals_context = EXCLUDED.account_signals_context,
-                    effective_user_id = EXCLUDED.effective_user_id,
-                    created_at = NOW()
-                RETURNING id
-                """,
-                text,
-                name,
-                bio,
-                PENDING_SCORE,
-                linked_channel_fragment,
-                stories_context,
-                reply_context,
-                account_signals_context,
-                chat_id,
-                message_id,
-                effective_user_id,
+    async with pool.acquire() as conn, conn.transaction():
+        row = await conn.fetchrow(
+            """
+            INSERT INTO spam_examples (
+                text, name, bio, score,
+                linked_channel_fragment, stories_context, reply_context, account_signals_context,
+                confirmed, chat_id, message_id, effective_user_id
             )
-            return row["id"]
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, false, $9, $10, $11)
+            ON CONFLICT (chat_id, message_id) WHERE confirmed = false
+            DO UPDATE SET
+                text = EXCLUDED.text,
+                name = EXCLUDED.name,
+                bio = EXCLUDED.bio,
+                score = EXCLUDED.score,
+                linked_channel_fragment = EXCLUDED.linked_channel_fragment,
+                stories_context = EXCLUDED.stories_context,
+                reply_context = EXCLUDED.reply_context,
+                account_signals_context = EXCLUDED.account_signals_context,
+                effective_user_id = EXCLUDED.effective_user_id,
+                created_at = NOW()
+            RETURNING id
+            """,
+            text,
+            name,
+            bio,
+            PENDING_SCORE,
+            linked_channel_fragment,
+            stories_context,
+            reply_context,
+            account_signals_context,
+            chat_id,
+            message_id,
+            effective_user_id,
+        )
+        return row["id"]
 
 
 async def cleanup_pending_spam_examples(days: int = 3) -> int:
@@ -95,7 +94,7 @@ async def cleanup_pending_spam_examples(days: int = 3) -> int:
 @logfire.instrument(extract_args=True)
 async def confirm_pending_example_as_not_spam(
     pending_id: int, admin_id: int
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Mark pending example as not spam. Returns chat_id, message_id, effective_user_id or None."""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -145,7 +144,7 @@ async def confirm_pending_example_as_spam(
 
 async def get_pending_example_by_message(
     chat_id: int, message_id: int
-) -> Optional[int]:
+) -> int | None:
     """Find pending spam example ID by chat and message ID."""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -170,9 +169,9 @@ def _get_examples_config() -> tuple[int, float, float]:
 
 
 async def get_spam_examples(
-    admin_ids: Optional[List[int]] = None,
-    limit: Optional[int] = None,
-) -> List[Dict[str, Any]]:
+    admin_ids: list[int] | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
     """Get spam examples from PostgreSQL with proportional ham/spam mix.
     With admin_ids, includes user-specific examples.
     Uses examples_limit and examples_ham_ratio / examples_spam_ratio from config.
@@ -252,34 +251,33 @@ async def get_spam_examples(
 async def add_spam_example(
     text: str,
     score: int,
-    name: Optional[str] = None,
-    bio: Optional[str] = None,
-    admin_id: Optional[int] = None,
-    linked_channel_fragment: Optional[str] = None,
-    stories_context: Optional[str] = None,
-    reply_context: Optional[str] = None,
-    account_signals_context: Optional[str] = None,
+    name: str | None = None,
+    bio: str | None = None,
+    admin_id: int | None = None,
+    linked_channel_fragment: str | None = None,
+    stories_context: str | None = None,
+    reply_context: str | None = None,
+    account_signals_context: str | None = None,
 ) -> bool:
     """Add a new spam example to PostgreSQL"""
     pool = await get_pool()
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            try:
-                cleaned_text = clean_alert_text(text)
-                await conn.execute(
-                    """
+    async with pool.acquire() as conn, conn.transaction():
+        try:
+            cleaned_text = clean_alert_text(text)
+            await conn.execute(
+                """
                     DELETE FROM spam_examples
                     WHERE text = $1 AND (name = $2 OR (name IS NULL AND $2 IS NULL))
                     AND (admin_id = $3 OR (admin_id IS NULL AND $3 IS NULL))
                     AND (confirmed IS NOT DISTINCT FROM true)
                 """,
-                    cleaned_text,
-                    name,
-                    admin_id,
-                )
+                cleaned_text,
+                name,
+                admin_id,
+            )
 
-                await conn.execute(
-                    """
+            await conn.execute(
+                """
                     INSERT INTO spam_examples (
                         text,
                         name,
@@ -294,17 +292,17 @@ async def add_spam_example(
                     )
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
                 """,
-                    cleaned_text,
-                    name,
-                    bio,
-                    score,
-                    admin_id,
-                    linked_channel_fragment,
-                    stories_context,
-                    reply_context,
-                    account_signals_context,
-                )
-                return True
-            except Exception as e:
-                logger.error(f"Error adding spam example: {e}")
-                return False
+                cleaned_text,
+                name,
+                bio,
+                score,
+                admin_id,
+                linked_channel_fragment,
+                stories_context,
+                reply_context,
+                account_signals_context,
+            )
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Error adding spam example: {e}")
+            return False

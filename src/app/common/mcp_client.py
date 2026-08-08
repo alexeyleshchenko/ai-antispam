@@ -2,7 +2,7 @@ import json
 import logging
 import os
 import ssl
-from typing import Any, Dict, Optional
+from typing import Any
 
 import aiohttp
 import logfire
@@ -23,14 +23,14 @@ class McpHttpClient:
         bearer_token: str,
         *,
         disable_ssl_verify: bool = False,
-        ca_bundle: Optional[str] = None,
+        ca_bundle: str | None = None,
     ):
         if not bearer_token:
             raise ValueError("MCP HTTP bearer token is not configured")
 
         self._base_url = base_url.rstrip("/")
         self._bearer_token = bearer_token
-        self._session_ssl_kwargs: Dict[str, Any] = {}
+        self._session_ssl_kwargs: dict[str, Any] = {}
 
         if disable_ssl_verify:
             ssl_context = ssl.create_default_context()
@@ -77,7 +77,7 @@ class McpHttpClient:
         default_base_url: str = "https://tg-mcp.l1979.ru",
         disable_ssl_verify_env: str = "MCP_HTTP_DISABLE_SSL_VERIFY",
         ca_bundle_env: str = "MCP_HTTP_CA_BUNDLE",
-    ) -> "McpHttpClient":
+    ) -> McpHttpClient:
         base_url = os.getenv(base_url_env) or os.getenv(
             "MTPROTO_HTTP_BASE_URL", default_base_url
         )
@@ -98,8 +98,8 @@ class McpHttpClient:
         )
 
     async def call_tool(
-        self, name: str, *, arguments: Dict[str, Any], timeout: int = 15
-    ) -> Dict[str, Any]:
+        self, name: str, *, arguments: dict[str, Any], timeout: int = 15
+    ) -> dict[str, Any]:
         payload = {
             "jsonrpc": "2.0",
             "id": 1,
@@ -110,13 +110,13 @@ class McpHttpClient:
 
     @retry_on_network_error
     async def _call_with_retry(
-        self, payload: Dict[str, Any], *, timeout: int = 15
-    ) -> Dict[str, Any]:
+        self, payload: dict[str, Any], *, timeout: int = 15
+    ) -> dict[str, Any]:
         return await self._post(payload, timeout=timeout)
 
     async def _post(
-        self, payload: Dict[str, Any], *, timeout: int = 15
-    ) -> Dict[str, Any]:
+        self, payload: dict[str, Any], *, timeout: int = 15
+    ) -> dict[str, Any]:
         url = f"{self._base_url}/mcp"
         headers = {
             "Authorization": f"Bearer {self._bearer_token}",
@@ -175,7 +175,7 @@ class McpHttpClient:
                 return data.get("result", data)
 
 
-_client: Optional[McpHttpClient] = None
+_client: McpHttpClient | None = None
 
 
 def get_mcp_client() -> McpHttpClient:

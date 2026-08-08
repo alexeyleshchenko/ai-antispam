@@ -10,7 +10,6 @@ from aiogram import types
 from .dp import dp
 from .updates_filter import filter_handle_edited_message, filter_handle_message
 
-
 # =============================================================================
 # MAIN MESSAGE HANDLERS
 # =============================================================================

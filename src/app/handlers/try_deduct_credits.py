@@ -10,7 +10,7 @@
 
 import asyncio
 import logging
-from typing import Optional, Sequence, Tuple, Union
+from collections.abc import Sequence
 
 from aiogram.types import ChatMember, ChatMemberAdministrator, ChatMemberOwner
 
@@ -125,7 +125,7 @@ async def handle_deactivation(chat_id: int) -> None:
 
 async def find_min_credits_admin(
     admins: Sequence[ChatMember],
-) -> Tuple[Optional[Union[ChatMemberAdministrator, ChatMemberOwner]], float]:
+) -> tuple[ChatMemberAdministrator | ChatMemberOwner | None, float]:
     """
     Находит администратора с наименьшим количеством звезд.
 
@@ -155,7 +155,7 @@ async def find_min_credits_admin(
 async def send_group_deactivation_message(
     chat_id: int,
     ref_link: str,
-    min_credits_admin: Union[ChatMemberAdministrator, ChatMemberOwner],
+    min_credits_admin: ChatMemberAdministrator | ChatMemberOwner,
     min_credits: float,
 ) -> None:
     """

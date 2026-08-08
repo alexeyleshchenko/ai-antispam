@@ -21,6 +21,6 @@ try:
     system = config.get("system", {})
     LESHCHENKO_CHAT_ID = system.get("admin_chat_id", 133526395)
 
-except Exception:
+except Exception:  # noqa: BLE001
     # Fallback value if config loading fails
     LESHCHENKO_CHAT_ID = 133526395

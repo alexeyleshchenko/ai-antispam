@@ -6,7 +6,6 @@ cannot reach the recipient (e.g. user never started the bot, bot removed from ch
 """
 
 import logging
-from typing import Optional
 
 from .mcp_client import McpHttpError, get_mcp_client
 
@@ -16,7 +15,7 @@ logger = logging.getLogger(__name__)
 async def send_userbot_dm(
     *,
     username: str,
-    user_id: Optional[int] = None,
+    user_id: int | None = None,
     message: str,
 ) -> bool:
     """
@@ -56,9 +55,8 @@ async def send_userbot_dm(
         )
         return False
     except Exception as e:
-        logger.error(
+        logger.exception(
             "Unexpected error sending userbot DM",
             extra={**log_extra, "error": str(e)},
-            exc_info=True,
         )
         return False

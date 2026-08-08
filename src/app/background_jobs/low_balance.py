@@ -164,7 +164,7 @@ async def leave_sole_payer_groups(admin_id: int) -> None:
                     title, username, t(lang, "common.group")
                 )
                 left_groups.append(display)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 left_groups.append(str(group_id))
 
             success = await perform_complete_group_cleanup(group_id, title, username)
@@ -195,5 +195,5 @@ async def run_low_balance_checks() -> None:
     try:
         await check_week_ahead_warnings()
         await check_depletion_timeline()
-    except Exception as e:
-        logger.error(f"Low balance checks failed: {e}", exc_info=True)
+    except Exception:
+        logger.exception("Low balance checks failed")

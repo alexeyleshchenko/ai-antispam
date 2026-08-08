@@ -1,13 +1,12 @@
 import logging
 import os
-from typing import Optional
 
 import asyncpg
 import logfire
 
 logger = logging.getLogger(__name__)
 
-_pool: Optional[asyncpg.Pool] = None
+_pool: asyncpg.Pool | None = None
 
 
 @logfire.no_auto_trace
