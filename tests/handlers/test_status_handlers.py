@@ -1,9 +1,11 @@
 """Tests for status_handlers: Telegram auto-add detection + awaiting-rights upsert."""
 
 import asyncio
+from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (
     Chat,
     ChatMemberAdministrator,
@@ -500,6 +502,10 @@ class TestActivateDiscussionGroup:
                 AsyncMock(),
             ),
             patch(
+                "src.app.handlers.status_handlers.clear_no_rights_detected_at",
+                AsyncMock(),
+            ),
+            patch(
                 "src.app.handlers.status_handlers._notify_admins_about_rights",
                 AsyncMock(),
             ),
@@ -583,6 +589,10 @@ class TestActivateDiscussionGroup:
                 AsyncMock(),
             ),
             patch(
+                "src.app.handlers.status_handlers.clear_no_rights_detected_at",
+                AsyncMock(),
+            ),
+            patch(
                 "src.app.handlers.status_handlers._notify_admins_about_rights",
                 AsyncMock(),
             ),
@@ -627,12 +637,6 @@ class TestFullLifecycleAwaitingRightsActivation:
     async def test_awaiting_rights_group_activates_after_promotion(
         self, patched_db_conn, clean_db
     ):
-        from app.database import (
-            is_moderation_enabled,
-            upsert_awaiting_rights_group,
-        )
-        from src.app.handlers.status_handlers import _handle_bot_added
-
         # The DB fixtures patch app.database.postgres_connection._pool, but the
         # handler's internals (src.app.database.group_operations) import a
         # SEPARATE module instance (dual-module: app.* vs src.app.*). Sync the
@@ -640,6 +644,11 @@ class TestFullLifecycleAwaitingRightsActivation:
         # runs against the test pool, not a live asyncpg connection.
         import app.database.postgres_connection as app_pc
         import src.app.database.postgres_connection as src_pc
+        from app.database import (
+            is_moderation_enabled,
+            upsert_awaiting_rights_group,
+        )
+        from src.app.handlers.status_handlers import _handle_bot_added
 
         src_pc._pool = app_pc._pool
         try:
@@ -693,11 +702,10 @@ class TestFullLifecycleAwaitingRightsActivation:
         self, patched_db_conn, clean_db
     ):
         """No promotion (plain member add) → still awaiting-rights (disabled)."""
-        from app.database import is_moderation_enabled, upsert_awaiting_rights_group
-        from src.app.handlers.status_handlers import _handle_bot_added
-
         import app.database.postgres_connection as app_pc
         import src.app.database.postgres_connection as src_pc
+        from app.database import is_moderation_enabled, upsert_awaiting_rights_group
+        from src.app.handlers.status_handlers import _handle_bot_added
 
         src_pc._pool = app_pc._pool
         try:
@@ -740,3 +748,344 @@ class TestFullLifecycleAwaitingRightsActivation:
             assert await is_moderation_enabled(DISCUSSION_ID) is False
         finally:
             src_pc._pool = None
+
+
+class TestNoRightsFlagClearOnAdminAdd:
+    """Fix #1: promotion (member→admin) clears no_rights_detected_at."""
+
+    @pytest.mark.asyncio
+    async def test_admin_add_clears_no_rights_flag(self):
+        """Bot promoted to admin → clear_no_rights_detected_at called."""
+        event = _real_event(
+            from_id=HUMAN_ID,
+            old_status="member",
+            new_status="administrator",
+            chat_id=DISCUSSION_ID,
+            can_delete=True,
+            can_restrict=True,
+        )
+        mock_clear = AsyncMock()
+
+        with (
+            patch(
+                "src.app.handlers.status_handlers.update_group_admins",
+                AsyncMock(),
+            ),
+            patch(
+                "src.app.handlers.status_handlers.activate_discussion_group",
+                AsyncMock(return_value=False),
+            ),
+            patch(
+                "src.app.handlers.status_handlers.clear_no_rights_detected_at",
+                mock_clear,
+            ),
+            patch(
+                "src.app.handlers.status_handlers._send_promo_message",
+                AsyncMock(),
+            ),
+            patch(
+                "src.app.handlers.status_handlers._resolve_lang",
+                AsyncMock(return_value="en"),
+            ),
+            patch(
+                "src.app.handlers.status_handlers.format_chat_or_channel_display",
+                return_value="Discussion",
+            ),
+            patch(
+                "src.app.handlers.status_handlers.retry_on_network_error",
+                side_effect=lambda f: f,
+            ),
+            patch(
+                "src.app.handlers.status_handlers.bot.send_message",
+                AsyncMock(),
+            ),
+        ):
+            from src.app.handlers.status_handlers import _handle_bot_added
+
+            await _handle_bot_added(
+                event, DISCUSSION_ID, HUMAN_ID, "Discussion", "administrator"
+            )
+
+        mock_clear.assert_awaited_once_with(DISCUSSION_ID)
+
+    @pytest.mark.asyncio
+    async def test_member_add_does_not_clear_flag_and_notifies_once(self):
+        """Bot added as plain member → flag NOT cleared; admins notified once."""
+        event = _real_event(
+            from_id=HUMAN_ID,
+            old_status="left",
+            new_status="member",
+            chat_id=DISCUSSION_ID,
+        )
+        mock_clear = AsyncMock()
+        mock_notify = AsyncMock()
+
+        with (
+            patch(
+                "src.app.handlers.status_handlers.update_group_admins",
+                AsyncMock(),
+            ),
+            patch(
+                "src.app.handlers.status_handlers.clear_no_rights_detected_at",
+                mock_clear,
+            ),
+            patch(
+                "src.app.handlers.status_handlers.set_no_rights_detected_at",
+                AsyncMock(),
+            ),
+            patch(
+                "src.app.handlers.status_handlers._notify_admins_about_rights",
+                mock_notify,
+            ),
+        ):
+            from src.app.handlers.status_handlers import _handle_bot_added
+
+            await _handle_bot_added(event, DISCUSSION_ID, HUMAN_ID, "Discussion", "member")
+
+        mock_clear.assert_not_awaited()
+        mock_notify.assert_awaited_once()
+
+
+class TestServiceMessageDeleteNoAdminSkip:
+    """Fix #2: skip the no-rights nag when the bot isn't an admin in the chat."""
+
+    def _permission_error(self) -> TelegramBadRequest:
+        return TelegramBadRequest(
+            method="deleteMessage", message="message can't be deleted"
+        )
+
+    def _message(self, *, chat_id: int = DISCUSSION_ID, join: bool = True) -> MagicMock:
+        msg = MagicMock()
+        msg.chat = MagicMock()
+        msg.chat.id = chat_id
+        msg.chat.title = "Discussion"
+        msg.chat.username = None
+        msg.message_id = 999
+        if join:
+            msg.new_chat_member = MagicMock()
+            msg.new_chat_members = None
+            msg.left_chat_member = None
+        else:
+            msg.new_chat_member = None
+            msg.new_chat_members = None
+            msg.left_chat_member = MagicMock()
+        return msg
+
+    def _admin_member(self) -> ChatMemberAdministrator:
+        return ChatMemberAdministrator(
+            user=User(id=BOT_ID, is_bot=True, first_name="Bot"),
+            status="administrator",
+            can_be_edited=False,
+            is_anonymous=False,
+            can_manage_chat=True,
+            can_delete_messages=True,
+            can_manage_video_chats=False,
+            can_restrict_members=True,
+            can_promote_members=False,
+            can_change_info=False,
+            can_invite_users=True,
+            can_post_stories=False,
+            can_edit_stories=False,
+            can_delete_stories=False,
+        )
+
+    def _base_patches(self, *, member) -> list:
+        return [
+            patch(
+                "src.app.handlers.status_handlers.bot.delete_message",
+                AsyncMock(side_effect=self._permission_error()),
+            ),
+            patch(
+                "src.app.handlers.status_handlers.bot.get_chat_member",
+                AsyncMock(return_value=member),
+            ),
+            patch(
+                "src.app.handlers.status_handlers.set_no_rights_detected_at",
+                AsyncMock(),
+            ),
+            patch(
+                "src.app.handlers.status_handlers.bot.get_chat_administrators",
+                AsyncMock(
+                    return_value=[
+                        MagicMock(
+                            user=User(id=HUMAN_ID, is_bot=False, first_name="Admin")
+                        )
+                    ]
+                ),
+            ),
+            patch(
+                "src.app.handlers.status_handlers._resolve_lang",
+                AsyncMock(return_value="en"),
+            ),
+            patch(
+                "src.app.handlers.status_handlers.format_chat_or_channel_display",
+                return_value="Discussion",
+            ),
+            patch(
+                "src.app.handlers.status_handlers.notify_admins_with_fallback_and_cleanup",
+                AsyncMock(
+                    return_value={
+                        "notified_private": [HUMAN_ID],
+                        "group_notified": False,
+                        "group_cleaned_up": False,
+                    }
+                ),
+            ),
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.asyncio
+    async def test_join_skip_when_not_admin(self):
+        """Join service msg + bot is member → skip tag, no flag, no DM."""
+        from src.app.handlers.status_handlers import handle_member_service_message
+
+        member = ChatMemberMember(
+            user=User(id=BOT_ID, is_bot=True, first_name="Bot"), status="member"
+        )
+        mock_set = AsyncMock()
+        mock_notify = AsyncMock()
+        with ExitStack() as stack:
+            for p in self._base_patches(member=member):
+                stack.enter_context(p)
+            stack.enter_context(
+                patch(
+                    "src.app.handlers.status_handlers.set_no_rights_detected_at",
+                    mock_set,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "src.app.handlers.status_handlers.notify_admins_with_fallback_and_cleanup",
+                    mock_notify,
+                )
+            )
+            result = await handle_member_service_message(self._message())
+
+        assert result == "service_message_delete_skipped_no_admin"
+        mock_set.assert_not_awaited()
+        mock_notify.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_leave_skip_when_not_admin(self):
+        """Leave service msg + bot is member → skip tag, no flag, no DM."""
+        from src.app.handlers.status_handlers import handle_member_service_message
+
+        member = ChatMemberMember(
+            user=User(id=BOT_ID, is_bot=True, first_name="Bot"), status="member"
+        )
+        mock_set = AsyncMock()
+        mock_notify = AsyncMock()
+        with ExitStack() as stack:
+            for p in self._base_patches(member=member):
+                stack.enter_context(p)
+            stack.enter_context(
+                patch(
+                    "src.app.handlers.status_handlers.set_no_rights_detected_at",
+                    mock_set,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "src.app.handlers.status_handlers.notify_admins_with_fallback_and_cleanup",
+                    mock_notify,
+                )
+            )
+            result = await handle_member_service_message(self._message(join=False))
+
+        assert result == "service_message_delete_skipped_no_admin"
+        mock_set.assert_not_awaited()
+        mock_notify.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_nag_preserved_when_bot_is_admin(self):
+        """Bot IS admin but lacks delete rights → nag + flag preserved."""
+        from src.app.handlers.status_handlers import handle_member_service_message
+
+        mock_set = AsyncMock()
+        with ExitStack() as stack:
+            for p in self._base_patches(member=self._admin_member()):
+                stack.enter_context(p)
+            stack.enter_context(
+                patch(
+                    "src.app.handlers.status_handlers.set_no_rights_detected_at",
+                    mock_set,
+                )
+            )
+            result = await handle_member_service_message(self._message())
+
+        assert result == "service_message_no_rights"
+        mock_set.assert_awaited_once_with(DISCUSSION_ID)
+
+    @pytest.mark.asyncio
+    async def test_membership_check_fails_falls_back_loud(self):
+        """get_chat_member raises → fall back to current loud behavior."""
+        from src.app.handlers.status_handlers import handle_member_service_message
+
+        mock_set = AsyncMock()
+        mock_notify = AsyncMock(
+            return_value={
+                "notified_private": [HUMAN_ID],
+                "group_notified": False,
+                "group_cleaned_up": False,
+            }
+        )
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch(
+                    "src.app.handlers.status_handlers.bot.delete_message",
+                    AsyncMock(side_effect=self._permission_error()),
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "src.app.handlers.status_handlers.bot.get_chat_member",
+                    AsyncMock(
+                        side_effect=TelegramBadRequest(
+                            method="getChatMember", message="chat not found"
+                        )
+                    ),
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "src.app.handlers.status_handlers.set_no_rights_detected_at",
+                    mock_set,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "src.app.handlers.status_handlers.bot.get_chat_administrators",
+                    AsyncMock(
+                        return_value=[
+                            MagicMock(
+                                user=User(
+                                    id=HUMAN_ID, is_bot=False, first_name="Admin"
+                                )
+                            )
+                        ]
+                    ),
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "src.app.handlers.status_handlers._resolve_lang",
+                    AsyncMock(return_value="en"),
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "src.app.handlers.status_handlers.format_chat_or_channel_display",
+                    return_value="Discussion",
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "src.app.handlers.status_handlers.notify_admins_with_fallback_and_cleanup",
+                    mock_notify,
+                )
+            )
+            result = await handle_member_service_message(self._message())
+
+        assert result == "service_message_no_rights"
+        mock_set.assert_awaited_once_with(DISCUSSION_ID)
+        mock_notify.assert_awaited_once()
