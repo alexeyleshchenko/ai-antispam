@@ -628,6 +628,24 @@ async def handle_member_service_message(message: types.Message) -> str:
                     f"Cannot delete service message {message_id} in chat {chat_id} ('{message.chat.title or ''}'): {e}",
                     exc_info=True,
                 )
+                # If the bot isn't an admin here, the delete failure is
+                # expected (members can't delete service messages) — skip the
+                # nag; the add-flow already asked for admin rights. If the
+                # membership check itself fails, keep the loud behavior rather
+                # than lose legitimate notifications.
+                try:
+                    member = await bot.get_chat_member(chat_id, bot.id)
+                except Exception:  # noqa: BLE001
+                    member = None
+                if member is not None and not isinstance(
+                    member, types.ChatMemberAdministrator
+                ):
+                    logger.debug(
+                        f"Bot is not an admin in chat {chat_id} "
+                        f"('{message.chat.title or ''}') — service-message delete "
+                        "failure expected; skipping no-rights nag"
+                    )
+                    return "service_message_delete_skipped_no_admin"
                 await set_no_rights_detected_at(chat_id)
                 # Notify admins about missing permission - if this fails, cleanup will happen
                 try:
