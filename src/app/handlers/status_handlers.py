@@ -368,6 +368,10 @@ async def _handle_bot_added(
             is_already_admin=(new_status == "administrator"),
         )
     else:
+        # The bot demonstrably has admin rights (payload verified above) —
+        # clear any previously-detected no-rights state so the group never
+        # lingers in the no-rights bucket after promotion (member->admin).
+        await clear_no_rights_detected_at(chat_id)
         # Only send promo message if we have admin rights
         await _send_promo_message(
             chat_id,
