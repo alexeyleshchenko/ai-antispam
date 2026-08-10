@@ -311,12 +311,12 @@ async def handle_spam_confirm_callback(callback: CallbackQuery) -> str:
         except TelegramBadRequest as e:
             if is_message_not_found_error(e):
                 logger.info(
-                    f"Message to delete not found (likely already deleted): {format_chat_log(chat_id)}:{message_id}"
+                    f"Message to delete not found (likely already deleted): {format_chat_log(chat_id, getattr(callback.message.chat, 'title', None), getattr(callback.message.chat, 'username', None))}:{message_id}"
                 )
                 delete_succeeded = True
             elif is_permission_error(e):
                 logger.info(
-                    f"Cannot delete message (no permission or too old): {format_chat_log(chat_id)}:{message_id}: {e}"
+                    f"Cannot delete message (no permission or too old): {format_chat_log(chat_id, getattr(callback.message.chat, 'title', None), getattr(callback.message.chat, 'username', None))}:{message_id}: {e}"
                 )
                 await _answer_safe(
                     callback, t(lang, "callback.delete_no_permission"), show_alert=True

@@ -259,3 +259,66 @@ async def test_handle_spam_confirm_callback_deletes_and_bans():
         call_kwargs = mock_bot.edit_message_text.call_args.kwargs
         assert call_kwargs["reply_markup"] is None
         assert "✅" in call_kwargs["text"] and "Spam deleted" in call_kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_handle_spam_confirm_callback_delete_failure_logs_title_username(
+    caplog,
+):
+    """
+    Delete-failure log line carries the chat title/username from callback.message.chat
+    (no extra API call needed — the chat object is already in scope).
+    """
+    import logging
+
+    from aiogram.exceptions import TelegramBadRequest
+
+    callback = AsyncMock(spec=CallbackQuery)
+    callback.answer = AsyncMock()
+    callback.data = "delete_spam_message:12345:67890:111"
+    callback.from_user = User(id=999, is_bot=False, first_name="Admin")
+    callback.message = AsyncMock(spec=Message)
+    callback.message.chat = Chat(
+        id=456, type="supergroup", title="Test Group", username="testgroup"
+    )
+    callback.message.message_id = 222
+    callback.message.text = "⚠️ INTRUSION! Violator: @spammer"
+
+    with (
+        patch("src.app.handlers.callback_handlers.bot") as mock_bot,
+        patch(
+            "src.app.handlers.callback_handlers.get_admin",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "src.app.handlers.callback_handlers.get_group",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "src.app.handlers.callback_handlers.ban_user_for_spam",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "src.app.handlers.callback_handlers.confirm_pending_example_as_spam",
+            new_callable=AsyncMock,
+        ),
+    ):
+        mock_bot.edit_message_text = AsyncMock()
+        mock_bot.delete_message = AsyncMock(
+            side_effect=TelegramBadRequest(
+                method="deleteMessage", message="message to delete not found"
+            )
+        )
+
+        with caplog.at_level(logging.INFO, logger="src.app.handlers.callback_handlers"):
+            result = await handle_spam_confirm_callback(callback)
+
+        assert result == "callback_spam_message_deleted"
+
+    assert any(
+        "Message to delete not found" in r.getMessage()
+        and "'Test Group' @testgroup" in r.getMessage()
+        for r in caplog.records
+    )

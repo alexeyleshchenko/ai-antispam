@@ -46,7 +46,14 @@ async def try_deduct_credits(chat_id: int, amount: int, reason: str) -> bool:
     admin_id = await deduct_credits_from_admins(chat_id, amount)
 
     if not admin_id:
-        logger.warning(f"No paying admins in chat {format_chat_log(chat_id)} for {reason}")
+        title = username = None
+        try:
+            chat = await bot.get_chat(chat_id)
+            title = getattr(chat, "title", None)
+            username = getattr(chat, "username", None)
+        except Exception:  # noqa: BLE001
+            title = username = None
+        logger.warning(f"No paying admins in chat {format_chat_log(chat_id, title, username)} for {reason}")
         await handle_deactivation(chat_id)
         return False
 
@@ -63,7 +70,9 @@ async def handle_deactivation(chat_id: int) -> None:
     await set_group_moderation(chat_id, False)
     chat = await bot.get_chat(chat_id)
     if not chat.title:
-        logger.warning(f"Failed to get chat title for {format_chat_log(chat_id)}")
+        logger.warning(
+            f"Failed to get chat title for {format_chat_log(chat_id, getattr(chat, 'title', None), getattr(chat, 'username', None))}"
+        )
         return
 
     admins = await bot.get_chat_administrators(chat_id)

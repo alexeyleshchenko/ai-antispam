@@ -242,3 +242,96 @@ async def test_leave_no_rights_groups_cleans_stale_group_bot_kicked():
         await leave_no_rights_groups()
 
         mock_cleanup.assert_called_once_with(-1009876543210, 'Kicked Group', None)
+
+
+@pytest.mark.asyncio
+async def test_leave_no_rights_groups_logs_title_username(caplog):
+    """
+    When get_chat resolves, the leave/cleanup log lines carry the group
+    title and username (mirrors the low_balance pattern).
+    """
+    import logging
+
+    with (
+        patch("app.background_jobs.no_rights.load_config") as mock_load,
+        patch(
+            "app.background_jobs.no_rights.get_groups_with_no_rights_past_grace"
+        ) as mock_get,
+        patch("app.background_jobs.no_rights.bot") as mock_bot,
+        patch(
+            "app.background_jobs.no_rights.perform_complete_group_cleanup",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as mock_cleanup,
+        patch(
+            "app.background_jobs.no_rights.get_group", new_callable=AsyncMock
+        ) as mock_get_group,
+    ):
+        mock_load.return_value = {"billing": {"no_rights_grace_days": 7}}
+        mock_get.return_value = [-100123]
+        mock_bot.me = AsyncMock(return_value=MagicMock(id=999, username="test_bot"))
+        mock_bot.get_chat = AsyncMock(
+            return_value=MagicMock(title="Test Group", username="testgroup")
+        )
+        member_mock = MagicMock()
+        member_mock.can_delete_messages = False
+        member_mock.can_restrict_members = False
+        mock_bot.get_chat_member = AsyncMock(return_value=member_mock)
+        mock_get_group.return_value = None
+
+        with caplog.at_level(logging.INFO, logger="app.background_jobs.no_rights"):
+            await leave_no_rights_groups()
+
+        mock_cleanup.assert_called_once_with(-100123, "Test Group", "testgroup")
+
+    assert any(
+        "Left no-rights group" in r.getMessage()
+        and "'Test Group' @testgroup" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_leave_no_rights_groups_falls_back_to_bare_id(caplog):
+    """
+    When get_chat raises (e.g. chat inaccessible), the log still fires with
+    the bare chat ID — no crash, graceful fallback.
+    """
+    import logging
+
+    with (
+        patch("app.background_jobs.no_rights.load_config") as mock_load,
+        patch(
+            "app.background_jobs.no_rights.get_groups_with_no_rights_past_grace"
+        ) as mock_get,
+        patch("app.background_jobs.no_rights.bot") as mock_bot,
+        patch(
+            "app.background_jobs.no_rights.perform_complete_group_cleanup",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as mock_cleanup,
+        patch(
+            "app.background_jobs.no_rights.get_group", new_callable=AsyncMock
+        ) as mock_get_group,
+    ):
+        mock_load.return_value = {"billing": {"no_rights_grace_days": 7}}
+        mock_get.return_value = [-100123]
+        mock_bot.me = AsyncMock(return_value=MagicMock(id=999, username="test_bot"))
+        mock_bot.get_chat = AsyncMock(
+            side_effect=Exception("TelegramForbiddenError: bot is not a member")
+        )
+        member_mock = MagicMock()
+        member_mock.can_delete_messages = False
+        member_mock.can_restrict_members = False
+        mock_bot.get_chat_member = AsyncMock(return_value=member_mock)
+        mock_get_group.return_value = None
+
+        with caplog.at_level(logging.INFO, logger="app.background_jobs.no_rights"):
+            await leave_no_rights_groups()
+
+        mock_cleanup.assert_called_once_with(-100123, None, None)
+
+    assert any(
+        "Left no-rights group" in r.getMessage() and "-100123" in r.getMessage()
+        for r in caplog.records
+    )

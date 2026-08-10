@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 async def validate_group_and_check_early_exits(
-    chat_id: int, user_id: int
+    chat_id: int, user_id: int, title: str | None = None, username: str | None = None
 ) -> tuple[Group | None, str]:
     """
     Validate group exists and check for early exit conditions.
@@ -26,13 +26,15 @@ async def validate_group_and_check_early_exits(
     Args:
         chat_id: The chat ID to validate
         user_id: The user ID to check
+        title: Optional group title for log enrichment (no re-fetch)
+        username: Optional group username for log enrichment (no re-fetch)
 
     Returns:
         Tuple of (group, exit_reason). If exit_reason is non-empty, processing
         should stop with the given reason. If exit_reason is empty string,
         processing should continue with the returned group.
     """
-    group, group_error = await get_and_check_group(chat_id)
+    group, group_error = await get_and_check_group(chat_id, title, username)
     if group_error:
         return None, group_error
 
@@ -89,7 +91,11 @@ async def check_skip_channel_bot_message(message: types.Message) -> tuple[bool, 
 
     # Attempt API fetch if needed
     if should_attempt_api_fetch(message, linked_chat_id):
-        linked_chat_id = await fetch_linked_chat_id(message.chat.id)
+        linked_chat_id = await fetch_linked_chat_id(
+            message.chat.id,
+            getattr(message.chat, "title", None),
+            getattr(message.chat, "username", None),
+        )
         logger.debug(f"Fetched linked_chat_id via API: {format_chat_log(linked_chat_id) if linked_chat_id is not None else 'None'}")
 
         if is_channel_bot_in_discussion(message, linked_chat_id):
@@ -116,12 +122,16 @@ def is_admin_posting_as_group(message: types.Message) -> bool:
     return message.sender_chat is not None and message.sender_chat.id == message.chat.id
 
 
-async def fetch_linked_chat_id(chat_id: int) -> int | None:
+async def fetch_linked_chat_id(
+    chat_id: int, title: str | None = None, username: str | None = None
+) -> int | None:
     """
     Fetch linked chat ID for a supergroup via Telegram API.
 
     Args:
         chat_id: The chat ID to fetch linked chat for
+        title: Optional chat title for log enrichment
+        username: Optional chat username for log enrichment
 
     Returns:
         Linked chat ID if found, None otherwise
@@ -130,7 +140,7 @@ async def fetch_linked_chat_id(chat_id: int) -> int | None:
         chat_info = await bot.get_chat(chat_id)
         return getattr(chat_info, "linked_chat_id", None)
     except Exception as e:  # noqa: BLE001
-        logger.warning(f"Failed to fetch linked_chat_id via API for {format_chat_log(chat_id)}: {e}")
+        logger.warning(f"Failed to fetch linked_chat_id via API for {format_chat_log(chat_id, title, username)}: {e}")
         return None
 
 
@@ -174,12 +184,16 @@ def should_attempt_api_fetch(
     )
 
 
-async def get_and_check_group(chat_id: int) -> tuple[Group | None, str]:
+async def get_and_check_group(
+    chat_id: int, title: str | None = None, username: str | None = None
+) -> tuple[Group | None, str]:
     """
     Get group and check if moderation is enabled.
 
     Args:
         chat_id: The chat ID to look up
+        title: Optional group title for log enrichment (no re-fetch)
+        username: Optional group username for log enrichment (no re-fetch)
 
     Returns:
         Tuple of (group, error_reason). Returns (None, error_message) if group
@@ -188,7 +202,7 @@ async def get_and_check_group(chat_id: int) -> tuple[Group | None, str]:
     group = await get_group(chat_id)
 
     if not group:
-        logger.info(f"Group not found for chat {format_chat_log(chat_id)}")
+        logger.info(f"Group not found for chat {format_chat_log(chat_id, title, username)}")
         return None, "error_message_group_not_found"
 
     if not group.moderation_enabled:
