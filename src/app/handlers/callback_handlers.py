@@ -203,7 +203,7 @@ async def handle_spam_ignore_callback(callback: CallbackQuery) -> str:
             f"{message_text}\n\n✅ <b>{t(lang, 'callback.safe_added')}</b>"
         )
 
-        if row:
+        if row and "chat_id" in row:
             group_id = row["chat_id"]
             effective_user_id = row["effective_user_id"]
 
@@ -237,10 +237,19 @@ async def handle_spam_ignore_callback(callback: CallbackQuery) -> str:
                     )
                 )
         else:
-            logger.warning(
-                "mark_as_not_spam: pending record not found, skipping unban/add",
-                extra={"pending_id": pending_id},
-            )
+            if row is None:
+                logger.warning(
+                    "mark_as_not_spam: pending record %s not found, skipping unban/add",
+                    pending_id,
+                    extra={"pending_id": pending_id},
+                )
+            elif row.get("already_confirmed"):
+                logger.info(
+                    "mark_as_not_spam: pending %s already confirmed (by admin %s) — duplicate callback, skipping",
+                    pending_id,
+                    row.get("admin_id"),
+                    extra={"pending_id": pending_id, "admin_id": row.get("admin_id")},
+                )
             with contextlib.suppress(Exception):
                 await bot.edit_message_text(
                     chat_id=callback.message.chat.id,

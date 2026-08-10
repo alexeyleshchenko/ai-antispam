@@ -425,6 +425,36 @@ async def test_confirm_pending_example_as_not_spam_not_found(patched_db_conn, cl
 
 
 @pytest.mark.asyncio
+async def test_confirm_pending_example_as_not_spam_already_confirmed(
+    patched_db_conn, clean_db
+):
+    """Test confirm discriminates a duplicate callback (row exists, already confirmed)"""
+    async with clean_db.acquire() as conn:
+        admin_id = 12345
+        await conn.execute(
+            """
+            INSERT INTO administrators (admin_id, username, credits)
+            VALUES ($1, 'testadmin', 100)
+            ON CONFLICT DO NOTHING
+        """,
+            admin_id,
+        )
+
+        pending_id = await insert_pending_spam_example(
+            chat_id=200, message_id=60, effective_user_id=888, text="Safe message"
+        )
+
+        # First confirm succeeds (normal path)
+        first = await confirm_pending_example_as_not_spam(pending_id, admin_id)
+        assert first is not None
+        assert first["chat_id"] == 200
+
+        # Second confirm (duplicate callback) → already_confirmed discriminator
+        second = await confirm_pending_example_as_not_spam(pending_id, admin_id)
+        assert second == {"already_confirmed": True, "admin_id": admin_id}
+
+
+@pytest.mark.asyncio
 async def test_get_spam_examples_excludes_pending(patched_db_conn, clean_db):
     """Test that get_spam_examples excludes pending (unconfirmed) rows"""
     async with clean_db.acquire() as conn:

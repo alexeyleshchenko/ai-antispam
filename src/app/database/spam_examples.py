@@ -95,7 +95,14 @@ async def cleanup_pending_spam_examples(days: int = 3) -> int:
 async def confirm_pending_example_as_not_spam(
     pending_id: int, admin_id: int
 ) -> dict[str, Any] | None:
-    """Mark pending example as not spam. Returns chat_id, message_id, effective_user_id or None."""
+    """Mark pending example as not spam. Returns one of three shapes:
+
+    - success: ``{"chat_id": ..., "message_id": ..., "effective_user_id": ...}``
+      (the UPDATE matched and confirmed a pending row)
+    - already confirmed: ``{"already_confirmed": True, "admin_id": <id or None>}``
+      (the row exists but is already confirmed — e.g. a duplicate callback)
+    - genuinely missing: ``None`` (no row with this id exists at all)
+    """
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -108,13 +115,21 @@ async def confirm_pending_example_as_not_spam(
             admin_id,
             pending_id,
         )
-        if not row or row["chat_id"] is None:
-            return None
-        return {
-            "chat_id": row["chat_id"],
-            "message_id": row["message_id"],
-            "effective_user_id": row["effective_user_id"],
-        }
+        if row and row["chat_id"] is not None:
+            return {
+                "chat_id": row["chat_id"],
+                "message_id": row["message_id"],
+                "effective_user_id": row["effective_user_id"],
+            }
+        # UPDATE matched 0 rows — discriminate: row exists but already
+        # confirmed (benign duplicate) vs genuinely missing (real problem).
+        existing = await conn.fetchrow(
+            "SELECT admin_id FROM spam_examples WHERE id = $1",
+            pending_id,
+        )
+        if existing is not None:
+            return {"already_confirmed": True, "admin_id": existing["admin_id"]}
+        return None
 
 
 @logfire.no_auto_trace
