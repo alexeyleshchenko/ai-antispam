@@ -79,6 +79,136 @@ async def test_handle_spam_ignore_callback_confirm_raises():
 
 
 @pytest.mark.asyncio
+async def test_handle_spam_ignore_callback_duplicate_tap_logs_info(
+    caplog,
+):
+    """
+    Duplicate callback (row already confirmed): INFO level, no unban/add/set_moderation_events,
+    message still edited to '✅ added' — same UX as success.
+    """
+    import logging
+
+    callback = AsyncMock(spec=CallbackQuery)
+    callback.data = "mark_as_not_spam:77"
+    callback.from_user = User(id=999, is_bot=False, first_name="Admin")
+    callback.message = AsyncMock(spec=Message)
+    callback.message.chat = Chat(id=456, type="supergroup")
+    callback.message.message_id = 111
+    callback.message.text = "Spam message content"
+
+    callback.answer = AsyncMock()
+
+    with (
+        patch("src.app.handlers.callback_handlers.bot") as mock_bot,
+        patch(
+            "src.app.handlers.callback_handlers.get_admin",
+            new_callable=AsyncMock,
+            return_value=MagicMock(is_active=True, language_code="en"),
+        ),
+        patch(
+            "src.app.handlers.callback_handlers.confirm_pending_example_as_not_spam",
+            new_callable=AsyncMock,
+            return_value={"already_confirmed": True, "admin_id": 999},
+        ) as mock_confirm,
+        patch(
+            "src.app.handlers.callback_handlers.add_member",
+            new_callable=AsyncMock,
+        ) as mock_add_member,
+        patch(
+            "src.app.handlers.callback_handlers.set_moderation_events",
+            new_callable=AsyncMock,
+        ) as mock_set_moderation,
+    ):
+        mock_bot.edit_message_text = AsyncMock()
+        mock_bot.unban_chat_member = AsyncMock()
+
+        with caplog.at_level(logging.INFO, logger="src.app.handlers.callback_handlers"):
+            result = await handle_spam_ignore_callback(callback)
+
+        assert result == "callback_marked_as_not_spam"
+        mock_confirm.assert_called_once_with(77, 999)
+        # No unban/add/set_moderation_events on the duplicate path
+        mock_bot.unban_chat_member.assert_not_called()
+        mock_add_member.assert_not_called()
+        mock_set_moderation.assert_not_called()
+        # Message edited to '✅ added' regardless
+        mock_bot.edit_message_text.assert_called_once()
+
+    assert any(
+        r.levelname == "INFO"
+        and "77" in r.getMessage()
+        and "already confirmed" in r.getMessage()
+        and "999" in r.getMessage()
+        for r in caplog.records
+    )
+    assert not any(r.levelname == "WARNING" for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_handle_spam_ignore_callback_genuine_missing_logs_warning(
+    caplog,
+):
+    """
+    Genuine missing (no row): WARNING level (honors the revert — don't lose genuine
+    situations), no unban/add calls, message still edited.
+    """
+    import logging
+
+    callback = AsyncMock(spec=CallbackQuery)
+    callback.data = "mark_as_not_spam:55"
+    callback.from_user = User(id=999, is_bot=False, first_name="Admin")
+    callback.message = AsyncMock(spec=Message)
+    callback.message.chat = Chat(id=456, type="supergroup")
+    callback.message.message_id = 111
+    callback.message.text = "Spam message content"
+
+    callback.answer = AsyncMock()
+
+    with (
+        patch("src.app.handlers.callback_handlers.bot") as mock_bot,
+        patch(
+            "src.app.handlers.callback_handlers.get_admin",
+            new_callable=AsyncMock,
+            return_value=MagicMock(is_active=True, language_code="en"),
+        ),
+        patch(
+            "src.app.handlers.callback_handlers.confirm_pending_example_as_not_spam",
+            new_callable=AsyncMock,
+            return_value=None,
+        ) as mock_confirm,
+        patch(
+            "src.app.handlers.callback_handlers.add_member",
+            new_callable=AsyncMock,
+        ) as mock_add_member,
+        patch(
+            "src.app.handlers.callback_handlers.set_moderation_events",
+            new_callable=AsyncMock,
+        ) as mock_set_moderation,
+    ):
+        mock_bot.edit_message_text = AsyncMock()
+        mock_bot.unban_chat_member = AsyncMock()
+
+        with caplog.at_level(logging.WARNING, logger="src.app.handlers.callback_handlers"):
+            result = await handle_spam_ignore_callback(callback)
+
+        assert result == "callback_marked_as_not_spam"
+        mock_confirm.assert_called_once_with(55, 999)
+        # No unban/add/set_moderation_events on the missing path
+        mock_bot.unban_chat_member.assert_not_called()
+        mock_add_member.assert_not_called()
+        mock_set_moderation.assert_not_called()
+        # Message edited to '✅ added' regardless
+        mock_bot.edit_message_text.assert_called_once()
+
+    assert any(
+        r.levelname == "WARNING"
+        and "55" in r.getMessage()
+        and "not found" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
 async def test_handle_spam_confirm_callback_deletes_and_bans():
     """
     When admin in notify mode clicks "Удалить", both the message is deleted
