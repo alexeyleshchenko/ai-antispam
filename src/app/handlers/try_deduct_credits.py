@@ -12,6 +12,7 @@ import asyncio
 import logging
 from collections.abc import Sequence
 
+import logfire
 from aiogram.types import ChatMember, ChatMemberAdministrator, ChatMemberOwner
 
 from ..common.bot import bot
@@ -57,9 +58,11 @@ async def try_deduct_credits(chat_id: int, amount: int, reason: str) -> bool:
         await handle_deactivation(chat_id)
         return False
 
+    logger.debug(f"Deducted {amount}★ from {admin_id} in {format_chat_log(chat_id)}")
     return True
 
 
+@logfire.instrument(extract_args=True, record_return=True)
 async def handle_deactivation(chat_id: int) -> None:
     """
     Обрабатывает деактивацию группы.
@@ -75,10 +78,16 @@ async def handle_deactivation(chat_id: int) -> None:
         )
         return
 
+    chat_username = getattr(chat, "username", None)
+    logger.info(f"Moderation disabled for {format_chat_log(chat_id, chat.title, chat_username)}")
+
     admins = await bot.get_chat_administrators(chat_id)
     min_credits_admin, min_credits = await find_min_credits_admin(admins)
 
     if min_credits_admin:
+        logger.info(
+            f"Min-credits admin {min_credits_admin.user.id} (balance={min_credits}) for {format_chat_log(chat_id, chat.title, chat_username)}"
+        )
         bot_info = await bot.me()
         ref_link = f"https://t.me/{bot_info.username}?start={min_credits_admin.user.id}"
 
@@ -87,7 +96,6 @@ async def handle_deactivation(chat_id: int) -> None:
         )
 
         # Build per-admin message data for the shared notification handler
-        chat_username = getattr(chat, "username", None)
         human_admin_ids = [
             a.user.id
             for a in admins
@@ -121,7 +129,7 @@ async def handle_deactivation(chat_id: int) -> None:
             msg += t(lang, "deactivate.admin_invite", ref_link=ref_link)
             return msg
 
-        await notify_admins_with_fallback_and_cleanup(
+        notify_result = await notify_admins_with_fallback_and_cleanup(
             bot,
             human_admin_ids,
             chat_id,
@@ -129,6 +137,15 @@ async def handle_deactivation(chat_id: int) -> None:
             group_message_template="{mention}, " + t(default_lang, "deactivate.group_fallback_message"),
             cleanup_if_group_fails=False,
             assume_human_admins=True,
+        )
+        logger.info(
+            f"Deactivation notification for {format_chat_log(chat_id, chat.title, chat_username)}: "
+            f"{len(notify_result.get('notified_private', []))} admins notified in private, "
+            f"{len(notify_result.get('unreachable', []))} unreachable"
+        )
+    else:
+        logger.info(
+            f"No min-credits admin found for {format_chat_log(chat_id, chat.title, chat_username)} — nothing to notify"
         )
 
 
@@ -158,9 +175,13 @@ async def find_min_credits_admin(
             min_credits = admin_data.credits
             min_credits_admin = admin
 
+    logger.debug(
+        f"Min-credits admin for deactivation: {min_credits_admin.user.id if min_credits_admin else None}, balance={min_credits}"
+    )
     return min_credits_admin, min_credits
 
 
+@logfire.instrument(extract_args=True, record_return=True)
 async def send_group_deactivation_message(
     chat_id: int,
     ref_link: str,
@@ -188,6 +209,16 @@ async def send_group_deactivation_message(
         add_to_group_url=get_add_to_group_url(),
     )
 
+    # Resolve chat display context for outcome logging (guarded — the chat may
+    # be inaccessible exactly when the deactivation post fails)
+    title = username = None
+    try:
+        chat = await bot.get_chat(chat_id)
+        title = getattr(chat, "title", None)
+        username = getattr(chat, "username", None)
+    except Exception:  # noqa: BLE001
+        title = username = None
+
     try:
 
         @retry_on_network_error
@@ -199,10 +230,16 @@ async def send_group_deactivation_message(
                 disable_web_page_preview=True,
             )
 
-        await send_deactivation_message()
+        sent = await send_deactivation_message()
+        logger.info(
+            f"Deactivation message sent to {format_chat_log(chat_id, title, username)} (message_id={sent.message_id})"
+        )
 
     except Exception as e:
-        logger.warning(f"Failed to send group promo message: {e}", exc_info=True)
+        logger.warning(
+            f"Failed to send group deactivation message to {format_chat_log(chat_id, title, username)}: {e}",
+            exc_info=True,
+        )
 
 
 
