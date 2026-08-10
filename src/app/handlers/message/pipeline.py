@@ -145,7 +145,12 @@ async def handle_moderated_message(
     chat_id = message.chat.id
     was_approved_before = await is_member_in_group(chat_id, user_id)
 
-    group, exit_reason = await validate_group_and_check_early_exits(chat_id, user_id)
+    group, exit_reason = await validate_group_and_check_early_exits(
+        chat_id,
+        user_id,
+        getattr(message.chat, "title", None),
+        getattr(message.chat, "username", None),
+    )
     if exit_reason or group is None:
         if exit_reason == "message_trusted_member_skipped":
             await _handle_trusted_member_exit(message, user_id)
