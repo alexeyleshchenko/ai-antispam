@@ -82,3 +82,11 @@ At start of dialog, read relevant memory-bank files:
 - Admin can set auto-delete mode or notification-only mode
 - Billing via Telegram Stars
 - Personal spam examples per admin for fine-tuning
+
+## Logging
+
+**Logging conventions are codified — read `docs/LOGGING.md` before writing or
+touching any log line.** Core rules: every side-effect logs its outcome (success
+or failure) with chat/admin context; correlation ids in plain-text log lines;
+`@logfire.instrument(extract_args=True, record_return=True)` on flow-boundary
+functions; absence of a log line is never evidence of absence of execution.
