@@ -1,6 +1,6 @@
 services:
   ai-antispam:
-    image: ${GHCR_IMAGE:-ghcr.io/leshchenko1979/ai-antispam}:${IMAGE_TAG:-main}
+    image: ${GHCR_IMAGE:-ghcr.io/alexeyleshchenko/ai-antispam}:${IMAGE_TAG:-main}
     container_name: ai-antispam
     # aiogram 3.30 alone needs ~234 MiB (it compiles the entire Bot API as
     # pydantic models); idle footprint is ~293 MiB. A 256mb limit caused an OOM
