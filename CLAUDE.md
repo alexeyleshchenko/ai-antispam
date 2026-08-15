@@ -69,7 +69,7 @@ At start of dialog, read relevant memory-bank files:
 
 ## Docker
 
-**Image:** `ghcr.io/leshchenko1979/ai-antispam` — **184MB** (reduced from ~800MB+)
+**Image:** `ghcr.io/leshchenko1979/ai-antispam` (live pull on apps until GHCR switchover) — **184MB**. Actions now build `ghcr.io/alexeyleshchenko/ai-antispam`.
 
 - Base: `python:3.14-alpine` (Alpine Linux, ~5MB base vs ~25MB Debian)
 - `pydantic-ai-slim[openai,logfire]` instead of full `pydantic-ai`
