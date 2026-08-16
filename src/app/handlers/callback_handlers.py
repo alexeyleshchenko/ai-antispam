@@ -435,7 +435,7 @@ async def handle_scan_chat_callback(callback: CallbackQuery) -> str:
 
     try:
         result = await scan_chat_topics(group_id)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning(
             f"scan_chat_topics raised for group {group_id}: {e}", exc_info=True
         )

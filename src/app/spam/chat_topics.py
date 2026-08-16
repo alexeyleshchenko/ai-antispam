@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 import logfire
 
+from ..agents import derive_topic_summary, topic_summary_from_title
 from ..common.mtproto_client import (
     MtprotoHttpClient,
     MtprotoHttpError,
@@ -27,7 +28,6 @@ from ..common.mtproto_client import (
 from ..common.mtproto_utils import bot_api_chat_id_to_mtproto
 from ..common.utils import format_chat_log, load_config
 from ..database.postgres_connection import get_pool
-from ..agents import derive_topic_summary, topic_summary_from_title
 from .mtproto_history import (
     extract_message_text,
     fetch_recent_messages,
