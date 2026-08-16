@@ -1,4 +1,5 @@
 import logging
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -282,10 +283,19 @@ async def test_get_admin_groups_unexpected_telegram_error_logs_error(
 
 @pytest.mark.asyncio
 async def test_get_admin_groups_returns_accessible_chats(patched_db_conn, clean_db):
-    """Accessible groups are returned with live Telegram title."""
+    """Accessible groups are returned with live Telegram title and topic fields."""
     admin_id = 9003
     group_id = -1009003
     await _seed_admin_group(clean_db, admin_id, group_id)
+    # Seed the chat-topic columns — the SELECT must carry them through.
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            "UPDATE groups SET topic_description_short = $1, "
+            "topic_updated_at = $2 WHERE group_id = $3",
+            "PHP jobs",
+            datetime.now(UTC),
+            group_id,
+        )
 
     chat = MagicMock(title="Live Group")
     with patch("app.database.group_operations.bot") as mock_bot:
@@ -295,6 +305,8 @@ async def test_get_admin_groups_returns_accessible_chats(patched_db_conn, clean_
     assert len(groups) == 1
     assert groups[0]["id"] == group_id
     assert groups[0]["title"] == "Live Group"
+    assert groups[0]["topic_description_short"] == "PHP jobs"
+    assert groups[0]["topic_updated_at"] is not None
 
 
 @pytest.mark.asyncio
