@@ -40,20 +40,25 @@ class SpamClassification(BaseModel):
 class TopicSummary(BaseModel):
     """Structured output for chat-topic derivation.
 
-    `description` is a 2-4 sentence profile of what the chat is normally
-    about; `short_description` is the stats-safe one-liner (<= 120 chars).
+    `description` is a 2-4 sentence profile distinguishing what is normal in
+    this chat from what would be suspicious or off-topic — the boundary the
+    classifier uses to spot deviation; `short_description` is a compact
+    3-5 word label for the /stats table (<= 120 chars).
     """
 
     description: str = Field(
         description=(
-            "2-4 sentence profile of what this chat/channel is normally about: "
-            "the recurring subjects, tone, and typical discussions."
+            "2-4 sentence profile distinguishing what is NORMAL in this chat "
+            "from what would be suspicious or off-topic: recurring subjects, "
+            "tone/language, typical participants, and explicit normal-vs-spam "
+            "cues the classifier can use to spot deviation."
         )
     )
     short_description: str = Field(
         description=(
-            "A single line (max 120 characters) summarising the chat topic, "
-            "safe to display in a stats table."
+            "A compact 3-5 word label of the chat's main topic "
+            "(e.g. 'real-estate investor forum'), safe to display in a "
+            "stats table."
         ),
         max_length=120,
     )
@@ -282,10 +287,17 @@ def get_chat_agent() -> Agent[str]:
 # ---------------------------------------------------------------------------
 
 TOPIC_SUMMARY_INSTRUCTIONS = (
-    "Summarize what this chat or channel is normally about. "
-    "Describe the recurring subjects, tone, and typical discussions. "
-    "Return JSON with 'description' (2-4 sentences) and "
-    "'short_description' (one line, max 120 characters)."
+    "Analyze the recent messages from this chat and produce a topic profile "
+    "for a spam classifier. The profile describes what is NORMAL here, so the "
+    "classifier can spot DEVIATION. Return JSON with 'description' and "
+    "'short_description'. "
+    "'description': 2-4 sentences describing what is normally discussed: the "
+    "recurring subjects, tone and language, and typical participants. Then "
+    "state explicitly what would be UNUSUAL or SUSPICIOUS in this chat — "
+    "off-topic subjects, unexpected tone or language, or patterns that stand "
+    "out as spam. Mark the boundary between normal and suspicious. "
+    "'short_description': a compact 3-5 word label of the chat's main topic "
+    "(e.g. 'real-estate investor forum'), safe to display in a stats table."
 )
 
 

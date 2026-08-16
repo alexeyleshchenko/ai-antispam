@@ -147,3 +147,15 @@ class TestDeriveTopicSummary:
     def test_instructions_mention_both_fields(self):
         assert "description" in TOPIC_SUMMARY_INSTRUCTIONS
         assert "short_description" in TOPIC_SUMMARY_INSTRUCTIONS
+
+    def test_instructions_require_label_style_short(self):
+        """Short must be a compact 3-5 word label, not a compressed sentence."""
+        assert "3-5 word label" in TOPIC_SUMMARY_INSTRUCTIONS
+
+    def test_instructions_require_normal_vs_spam_boundary(self):
+        """The description must carry the normal-vs-suspicious boundary — the
+        actual spam-classifier signal, not just 'what is discussed'."""
+        assert "NORMAL" in TOPIC_SUMMARY_INSTRUCTIONS
+        assert "UNUSUAL or SUSPICIOUS" in TOPIC_SUMMARY_INSTRUCTIONS
+        assert "boundary" in TOPIC_SUMMARY_INSTRUCTIONS
+        assert "spam" in TOPIC_SUMMARY_INSTRUCTIONS
