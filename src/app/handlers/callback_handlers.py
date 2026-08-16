@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import html
 import logging
 
 from aiogram import F, types
@@ -14,13 +15,19 @@ from ..common.utils import (
     load_config,
     retry_on_network_error,
 )
-from ..database import get_admin, get_group, update_admin_language
+from ..database import (
+    get_admin,
+    get_admin_groups,
+    get_group,
+    update_admin_language,
+)
 from ..database.group_operations import add_member, set_moderation_events
 from ..database.spam_examples import (
     confirm_pending_example_as_not_spam,
     confirm_pending_example_as_spam,
 )
 from ..i18n import HELP_PAGE_CALLBACK_KEYS, resolve_lang, t
+from .command_handlers import _format_topic_age
 from .dp import dp
 from .handle_spam import ban_user_for_spam
 
@@ -361,9 +368,7 @@ async def handle_spam_confirm_callback(callback: CallbackQuery) -> str:
                     f"{existing_text}\n\n✅ <b>{t(lang, 'callback.spam_deleted')}</b>"
                 )
             else:
-                updated_text = (
-                    f"{existing_text}\n\n⚠️ <b>{t(lang, 'callback.delete_no_permission')}</b>"
-                )
+                updated_text = f"{existing_text}\n\n⚠️ <b>{t(lang, 'callback.delete_no_permission')}</b>"
             try:
                 await bot.edit_message_text(
                     chat_id=msg.chat.id,
@@ -389,3 +394,93 @@ async def handle_spam_confirm_callback(callback: CallbackQuery) -> str:
         with contextlib.suppress(Exception):
             await callback.answer(t(lang, "callback.error_generic"), show_alert=True)
         return "callback_error_deleting_spam"
+
+
+@dp.callback_query(F.data.startswith("scan_chat:"))
+async def handle_scan_chat_callback(callback: CallbackQuery) -> str:
+    """Handle chat-topic scan selection. Callback data: scan_chat:<group_id>."""
+    if not callback.data or not callback.message or not callback.from_user:
+        return "callback_invalid_data"
+
+    parts = callback.data.split(":")
+    if len(parts) != 2 or not parts[1].lstrip("-").isdigit():
+        return "callback_invalid_scan"
+
+    group_id = int(parts[1])
+    admin_id = callback.from_user.id
+    admin = await get_admin(admin_id)
+    lang = resolve_lang(None, admin)
+
+    # Re-validate the caller is still an admin of this group.
+    admin_groups = await get_admin_groups(admin_id)
+    group = next((g for g in admin_groups if int(g["id"]) == group_id), None)
+    if group is None:
+        await _answer_safe(callback, t(lang, "scan.not_admin"), show_alert=True)
+        return "callback_scan_not_admin"
+
+    await _answer_safe(callback, t(lang, "scan.ack"))
+    title = html.escape(group.get("title") or "", quote=True)
+
+    try:
+        if isinstance(callback.message, types.Message):
+            await callback.message.edit_text(
+                t(lang, "scan.starting", title=title),
+                parse_mode="HTML",
+                reply_markup=None,
+            )
+    except TelegramBadRequest:
+        pass  # message already edited / not editable — proceeding regardless
+
+    from ..spam.chat_topics import scan_chat_topics
+
+    try:
+        result = await scan_chat_topics(group_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            f"scan_chat_topics raised for group {group_id}: {e}", exc_info=True
+        )
+        await _reply_scan_result(callback, lang, "scan.error", title=title)
+        return "callback_scan_error"
+
+    if result.status == "ok":
+        age = _format_topic_age(group.get("topic_updated_at"))
+        age_note = f" ({age})" if age else ""
+        await _reply_scan_result(
+            callback,
+            lang,
+            "scan.success",
+            title=title,
+            short=html.escape(result.detail, quote=True),
+            age=age_note,
+        )
+    elif result.status in ("title_fallback", "empty_first_scan"):
+        await _reply_scan_result(
+            callback,
+            lang,
+            "scan.title_fallback",
+            title=title,
+            short=html.escape(result.detail, quote=True),
+        )
+    elif result.status in ("kept_existing", "empty_kept_existing"):
+        await _reply_scan_result(callback, lang, "scan.kept_existing", title=title)
+    else:
+        await _reply_scan_result(
+            callback, lang, "scan.failed", title=title, reason=result.detail
+        )
+    return "callback_scan_done"
+
+
+async def _reply_scan_result(
+    callback: CallbackQuery, lang: str, key: str, **kwargs
+) -> None:
+    """Edit the picker message with the scan outcome."""
+    text = t(lang, key, **kwargs)
+    if isinstance(callback.message, types.Message):
+        try:
+            await callback.message.edit_text(text, parse_mode="HTML")
+        except TelegramBadRequest as e:
+            if not is_message_not_found_error(e):
+                logger.warning(
+                    "Failed to edit scan result message: %s",
+                    e,
+                )

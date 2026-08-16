@@ -20,6 +20,7 @@ bot_commands:
   mode: "Cycle mode: notify / delete / silent"
   ref: "How to get referral link"
   lang: "Change language"
+  scan: "Scan chat topic for smarter spam filter"
 
 start:
   welcome: |
@@ -144,6 +145,7 @@ help:
     /mode - cycle mode: notify → auto-delete → silent delete
     /ref - get referral link
     /lang - change language
+    /scan - scan chat topic for smarter spam filter
 
     <b>💬 Free-form chat:</b>
     Just write to me in private, e.g.:
@@ -347,6 +349,18 @@ lang:
   changed_ru: "✅ Язык изменён на Русский."
   changed_en: "✅ Language set to English."
   select: "Select language / Выберите язык:"
+
+scan:
+  no_groups: "You don't have any monitored groups yet."
+  select_chat: "Choose a chat to scan its topic:"
+  starting: "Scanning topic of <b>{title}</b>…"
+  ack: "Scanning…"
+  success: "✅ Topic updated for <b>{title}</b>: {short}{age}"
+  title_fallback: "⚠️ Couldn't derive a topic for <b>{title}</b> — used the chat title: {short}"
+  kept_existing: "ℹ️ Topic for <b>{title}</b> kept as-is (derivation failed)."
+  failed: "❌ Topic scan failed for <b>{title}</b>: {reason}"
+  error: "❌ Topic scan crashed — nothing changed, try again."
+  not_admin: "You're not an admin of this group anymore."
 
 offer:
   protect_channel: "Protect channel"

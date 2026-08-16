@@ -19,6 +19,7 @@ from ..database import (
     cycle_moderation_mode,
     get_admin,
     get_admin_credits,
+    get_admin_groups,
     get_admin_stats,
     get_moderation_mode,
     get_spent_credits_last_week,
@@ -302,6 +303,132 @@ async def handle_help_command(message: types.Message) -> str:
     return "command_help_sent"
 
 
+def _format_topic_age(topic_updated_at) -> str | None:
+    """Humanize topic age for the /scan result line. Returns None if unknown."""
+    if not topic_updated_at:
+        return None
+    from datetime import datetime, timezone
+
+    if isinstance(topic_updated_at, str):
+        try:
+            topic_updated_at = datetime.fromisoformat(topic_updated_at)
+        except ValueError:
+            return None
+    if topic_updated_at.tzinfo is None:
+        topic_updated_at = topic_updated_at.replace(tzinfo=timezone.utc)
+    days = (datetime.now(timezone.utc) - topic_updated_at).days
+    if days <= 0:
+        return "today"
+    if days == 1:
+        return "1d"
+    return f"{days}d"
+
+
+@dp.message(Command("scan"), F.chat.type == "private")
+async def handle_scan_command(message: types.Message) -> str:
+    """
+    Обработчик команды /scan
+    Запускает сканирование тематики чата и её анализ для улучшения фильтрации спама.
+    """
+    if not message.from_user:
+        return "command_no_user_info"
+
+    user = cast("types.User", message.from_user)
+    user_id = user.id
+    admin = await get_admin(user_id)
+    lang = resolve_lang(message, admin)
+
+    groups = await get_admin_groups(user_id)
+    if not groups:
+        await message.answer(t(lang, "scan.no_groups"), parse_mode="HTML")
+        return "command_scan_no_groups"
+
+    if len(groups) == 1:
+        group = groups[0]
+        await message.answer(
+            t(
+                lang,
+                "scan.starting",
+                title=html.escape(group["title"] or "", quote=True),
+            ),
+            parse_mode="HTML",
+        )
+        await _run_scan_and_report(message, group, lang)
+        return "command_scan_sent"
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=html.escape(
+                        group["title"] or f"Group {group['id']}", quote=True
+                    ),
+                    callback_data=f"scan_chat:{group['id']}",
+                )
+            ]
+            for group in groups
+        ]
+    )
+    await message.answer(
+        t(lang, "scan.select_chat"),
+        reply_markup=keyboard,
+    )
+    return "command_scan_sent"
+
+
+async def _run_scan_and_report(message: types.Message, group: dict, lang: str) -> None:
+    """Run scan_chat_topics for one group and reply with the outcome."""
+    from ..spam.chat_topics import scan_chat_topics
+
+    try:
+        result = await scan_chat_topics(int(group["id"]))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            f"scan_chat_topics raised for group {group['id']}: {e}", exc_info=True
+        )
+        await message.answer(t(lang, "scan.error"), parse_mode="HTML")
+        return
+
+    title = html.escape(group["title"] or "", quote=True)
+    if result.status == "ok":
+        age = _format_topic_age(group.get("topic_updated_at"))
+        age_note = f" ({age})" if age else ""
+        await message.answer(
+            t(
+                lang,
+                "scan.success",
+                title=title,
+                short=html.escape(result.detail, quote=True),
+                age=age_note,
+            ),
+            parse_mode="HTML",
+        )
+    elif result.status in ("title_fallback", "empty_first_scan"):
+        await message.answer(
+            t(
+                lang,
+                "scan.title_fallback",
+                title=title,
+                short=html.escape(result.detail, quote=True),
+            ),
+            parse_mode="HTML",
+        )
+    elif result.status in ("kept_existing", "empty_kept_existing"):
+        await message.answer(
+            t(
+                lang,
+                "scan.kept_existing",
+                title=title,
+            ),
+            parse_mode="HTML",
+        )
+    else:
+        await message.answer(
+            t(lang, "scan.failed", title=title, reason=result.detail),
+            parse_mode="HTML",
+        )
+
+
 @dp.message(Command("stats"), F.chat.type == "private")
 async def handle_stats_command(message: types.Message) -> str:
     """
@@ -357,6 +484,15 @@ async def handle_stats_command(message: types.Message) -> str:
                     f"🗑 {g_stats['spam']} | "
                     f"👤 {group['approved_users_count']}"
                 )
+
+                # Chat-topic line: short description + age when a scan exists.
+                topic_short = group.get("topic_description_short")
+                if topic_short:
+                    age = _format_topic_age(group.get("topic_updated_at"))
+                    topic_line = f" │ {html.escape(topic_short, quote=True)}"
+                    if age:
+                        topic_line += f" · {age} old"
+                    stats_line += topic_line
 
                 message_text += f"{status_emoji} <b>{safe_title}</b>\n{stats_line}\n"
         else:

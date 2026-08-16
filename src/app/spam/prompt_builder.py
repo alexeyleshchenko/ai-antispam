@@ -215,6 +215,25 @@ Some signs of irrelevant replies:
 """)
         return self
 
+    def add_chat_topics_guidance(self) -> SpamPromptBuilder:
+        """Add guidance for interpreting the chat's known topic profile."""
+        self.prompt_parts.append("""
+## CHAT TOPIC CONTEXT
+The "chat_topic" section describes what this chat is normally about.
+
+HIGH SPAM INDICATOR: Messages that are off-topic for this chat — promos, scams,
+irrelevant offers that do not fit the chat's normal subject matter.
+
+IMPORTANT LIMITATIONS:
+1. On-topic messages are NOT evidence of legitimacy on their own — a relevant
+   comment from a spam-looking profile remains high-risk (Trojan Horse).
+2. Never classify a message as spam SOLELY because it is off-topic; use it only
+   to weight existing signals.
+3. Topic descriptions can be stale (they are refreshed manually). Treat them as
+   a heuristic, not ground truth — a chat's subject may have shifted.
+""")
+        return self
+
     def add_knowledge_sharing_guidance(self) -> SpamPromptBuilder:
         """Add guidance for detecting bait based on sharing materials or knowledge."""
         self.prompt_parts.append("""
@@ -336,6 +355,8 @@ async def build_system_prompt(
         builder.add_account_signals_guidance()
     if context.include_reply_guidance:
         builder.add_reply_context_guidance()
+    if context.include_chat_topics_guidance:
+        builder.add_chat_topics_guidance()
     if context.include_ai_detection_guidance:
         builder.add_ai_generated_content_guidance()
         # Knowledge sharing is often linked with AI content or generic bait
@@ -418,6 +439,7 @@ def format_spam_request(
         "stories": stories_str,
         "reply_context": reply_context_str,
         "account_signals": account_signals_str,
+        "chat_topic": context.chat_topics or None,
     }
 
     return json.dumps(request_dict, ensure_ascii=False, separators=(",", ":"))
