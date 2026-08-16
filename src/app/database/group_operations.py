@@ -27,6 +27,10 @@ async def get_group(group_id: int) -> Group | None:
         if not group_data:
             return None
 
+        # Normalize to a plain dict: asyncpg.Record and aiosqlite.Row both
+        # support dict(), giving a uniform interface for the .get() calls below.
+        group_data = dict(group_data)
+
         admin_ids = [
             row["admin_id"]
             for row in await conn.fetch(
@@ -54,6 +58,9 @@ async def get_group(group_id: int) -> Group | None:
             member_ids=member_ids,
             title=group_data.get("title"),
             username=group_data.get("username"),
+            topic_description=group_data.get("topic_description"),
+            topic_description_short=group_data.get("topic_description_short"),
+            topic_updated_at=group_data.get("topic_updated_at"),
             created_at=group_data["created_at"],
             last_updated=group_data["last_active"],
         )
@@ -188,7 +195,9 @@ async def cleanup_group_data(group_id: int) -> None:
             group_id,
         )
 
-    logger.info(f"Successfully cleaned up database records for group {format_chat_log(group_id)}")
+    logger.info(
+        f"Successfully cleaned up database records for group {format_chat_log(group_id)}"
+    )
 
 
 async def set_no_rights_detected_at(group_id: int) -> None:
@@ -254,7 +263,8 @@ async def get_admin_groups(admin_id: int) -> list[dict]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT g.group_id, g.title, g.moderation_enabled
+            SELECT g.group_id, g.title, g.moderation_enabled,
+                   g.topic_description_short, g.topic_updated_at
             FROM groups g
             JOIN group_administrators ga ON g.group_id = ga.group_id
             WHERE ga.admin_id = $1
@@ -273,6 +283,8 @@ async def get_admin_groups(admin_id: int) -> list[dict]:
                         "id": row["group_id"],
                         "title": chat.title,
                         "is_moderation_enabled": row["moderation_enabled"],
+                        "topic_description_short": row["topic_description_short"],
+                        "topic_updated_at": row["topic_updated_at"],
                     }
                 )
             except Exception as e:
@@ -297,7 +309,9 @@ async def get_admin_groups(admin_id: int) -> list[dict]:
             try:
                 await cleanup_group_data(group_id)
             except Exception as e:  # noqa: BLE001
-                logger.error(f"Failed to cleanup inaccessible group {format_chat_log(group_id)}: {e}")
+                logger.error(
+                    f"Failed to cleanup inaccessible group {format_chat_log(group_id)}: {e}"
+                )
 
         return groups
 
@@ -393,9 +407,7 @@ async def add_member(group_id: int, member_id: int) -> bool:
         return row is not None
 
 
-async def remove_member_from_group(
-    member_id: int, group_id: int | None = None
-) -> None:
+async def remove_member_from_group(member_id: int, group_id: int | None = None) -> None:
     """Remove a member from a group or all groups"""
     pool = await get_pool()
     async with pool.acquire() as conn, conn.transaction():
@@ -473,16 +485,12 @@ async def update_group_admins(
         # Handle both old format (just IDs) and new format (IDs with usernames)
         usernames = cast(
             "list[str | None]",
-            admin_usernames
-            if admin_usernames is not None
-            else [None] * len(admin_ids),
+            admin_usernames if admin_usernames is not None else [None] * len(admin_ids),
         )
 
         # Ensure we have usernames for all admins
         if len(usernames) != len(admin_ids):
-            raise ValueError(
-                "admin_ids and admin_usernames must have the same length"
-            )
+            raise ValueError("admin_ids and admin_usernames must have the same length")
 
         # Add/update admins
         for admin_id, username in zip(admin_ids, usernames):

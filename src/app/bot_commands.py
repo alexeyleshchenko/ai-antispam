@@ -8,7 +8,7 @@ from .i18n import load_locales, t
 
 logger = logging.getLogger(__name__)
 
-_COMMAND_IDS = ["start", "help", "buy", "stats", "mode", "ref", "lang"]
+_COMMAND_IDS = ["start", "help", "buy", "stats", "mode", "ref", "lang", "scan"]
 
 
 def _build_commands(lang: str) -> list[BotCommand]:

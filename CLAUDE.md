@@ -83,6 +83,28 @@ At start of dialog, read relevant memory-bank files:
 - Billing via Telegram Stars
 - Personal spam examples per admin for fine-tuning
 
+## Chat-topic signal (`/scan`)
+
+Every monitored chat can carry a **topic profile** (`groups.topic_description` /
+`topic_description_short` / `topic_updated_at`) derived from recent messages.
+It feeds the classifier as an extra signal (`chat_topic` request key +
+`## CHAT TOPIC CONTEXT` prompt section).
+
+- **Phase 1 is manual-only:** the admin runs `/scan` in the bot DM; picker flow
+  `scan_chat:<id>` in `callback_handlers.py`. **No automatic scan/backfill/refresh
+  yet** — that is Phase 2 (deferred in `docs/design-chat-topics.md`).
+- Scan service: `src/app/spam/chat_topics.py` (`scan_chat_topics(group_id)`).
+- Derivation agent: `agents.py` `derive_topic_summary()` (gateway → OpenRouter,
+  never raises — `None` on total failure; caller applies title fallback).
+- Fallback semantics: first-scan failure/empty sample → chat title; re-scan
+  failure → keep existing description; empty re-scan → keep.
+- Off-topic is an **elevated** signal, never a sole reason (Trojan Horse guard).
+- Sample caps (config `spam:`): `topic_scan_limit` (fetch, 100),
+  `topic_max_message_chars` (500/msg), `topic_max_total_chars` (16K total ≈ 4K
+  tokens — the derivation call provably fits any rotation model).
+- A `chat_topic` older than the refresh horizon is a stale heuristic — surfaced
+  on `/stats` as `<short> · Nd old`.
+
 ## Logging
 
 **Logging conventions are codified — read `docs/LOGGING.md` before writing or

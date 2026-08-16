@@ -166,6 +166,12 @@ async def handle_moderated_message(
 
     message_context_result = await collect_message_context(message)
 
+    # Chat-topic signal: what this chat is normally about (derived via /scan).
+    # None (no scan yet / scan failed) -> classifier behaves exactly as before.
+    ctx = message_context_result.context
+    if ctx is not None:
+        ctx.chat_topics = group.topic_description
+
     try:
         if message_context_result.is_story:
             is_spam, confidence, reason = True, 100, "Story forward"

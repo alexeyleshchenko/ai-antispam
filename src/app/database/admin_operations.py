@@ -588,6 +588,8 @@ async def get_admin_stats(admin_id: int) -> dict[str, Any]:
                 "is_moderation_enabled": group["is_moderation_enabled"],
                 "approved_users_count": approved_map.get(gid, 0),
                 "stats": w_stats,
+                "topic_description_short": group.get("topic_description_short"),
+                "topic_updated_at": group.get("topic_updated_at"),
             }
         )
 

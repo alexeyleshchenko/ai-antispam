@@ -5,15 +5,20 @@ import os
 from typing import Any
 
 import httpx
+import logfire
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent
+from pydantic_ai import Agent, ModelSettings
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.retries import AsyncTenacityTransport, RetryConfig, wait_retry_after
 from tenacity import stop_after_attempt
 
-from .common.utils import get_llm_http_client_timeout, get_openrouter_models
+from .common.utils import (
+    get_llm_http_client_timeout,
+    get_llm_route_timeout,
+    get_openrouter_models,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +34,28 @@ class SpamClassification(BaseModel):
     confidence: int
     reason: str = Field(
         description="Reason for classification. IMPORTANT: Write in the same language as the admin's preference (Russian/English). Do NOT write in Chinese."
+    )
+
+
+class TopicSummary(BaseModel):
+    """Structured output for chat-topic derivation.
+
+    `description` is a 2-4 sentence profile of what the chat is normally
+    about; `short_description` is the stats-safe one-liner (<= 120 chars).
+    """
+
+    description: str = Field(
+        description=(
+            "2-4 sentence profile of what this chat/channel is normally about: "
+            "the recurring subjects, tone, and typical discussions."
+        )
+    )
+    short_description: str = Field(
+        description=(
+            "A single line (max 120 characters) summarising the chat topic, "
+            "safe to display in a stats table."
+        ),
+        max_length=120,
     )
 
 
@@ -134,6 +161,21 @@ def get_gateway_spam_agent() -> Any:
     return _gateway_spam_agent
 
 
+# Gateway topic-summary agent (structured output)
+_gateway_topic_agent: Any = None
+
+
+def get_gateway_topic_agent() -> Any:
+    global _gateway_topic_agent
+    if _gateway_topic_agent is None:
+        _gateway_topic_agent = Agent(
+            get_gateway_model(),
+            output_type=TopicSummary,
+            name="gateway-topic",
+        )
+    return _gateway_topic_agent
+
+
 # OpenRouter agent pool
 _openrouter_agents: Any = None
 _openrouter_agent_idx: int = 0
@@ -165,6 +207,39 @@ def get_openrouter_spam_agent() -> Agent[None, SpamClassification]:
     """Get current OpenRouter spam agent (round-robin)."""
     agents = _get_openrouter_agents()
     return agents[_openrouter_agent_idx]
+
+
+# OpenRouter topic agent pool
+_openrouter_topic_agents: Any = None
+_openrouter_topic_agent_idx: int = 0
+
+
+def _get_openrouter_topic_agents() -> Any:
+    global _openrouter_topic_agents
+    if _openrouter_topic_agents is None:
+        _openrouter_topic_agents = [
+            Agent(
+                _create_openrouter_model(model_name),
+                output_type=TopicSummary,
+                name=_openrouter_agent_name("openrouter-topic", model_name),
+            )
+            for model_name in get_openrouter_models()
+        ]
+    return _openrouter_topic_agents
+
+
+def _next_openrouter_topic_agent() -> Agent[None, TopicSummary]:
+    """Rotate to next OpenRouter topic agent."""
+    global _openrouter_topic_agent_idx
+    agents = _get_openrouter_topic_agents()
+    _openrouter_topic_agent_idx = (_openrouter_topic_agent_idx + 1) % len(agents)
+    return agents[_openrouter_topic_agent_idx]
+
+
+def get_openrouter_topic_agent() -> Agent[None, TopicSummary]:
+    """Get current OpenRouter topic agent (round-robin)."""
+    agents = _get_openrouter_topic_agents()
+    return agents[_openrouter_topic_agent_idx]
 
 
 # OpenRouter chat agent pool (plain text output)
@@ -214,3 +289,93 @@ def get_chat_agent() -> Agent[str]:
             name="gateway-chat",
         )
     return _chat_agent
+
+
+# ---------------------------------------------------------------------------
+# Chat-topic derivation (TopicSummary)
+# Same routing as the spam classifier: gateway first, then OpenRouter rotation.
+# Never raises — returns None when every model failed, so the scan service can
+# apply its own fallback (title on first scan, keep existing on re-scan).
+# ---------------------------------------------------------------------------
+
+TOPIC_SUMMARY_INSTRUCTIONS = (
+    "Summarize what this chat or channel is normally about. "
+    "Describe the recurring subjects, tone, and typical discussions. "
+    "Return JSON with 'description' (2-4 sentences) and "
+    "'short_description' (one line, max 120 characters)."
+)
+
+
+async def derive_topic_summary(
+    sample_text: str,
+    *,
+    timeout: float | None = None,
+) -> TopicSummary | None:
+    """Derive a chat-topic summary from sampled message text.
+
+    Tries the gateway model first, then rotates through the OpenRouter pool.
+    Returns None if every model fails (no exception escapes). The caller
+    decides the fallback (chat title on first scan, keep existing on re-scan).
+    """
+    if timeout is None:
+        timeout = get_llm_route_timeout()
+    model_settings = ModelSettings(timeout=timeout)
+
+    # Try gateway first
+    try:
+        with logfire.span("topic_derivation_gateway_call"):
+            agent = get_gateway_topic_agent()
+            result = await agent.run(
+                sample_text,
+                instructions=TOPIC_SUMMARY_INSTRUCTIONS,
+                model_settings=model_settings,
+            )
+        return result.output
+    except Exception as e:  # noqa: BLE001
+        logfire.exception("topic_derivation_gateway_failure")
+        logger.warning(f"Gateway topic derivation failed: {e}, trying OpenRouter")
+
+    # OpenRouter pool with rotation
+    try:
+        agents = _get_openrouter_topic_agents()
+    except Exception as e:  # noqa: BLE001
+        logfire.exception("topic_derivation_openrouter_pool_failure")
+        logger.error(f"Failed to build OpenRouter topic agent pool: {e}")
+        return None
+    num_models = len(agents)
+
+    for attempt in range(num_models):
+        agent = get_openrouter_topic_agent()
+        try:
+            with logfire.span(f"topic_derivation_openrouter_call_{attempt + 1}"):
+                result = await agent.run(
+                    sample_text,
+                    instructions=TOPIC_SUMMARY_INSTRUCTIONS,
+                    model_settings=model_settings,
+                )
+            return result.output
+        except Exception as e:  # noqa: BLE001
+            logfire.exception("topic_derivation_openrouter_failure")
+            logger.warning(
+                f"OpenRouter topic agent {attempt + 1}/{num_models} failed: {e}"
+            )
+            _next_openrouter_topic_agent()
+            continue
+
+    logger.error("All topic derivation agents failed")
+    return None
+
+
+def topic_summary_from_title(title: str) -> TopicSummary:
+    """Build a TopicSummary from a chat title (fallback, state never empty).
+
+    Used when a first scan cannot derive a topic — the title is the best
+    available description. Short form is truncated to 120 chars.
+    """
+    short = title.strip()[:120] if title.strip() else "Untitled chat"
+    return TopicSummary(
+        description=f"The chat is titled '{title.strip() or 'untitled'}'. "
+        "Detailed topic profile could not be derived — this is the fallback "
+        "description based on the chat title alone.",
+        short_description=short,
+    )

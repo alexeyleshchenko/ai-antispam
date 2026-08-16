@@ -50,5 +50,8 @@ class Group(BaseModel):
     member_ids: list[int] = []
     title: str | None = None
     username: str | None = None
+    topic_description: str | None = None
+    topic_description_short: str | None = None
+    topic_updated_at: datetime | None = None
     created_at: datetime = Field(default_factory=datetime.now)
     last_updated: datetime = Field(default_factory=datetime.now)

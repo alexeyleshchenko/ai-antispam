@@ -197,6 +197,16 @@ async def create_schema(conn: asyncpg.Connection):
         await conn.execute(
             "ALTER TABLE groups ADD COLUMN IF NOT EXISTS linked_channel_id BIGINT"
         )
+        # Chat-topic signal for spam classifier (design: chat-topics.md)
+        await conn.execute(
+            "ALTER TABLE groups ADD COLUMN IF NOT EXISTS topic_description TEXT"
+        )
+        await conn.execute(
+            "ALTER TABLE groups ADD COLUMN IF NOT EXISTS topic_description_short VARCHAR(255)"
+        )
+        await conn.execute(
+            "ALTER TABLE groups ADD COLUMN IF NOT EXISTS topic_updated_at TIMESTAMPTZ"
+        )
     except Exception as e:
         raise RuntimeError(f"Failed to run migrations: {e}") from e
 

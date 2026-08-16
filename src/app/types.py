@@ -262,6 +262,13 @@ class SpamClassificationContext:
     is_channel_sender: bool = False
     # DB replay: raw ACCOUNT SIGNALS body from spam_examples / cache (photo + optional is_premium lines)
     account_signals_snapshot: str | None = None
+    # Chat-topic profile (derived by /scan): what this chat is normally about.
+    chat_topics: str | None = None
+
+    @property
+    def include_chat_topics_guidance(self) -> bool:
+        """Whether to include chat-topic guidance in the prompt."""
+        return bool(self.chat_topics)
 
     @property
     def include_linked_channel_guidance(self) -> bool:
@@ -342,11 +349,13 @@ class StorySummary:
         parts = []
         if self.caption:
             parts.append(f"Caption: {self.caption}")
-        if self.entities and (entity_links := [
-            f"Link: {entity['url']}"
-            for entity in self.entities
-            if entity.get("_") == "messageEntityTextUrl" and entity.get("url")
-        ]):
+        if self.entities and (
+            entity_links := [
+                f"Link: {entity['url']}"
+                for entity in self.entities
+                if entity.get("_") == "messageEntityTextUrl" and entity.get("url")
+            ]
+        ):
             parts.append(f"Links: {', '.join(entity_links)}")
         if self.media:
             media_links = []

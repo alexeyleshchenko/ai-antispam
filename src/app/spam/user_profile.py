@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
 from typing import Any
 
 import logfire
@@ -22,6 +21,12 @@ from ..types import (
     UserAccountInfo,
 )
 from .linked_channel_mention import extract_first_channel_mention
+from .mtproto_history import (
+    extract_date,
+    extract_message_date,
+    fetch_channel_edge_message,
+    fetch_recent_posts_content,
+)
 
 logger = logging.getLogger(__name__)
 JsonDict = dict[str, Any]
@@ -101,7 +106,9 @@ def _parse_user_context_input(
 def _pick_first_linked_channel_mention(
     full_user: JsonDict, message: Any
 ) -> tuple[str | None, str | None]:
-    if (about := full_user.get("about")) and (username_from_bio := extract_first_channel_mention(about)):
+    if (about := full_user.get("about")) and (
+        username_from_bio := extract_first_channel_mention(about)
+    ):
         return username_from_bio, "bio"
 
     if message is not None:
@@ -142,7 +149,7 @@ async def _fetch_full_user_and_account_context(
             profile_photo = full_user.get("profile_photo")
             photo_date = None
             if profile_photo and isinstance(profile_photo, dict):
-                photo_date = _extract_date(profile_photo.get("date"))
+                photo_date = extract_date(profile_photo.get("date"))
             account_info_result = ContextResult(
                 status=ContextStatus.FOUND,
                 content=UserAccountInfo(
@@ -381,18 +388,18 @@ async def collect_channel_summary_by_id(
         newest_message,
         oldest_message_in_recent_batch,
         total_posts,
-    ) = await _fetch_recent_posts_content(client, peer_to_use, limit=recent_posts_limit)
+    ) = await fetch_recent_posts_content(client, peer_to_use, limit=recent_posts_limit)
 
-    newest_post_date = _extract_message_date(newest_message)
+    newest_post_date = extract_message_date(newest_message)
     oldest_post_date = None
     if total_posts and total_posts > 1:
         if total_posts <= recent_posts_limit:
-            oldest_post_date = _extract_message_date(oldest_message_in_recent_batch)
+            oldest_post_date = extract_message_date(oldest_message_in_recent_batch)
         else:
-            oldest_message, _ = await _fetch_channel_edge_message(
+            oldest_message, _ = await fetch_channel_edge_message(
                 client, peer_to_use, limit_offset=total_posts - 1
             )
-            oldest_post_date = _extract_message_date(oldest_message)
+            oldest_post_date = extract_message_date(oldest_message)
 
     oldest_post_date = oldest_post_date or newest_post_date
     post_age_delta = None
@@ -427,132 +434,3 @@ async def collect_channel_summary_by_id(
     )
 
     return ContextResult(status=ContextStatus.FOUND, content=summary)
-
-
-async def _fetch_channel_edge_message(
-    client: MtprotoHttpClient,
-    peer_reference: int | str,
-    *,
-    limit_offset: int | None,
-) -> tuple[JsonDict | None, int | None]:
-    params = _build_history_params(
-        peer_reference=peer_reference,
-        add_offset=max(limit_offset or 0, 0),
-        limit=1,
-    )
-
-    try:
-        history = await client.call("messages.getHistory", params=params, resolve=True)
-    except MtprotoHttpError as exc:
-        logger.info(
-            "Failed to fetch channel history",
-            extra={"peer_reference": peer_reference, "error": str(exc)},
-        )
-        return None, None
-
-    return _extract_first_message_and_total(history)
-
-
-async def _fetch_recent_posts_content(
-    client: MtprotoHttpClient,
-    peer_reference: int | str,
-    limit: int = 5,
-) -> tuple[list[str], JsonDict | None, JsonDict | None, int | None]:
-    """
-    Fetch content from recent posts in a channel to analyze for spam indicators.
-    Returns tuple of (content_list, newest_message, oldest_message_in_batch, total_count).
-    - content_list: list of text content from recent posts (excluding media-only posts)
-    - newest_message: the most recent message (first in results)
-    - oldest_message_in_batch: oldest message present in the fetched batch
-    - total_count: total number of messages in the channel
-    """
-    params = _build_history_params(
-        peer_reference=peer_reference, add_offset=0, limit=limit
-    )
-
-    try:
-        history = await client.call("messages.getHistory", params=params, resolve=True)
-    except MtprotoHttpError as exc:
-        logger.info(
-            "Failed to fetch recent posts content",
-            extra={"peer_reference": peer_reference, "error": str(exc)},
-        )
-        return [], None, None, None
-
-    messages = history.get("messages", [])
-    content_list = []
-    newest_message = messages[0] if messages else None
-    oldest_message_in_batch = messages[-1] if len(messages) > 1 else newest_message
-    total_count = history.get("count")
-
-    for message in messages:
-        # Extract text content from message
-        text_content = _extract_message_text(message)
-        if text_content and text_content.strip():
-            content_list.append(text_content.strip())
-
-    return content_list, newest_message, oldest_message_in_batch, total_count
-
-
-def _extract_message_text(message: dict[str, Any]) -> str:
-    """Extract text content from a Telegram message."""
-    if not message:
-        return ""
-
-    # Direct message text
-    message_text = message.get("message", "")
-
-    # Caption from media messages
-    if not message_text:
-        media = message.get("media")
-        if media and isinstance(media, dict):
-            message_text = media.get("caption", "")
-
-    return message_text
-
-
-def _extract_date(timestamp: Any) -> datetime | None:
-    if not timestamp:
-        return None
-    if isinstance(timestamp, int):
-        return datetime.fromtimestamp(timestamp, tz=UTC)
-    if isinstance(timestamp, str):
-        try:
-            # Strings returned by the bridge are ISO8601 with timezone
-            return datetime.fromisoformat(timestamp)
-        except ValueError:
-            logger.debug(
-                "Failed to parse date from timestamp", extra={"timestamp": timestamp}
-            )
-            return None
-    return None
-
-
-def _extract_message_date(message: dict[str, Any] | None) -> datetime | None:
-    return _extract_date(message.get("date")) if message else None
-
-
-def _build_history_params(
-    *, peer_reference: int | str, add_offset: int, limit: int
-) -> JsonDict:
-    return {
-        "peer": peer_reference,
-        "offset_id": 0,
-        "offset_date": 0,
-        "add_offset": add_offset,
-        "limit": limit,
-        "max_id": 0,
-        "min_id": 0,
-        "hash": 0,
-    }
-
-
-def _extract_first_message_and_total(
-    history: JsonDict,
-) -> tuple[JsonDict | None, int | None]:
-    messages = history.get("messages", [])
-    first_message = messages[0] if messages else None
-    total = history.get("count")
-    if total is None and messages:
-        total = len(messages)
-    return first_message, total
