@@ -1,6 +1,7 @@
 import contextlib
 import html
 import logging
+from datetime import UTC
 from typing import cast
 
 from aiogram import F, types
@@ -307,7 +308,7 @@ def _format_topic_age(topic_updated_at) -> str | None:
     """Humanize topic age for the /scan result line. Returns None if unknown."""
     if not topic_updated_at:
         return None
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     if isinstance(topic_updated_at, str):
         try:
@@ -315,8 +316,8 @@ def _format_topic_age(topic_updated_at) -> str | None:
         except ValueError:
             return None
     if topic_updated_at.tzinfo is None:
-        topic_updated_at = topic_updated_at.replace(tzinfo=timezone.utc)
-    days = (datetime.now(timezone.utc) - topic_updated_at).days
+        topic_updated_at = topic_updated_at.replace(tzinfo=UTC)
+    days = (datetime.now(UTC) - topic_updated_at).days
     if days <= 0:
         return "today"
     if days == 1:
@@ -382,7 +383,7 @@ async def _run_scan_and_report(message: types.Message, group: dict, lang: str) -
 
     try:
         result = await scan_chat_topics(int(group["id"]))
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning(
             f"scan_chat_topics raised for group {group['id']}: {e}", exc_info=True
         )
