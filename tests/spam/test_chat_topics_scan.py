@@ -11,6 +11,7 @@ from app.common.mtproto_client import MtprotoHttpError
 from app.spam.chat_topics import (
     _is_bot_own_message,
     _is_command_message,
+    _resolve_linked_channel,
     _trim_sample,
     scan_chat_topics,
 )
@@ -390,3 +391,189 @@ class TestScanChatTopics:
                 -100123,
             )
         assert row["topic_description"] is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #5: live-resolve of linked channels when the DB row lacks the link.
+# ---------------------------------------------------------------------------
+
+
+class TestLiveResolveLinkedChannel:
+    @pytest.mark.asyncio
+    async def test_get_chat_failure_returns_none(self):
+        """The resolve helper never raises — get_chat errors yield None."""
+        with patch(
+            "app.common.bot.bot.get_chat",
+            new=AsyncMock(side_effect=RuntimeError("no token")),
+        ):
+            result = await _resolve_linked_channel(-100123)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_no_linked_chat_returns_metadata_only(self):
+        chat = MagicMock()
+        chat.linked_chat_id = None
+        chat.title = "Some Group"
+        chat.username = "some_group"
+        with patch(
+            "app.common.bot.bot.get_chat", new=AsyncMock(return_value=chat)
+        ):
+            result = await _resolve_linked_channel(-100123)
+        assert result == {
+            "linked_channel_id": None,
+            "title": "Some Group",
+            "username": "some_group",
+        }
+
+
+class TestScanLiveResolve:
+    async def _seed_group(self, clean_db, group_id, **fields):
+        async with clean_db.acquire() as conn:
+            cols = ", ".join(fields.keys())
+            vals = ", ".join(f"${i+1}" for i in range(len(fields)))
+            await conn.execute(
+                f"INSERT INTO groups (group_id, {cols}) VALUES ($1, {vals})",
+                group_id,
+                *fields.values(),
+            )
+
+    @pytest.mark.asyncio
+    async def test_live_resolve_scans_channel_peer_and_heals_row(
+        self, patched_db_conn, clean_db
+    ):
+        """Issue #5: NULL linked_channel_id + live-resolved link ->
+        scan the channel peer (owner posts) and persist the discovered metadata."""
+        await self._seed_group(clean_db, -100123, title=None, username=None)
+
+        mock_client = MagicMock()
+        mock_client.call = AsyncMock(
+            return_value={
+                "messages": [
+                    {"message": "Channel post one about real estate"},
+                    {"message": "Channel post two about land deals"},
+                ],
+                "count": 2,
+            }
+        )
+
+        summary = MagicMock()
+        summary.description = "Real-estate channel."
+        summary.short_description = "Real estate"
+
+        with patch(
+            "app.spam.chat_topics.get_mtproto_client",
+            return_value=mock_client,
+        ), patch(
+            "app.spam.chat_topics.derive_topic_summary",
+            return_value=summary,
+        ), patch(
+            "app.spam.chat_topics._resolve_linked_channel",
+            return_value={
+                "linked_channel_id": -100777,
+                "title": "Invest Channel",
+                "username": "flipping_invest",
+            },
+        ):
+            result = await scan_chat_topics(-100123)
+
+        assert result.status == "ok"
+        # Channel peer fetched (not the discussion's own messages)
+        call_args = mock_client.call.call_args
+        assert call_args[1]["params"]["peer"] == 777  # -100777 -> 777
+
+        # Metadata healed on the row
+        async with clean_db.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT title, username, linked_channel_id "
+                "FROM groups WHERE group_id = $1",
+                -100123,
+            )
+        assert row["linked_channel_id"] == -100777
+        assert row["title"] == "Invest Channel"
+        assert row["username"] == "flipping_invest"
+
+    @pytest.mark.asyncio
+    async def test_live_resolve_unavailable_uses_plain_group(
+        self, patched_db_conn, clean_db
+    ):
+        """Issue #5: live resolve returns None -> plain-group path unchanged."""
+        await self._seed_group(clean_db, -100123, title="PHP Jobs", username=None)
+
+        mock_client = MagicMock()
+        mock_client.call = AsyncMock(
+            return_value={
+                "messages": [{"message": "What's the best PHP framework?"}],
+                "count": 1,
+            }
+        )
+
+        summary = MagicMock()
+        summary.description = "PHP jobs."
+        summary.short_description = "PHP jobs"
+
+        with patch(
+            "app.spam.chat_topics.get_mtproto_client",
+            return_value=mock_client,
+        ), patch(
+            "app.spam.chat_topics.derive_topic_summary",
+            return_value=summary,
+        ), patch(
+            "app.spam.chat_topics._resolve_linked_channel",
+            return_value=None,
+        ):
+            result = await scan_chat_topics(-100123)
+
+        assert result.status == "ok"
+        # Plain-group peer, not a channel
+        call_args = mock_client.call.call_args
+        assert call_args[1]["params"]["peer"] == 123  # -100123 -> 123
+
+    @pytest.mark.asyncio
+    async def test_live_resolve_heals_metadata_without_link(
+        self, patched_db_conn, clean_db
+    ):
+        """Issue #5: title/username found but no linked channel ->
+        metadata healed, plain-group scan proceeds."""
+        await self._seed_group(clean_db, -100123, title=None, username=None)
+
+        mock_client = MagicMock()
+        mock_client.call = AsyncMock(
+            return_value={
+                "messages": [{"message": "ordinary group chatter"}],
+                "count": 1,
+            }
+        )
+
+        summary = MagicMock()
+        summary.description = "Group."
+        summary.short_description = "Group"
+
+        with patch(
+            "app.spam.chat_topics.get_mtproto_client",
+            return_value=mock_client,
+        ), patch(
+            "app.spam.chat_topics.derive_topic_summary",
+            return_value=summary,
+        ), patch(
+            "app.spam.chat_topics._resolve_linked_channel",
+            return_value={
+                "linked_channel_id": None,
+                "title": "Real Group Title",
+                "username": "real_group",
+            },
+        ):
+            result = await scan_chat_topics(-100123)
+
+        assert result.status == "ok"
+        call_args = mock_client.call.call_args
+        assert call_args[1]["params"]["peer"] == 123
+
+        async with clean_db.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT title, username, linked_channel_id "
+                "FROM groups WHERE group_id = $1",
+                -100123,
+            )
+        assert row["linked_channel_id"] is None
+        assert row["title"] == "Real Group Title"
+        assert row["username"] == "real_group"
