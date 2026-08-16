@@ -64,6 +64,19 @@ def test_is_group_inaccessible_error_bot_not_member():
     assert is_group_inaccessible_error(err) is True
 
 
+def test_is_group_inaccessible_error_bot_not_member_channel():
+    """A channel the bot is not a member of is inaccessible, not an anomaly.
+
+    Regression for issue #3: get_admin_groups logged an ERROR traceback for a
+    stale channel row instead of the intended INFO + stale-record cleanup.
+    """
+    err = TelegramForbiddenError(
+        method=MagicMock(),
+        message="Forbidden: bot is not a member of the channel chat",
+    )
+    assert is_group_inaccessible_error(err) is True
+
+
 def test_is_group_inaccessible_error_non_telegram():
     assert is_group_inaccessible_error(RuntimeError("network")) is False
 

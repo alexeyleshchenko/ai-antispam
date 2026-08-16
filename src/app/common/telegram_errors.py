@@ -21,6 +21,7 @@ _INACCESSIBLE_MESSAGE_MARKERS = (
     "bot was kicked",
     "bot is not a member of the group",
     "bot is not a member of the supergroup",
+    "bot is not a member of the channel",
 )
 
 _PERMISSION_MESSAGE_MARKERS = (
