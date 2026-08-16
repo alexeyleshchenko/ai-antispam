@@ -8,6 +8,7 @@ from src.app.handlers.message.pipeline import (
     handle_moderated_message,
     process_spam_or_approve,
 )
+from src.app.types import SpamClassificationContext
 from tests.conftest import DEFAULT_SPAM_CONFIG
 
 
@@ -158,3 +159,71 @@ async def test_handle_moderated_message_increments_after_probation_message(
         result = await handle_moderated_message(mock_message)
         assert result == "message_user_approved"
         mock_inc.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_handle_moderated_message_injects_chat_topic(
+    mock_message, mock_message_context_result
+):
+    """group.topic_description reaches classify_spam as context.chat_topics.
+
+    Regression for the wiring point between the stored topic profile and the
+    classifier: if the group shape or the ctx assignment changes, this test
+    catches it (the injection is the only place chat_topics is set).
+    """
+    mock_group = MagicMock()
+    mock_group.admin_ids = [1]
+    mock_group.topic_description = "PHP jobs"
+
+    # Real context object — not a mock — so the attribute set is observable.
+    ctx = SpamClassificationContext()
+    mock_message_context_result.context = ctx
+
+    with (
+        patch(
+            "src.app.handlers.message.pipeline.is_member_in_group",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "src.app.handlers.message.pipeline.validate_group_and_check_early_exits",
+            new_callable=AsyncMock,
+            return_value=(mock_group, ""),
+        ),
+        patch(
+            "src.app.handlers.message.pipeline.check_skip_channel_bot_message",
+            new_callable=AsyncMock,
+            return_value=(False, ""),
+        ),
+        patch(
+            "src.app.handlers.message.pipeline.collect_message_context",
+            new_callable=AsyncMock,
+            return_value=mock_message_context_result,
+        ),
+        patch(
+            "src.app.handlers.message.pipeline.classify_spam",
+            new_callable=AsyncMock,
+            return_value=(False, 95, "ham"),
+        ) as mock_classify,
+        patch(
+            "src.app.handlers.message.pipeline.save_message_lookup_entry",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "src.app.handlers.message.pipeline.process_spam_or_approve",
+            new_callable=AsyncMock,
+            return_value=("message_user_approved", False),
+        ),
+        patch(
+            "src.app.handlers.message.pipeline.increment_moderation_events",
+            new_callable=AsyncMock,
+        ),
+        patch("src.app.handlers.message.pipeline.get_root_span") as mock_span,
+    ):
+        mock_span.return_value.set_attribute = MagicMock()
+        result = await handle_moderated_message(mock_message)
+
+        assert result == "message_user_approved"
+        # The injected topic must be visible on the context classify_spam got.
+        classify_kwargs = mock_classify.call_args.kwargs
+        assert classify_kwargs["context"].chat_topics == "PHP jobs"

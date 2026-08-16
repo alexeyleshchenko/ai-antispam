@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import html
 import logging
+from datetime import UTC, datetime
 
 from aiogram import F, types
 from aiogram.exceptions import TelegramBadRequest
@@ -443,7 +444,9 @@ async def handle_scan_chat_callback(callback: CallbackQuery) -> str:
         return "callback_scan_error"
 
     if result.status == "ok":
-        age = _format_topic_age(group.get("topic_updated_at"))
+        # The scan just wrote topic_updated_at = NOW(), so the age is always
+        # "today" — the pre-scan group dict would show a stale value instead.
+        age = _format_topic_age(datetime.now(UTC))
         age_note = f" ({age})" if age else ""
         await _reply_scan_result(
             callback,

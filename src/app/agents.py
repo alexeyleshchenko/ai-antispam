@@ -176,103 +176,86 @@ def get_gateway_topic_agent() -> Any:
     return _gateway_topic_agent
 
 
-# OpenRouter agent pool
-_openrouter_agents: Any = None
-_openrouter_agent_idx: int = 0
+# OpenRouter agent pools (spam / topic / chat), parameterized on prefix + output
+# type so the rotation logic lives in one place. Each pool is a lazily-built,
+# round-robin list of agents; getters below are thin named wrappers per domain.
+_openrouter_pools: dict[str, Any] = {}
+_openrouter_pool_idxs: dict[str, int] = {}
 
 
-def _get_openrouter_agents() -> Any:
-    global _openrouter_agents
-    if _openrouter_agents is None:
-        _openrouter_agents = [
+def _openrouter_pool(prefix: str, output_type: Any) -> Any:
+    """Lazily build and cache the OpenRouter agent pool for a domain prefix."""
+    pool = _openrouter_pools.get(prefix)
+    if pool is None:
+        pool = [
             Agent(
                 _create_openrouter_model(model_name),
-                output_type=SpamClassification,
-                name=_openrouter_agent_name("openrouter-spam", model_name),
+                output_type=output_type,
+                name=_openrouter_agent_name(prefix, model_name),
             )
             for model_name in get_openrouter_models()
         ]
-    return _openrouter_agents
+        _openrouter_pools[prefix] = pool
+        _openrouter_pool_idxs[prefix] = 0
+    return pool
+
+
+def _next_openrouter(prefix: str, output_type: Any) -> Any:
+    """Rotate to the next agent in a domain's pool."""
+    agents = _openrouter_pool(prefix, output_type)
+    _openrouter_pool_idxs[prefix] = (_openrouter_pool_idxs[prefix] + 1) % len(agents)
+    return agents[_openrouter_pool_idxs[prefix]]
+
+
+def _current_openrouter(prefix: str, output_type: Any) -> Any:
+    """Get the current agent in a domain's pool (round-robin)."""
+    agents = _openrouter_pool(prefix, output_type)
+    return agents[_openrouter_pool_idxs[prefix]]
+
+
+def _get_openrouter_agents() -> Any:
+    """Get the OpenRouter spam agent pool."""
+    return _openrouter_pool("openrouter-spam", SpamClassification)
 
 
 def _next_openrouter_agent() -> Agent[None, SpamClassification]:
-    """Rotate to next OpenRouter agent."""
-    global _openrouter_agent_idx
-    agents = _get_openrouter_agents()
-    _openrouter_agent_idx = (_openrouter_agent_idx + 1) % len(agents)
-    return agents[_openrouter_agent_idx]
+    """Rotate to next OpenRouter spam agent."""
+    return _next_openrouter("openrouter-spam", SpamClassification)
 
 
 def get_openrouter_spam_agent() -> Agent[None, SpamClassification]:
     """Get current OpenRouter spam agent (round-robin)."""
-    agents = _get_openrouter_agents()
-    return agents[_openrouter_agent_idx]
-
-
-# OpenRouter topic agent pool
-_openrouter_topic_agents: Any = None
-_openrouter_topic_agent_idx: int = 0
+    return _current_openrouter("openrouter-spam", SpamClassification)
 
 
 def _get_openrouter_topic_agents() -> Any:
-    global _openrouter_topic_agents
-    if _openrouter_topic_agents is None:
-        _openrouter_topic_agents = [
-            Agent(
-                _create_openrouter_model(model_name),
-                output_type=TopicSummary,
-                name=_openrouter_agent_name("openrouter-topic", model_name),
-            )
-            for model_name in get_openrouter_models()
-        ]
-    return _openrouter_topic_agents
+    """Get the OpenRouter topic agent pool."""
+    return _openrouter_pool("openrouter-topic", TopicSummary)
 
 
 def _next_openrouter_topic_agent() -> Agent[None, TopicSummary]:
     """Rotate to next OpenRouter topic agent."""
-    global _openrouter_topic_agent_idx
-    agents = _get_openrouter_topic_agents()
-    _openrouter_topic_agent_idx = (_openrouter_topic_agent_idx + 1) % len(agents)
-    return agents[_openrouter_topic_agent_idx]
+    return _next_openrouter("openrouter-topic", TopicSummary)
 
 
 def get_openrouter_topic_agent() -> Agent[None, TopicSummary]:
     """Get current OpenRouter topic agent (round-robin)."""
-    agents = _get_openrouter_topic_agents()
-    return agents[_openrouter_topic_agent_idx]
-
-
-# OpenRouter chat agent pool (plain text output)
-_openrouter_chat_agents: Any = None
-_openrouter_chat_agent_idx: int = 0
+    return _current_openrouter("openrouter-topic", TopicSummary)
 
 
 def _get_openrouter_chat_agents() -> Any:
-    global _openrouter_chat_agents
-    if _openrouter_chat_agents is None:
-        _openrouter_chat_agents = [
-            Agent(
-                _create_openrouter_model(model_name),
-                output_type=str,
-                name=_openrouter_agent_name("openrouter-chat", model_name),
-            )
-            for model_name in get_openrouter_models()
-        ]
-    return _openrouter_chat_agents
+    """Get the OpenRouter chat agent pool (plain text output)."""
+    return _openrouter_pool("openrouter-chat", str)
 
 
 def _next_openrouter_chat_agent() -> Agent[str]:
     """Rotate to next OpenRouter chat agent."""
-    global _openrouter_chat_agent_idx
-    agents = _get_openrouter_chat_agents()
-    _openrouter_chat_agent_idx = (_openrouter_chat_agent_idx + 1) % len(agents)
-    return agents[_openrouter_chat_agent_idx]
+    return _next_openrouter("openrouter-chat", str)
 
 
 def get_openrouter_chat_agent() -> Agent[str]:
     """Get current OpenRouter chat agent (round-robin)."""
-    agents = _get_openrouter_chat_agents()
-    return agents[_openrouter_chat_agent_idx]
+    return _current_openrouter("openrouter-chat", str)
 
 
 # Chat agent (plain text, gateway first, fallback to OpenRouter)

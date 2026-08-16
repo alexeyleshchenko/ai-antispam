@@ -1,7 +1,7 @@
 import contextlib
 import html
 import logging
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import cast
 
 from aiogram import F, types
@@ -392,7 +392,9 @@ async def _run_scan_and_report(message: types.Message, group: dict, lang: str) -
 
     title = html.escape(group["title"] or "", quote=True)
     if result.status == "ok":
-        age = _format_topic_age(group.get("topic_updated_at"))
+        # The scan just wrote topic_updated_at = NOW(), so the age is always
+        # "today" — the pre-scan group dict would show a stale value instead.
+        age = _format_topic_age(datetime.now(UTC))
         age_note = f" ({age})" if age else ""
         await message.answer(
             t(

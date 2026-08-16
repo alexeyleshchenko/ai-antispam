@@ -164,7 +164,7 @@ class TestScanCallback:
         assert cb.answer.call_args.kwargs.get("show_alert") is True
 
     @pytest.mark.asyncio
-    async def test_admin_success_reports_short_and_age(self):
+    async def test_admin_success_reports_short_and_today_age(self):
         cb = _callback(-100123)
         groups = [
             _group_dict(
@@ -187,10 +187,12 @@ class TestScanCallback:
             result = await handle_scan_chat_callback(cb)
 
         assert result == "callback_scan_done"
-        # Edited text contains short description and the (3d) age
+        # Edited text contains short description and the age of the JUST-written
+        # scan ("today") — NOT the stale pre-scan dict value ("3d", see #review).
         edit_text = cb.message.edit_text.call_args.args[0]
         assert "PHP jobs" in edit_text
-        assert "3d" in edit_text
+        assert "today" in edit_text
+        assert "3d" not in edit_text
 
     @pytest.mark.asyncio
     async def test_failed_scan_reports_reason(self):
