@@ -96,7 +96,9 @@ async def check_skip_channel_bot_message(message: types.Message) -> tuple[bool, 
             getattr(message.chat, "title", None),
             getattr(message.chat, "username", None),
         )
-        logger.debug(f"Fetched linked_chat_id via API: {format_chat_log(linked_chat_id) if linked_chat_id is not None else 'None'}")
+        logger.debug(
+            f"Fetched linked_chat_id via API: {format_chat_log(linked_chat_id) if linked_chat_id is not None else 'None'}"
+        )
 
         if is_channel_bot_in_discussion(message, linked_chat_id):
             logger.debug(
@@ -140,7 +142,9 @@ async def fetch_linked_chat_id(
         chat_info = await bot.get_chat(chat_id)
         return getattr(chat_info, "linked_chat_id", None)
     except Exception as e:  # noqa: BLE001
-        logger.warning(f"Failed to fetch linked_chat_id via API for {format_chat_log(chat_id, title, username)}: {e}")
+        logger.warning(
+            f"Failed to fetch linked_chat_id via API for {format_chat_log(chat_id, title, username)}: {e}"
+        )
         return None
 
 
@@ -202,7 +206,9 @@ async def get_and_check_group(
     group = await get_group(chat_id)
 
     if not group:
-        logger.info(f"Group not found for chat {format_chat_log(chat_id, title, username)}")
+        logger.info(
+            f"Group not found for chat {format_chat_log(chat_id, title, username)}"
+        )
         return None, "error_message_group_not_found"
 
     if not group.moderation_enabled:

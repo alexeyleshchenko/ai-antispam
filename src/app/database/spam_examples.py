@@ -182,9 +182,7 @@ async def confirm_pending_example_as_spam(
         return result != "UPDATE 0"
 
 
-async def get_pending_example_by_message(
-    chat_id: int, message_id: int
-) -> int | None:
+async def get_pending_example_by_message(chat_id: int, message_id: int) -> int | None:
     """Find pending spam example ID by chat and message ID."""
     pool = await get_pool()
     async with pool.acquire() as conn:

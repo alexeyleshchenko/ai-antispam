@@ -137,9 +137,7 @@ def log_update_received(json: dict) -> None:
             cb.get("data"),
         )
     else:
-        logger.debug(
-            "Webhook update received: update_id=%s type=%s", update_id, utype
-        )
+        logger.debug("Webhook update received: update_id=%s type=%s", update_id, utype)
 
 
 def extract_update_type_ignored(json: dict) -> str:

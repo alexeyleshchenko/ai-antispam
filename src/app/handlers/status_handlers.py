@@ -136,7 +136,8 @@ async def _handle_auto_added_discussion(
     """
     logger.info(
         "Bot auto-added to linked discussion group %s ('%s') — registering as awaiting rights",
-        chat_id, chat_title,
+        chat_id,
+        chat_title,
     )
     await upsert_awaiting_rights_group(
         chat_id,
@@ -187,7 +188,9 @@ async def handle_bot_status_update(event: types.ChatMemberUpdated) -> str:
             # группу test" lie). Channel adds go straight to the composite +
             # notify_channel_admins_and_leave decision flow below.
             if event.chat.type != "channel":
-                await _handle_bot_added(event, chat_id, admin_id, chat_title, new_status)
+                await _handle_bot_added(
+                    event, chat_id, admin_id, chat_title, new_status
+                )
                 result_tag = "bot_added_group"
         elif new_status in ["left", "kicked"]:
             await _handle_bot_removed(event, chat_id, admin_id, chat_title, new_status)
@@ -436,8 +439,7 @@ async def _handle_bot_removed(
         human_admin_ids.extend(
             current_admin_id
             for current_admin_id in group.admin_ids
-            if current_admin_id > 0
-            and current_admin_id != GROUP_ANONYMOUS_BOT_ID
+            if current_admin_id > 0 and current_admin_id != GROUP_ANONYMOUS_BOT_ID
         )
         if human_admin_ids:
             await _notify_admins_about_removal(

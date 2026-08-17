@@ -85,7 +85,7 @@ class TestScanChatTopics:
     async def _seed_group(self, clean_db, group_id, **fields):
         async with clean_db.acquire() as conn:
             cols = ", ".join(fields.keys())
-            vals = ", ".join(f"${i+1}" for i in range(len(fields)))
+            vals = ", ".join(f"${i + 1}" for i in range(len(fields)))
             await conn.execute(
                 f"INSERT INTO groups (group_id, {cols}) VALUES ($1, {vals})",
                 group_id,
@@ -95,9 +95,7 @@ class TestScanChatTopics:
     @pytest.mark.asyncio
     async def test_plain_group_scan_success(self, patched_db_conn, clean_db):
         """Plain group: all messages minus bot-own + commands; stored."""
-        await self._seed_group(
-            clean_db, -100123, title="PHP Jobs", username=None
-        )
+        await self._seed_group(clean_db, -100123, title="PHP Jobs", username=None)
 
         mock_client = MagicMock()
         mock_client.call = AsyncMock(
@@ -121,12 +119,15 @@ class TestScanChatTopics:
             assert "bot's own message" not in text
             return summary
 
-        with patch(
-            "app.spam.chat_topics.get_mtproto_client",
-            return_value=mock_client,
-        ), patch(
-            "app.spam.chat_topics.derive_topic_summary",
-            side_effect=fake_derive,
+        with (
+            patch(
+                "app.spam.chat_topics.get_mtproto_client",
+                return_value=mock_client,
+            ),
+            patch(
+                "app.spam.chat_topics.derive_topic_summary",
+                side_effect=fake_derive,
+            ),
         ):
             result = await scan_chat_topics(-100123)
 
@@ -166,12 +167,15 @@ class TestScanChatTopics:
         summary.description = "VPS/hosting channel."
         summary.short_description = "VPS deals"
 
-        with patch(
-            "app.spam.chat_topics.get_mtproto_client",
-            return_value=mock_client,
-        ), patch(
-            "app.spam.chat_topics.derive_topic_summary",
-            return_value=summary,
+        with (
+            patch(
+                "app.spam.chat_topics.get_mtproto_client",
+                return_value=mock_client,
+            ),
+            patch(
+                "app.spam.chat_topics.derive_topic_summary",
+                return_value=summary,
+            ),
         ):
             result = await scan_chat_topics(-100123)
 
@@ -208,12 +212,15 @@ class TestScanChatTopics:
         summary.description = "PHP discussion."
         summary.short_description = "PHP chat"
 
-        with patch(
-            "app.spam.chat_topics.get_mtproto_client",
-            return_value=mock_client,
-        ), patch(
-            "app.spam.chat_topics.derive_topic_summary",
-            return_value=summary,
+        with (
+            patch(
+                "app.spam.chat_topics.get_mtproto_client",
+                return_value=mock_client,
+            ),
+            patch(
+                "app.spam.chat_topics.derive_topic_summary",
+                return_value=summary,
+            ),
         ):
             result = await scan_chat_topics(-100123)
 
@@ -243,12 +250,15 @@ class TestScanChatTopics:
             }
         )
 
-        with patch(
-            "app.spam.chat_topics.get_mtproto_client",
-            return_value=mock_client,
-        ), patch(
-            "app.spam.chat_topics.derive_topic_summary",
-            return_value=None,
+        with (
+            patch(
+                "app.spam.chat_topics.get_mtproto_client",
+                return_value=mock_client,
+            ),
+            patch(
+                "app.spam.chat_topics.derive_topic_summary",
+                return_value=None,
+            ),
         ):
             result = await scan_chat_topics(-100123)
 
@@ -286,12 +296,15 @@ class TestScanChatTopics:
             }
         )
 
-        with patch(
-            "app.spam.chat_topics.get_mtproto_client",
-            return_value=mock_client,
-        ), patch(
-            "app.spam.chat_topics.derive_topic_summary",
-            return_value=None,
+        with (
+            patch(
+                "app.spam.chat_topics.get_mtproto_client",
+                return_value=mock_client,
+            ),
+            patch(
+                "app.spam.chat_topics.derive_topic_summary",
+                return_value=None,
+            ),
         ):
             result = await scan_chat_topics(-100123)
 
@@ -305,25 +318,24 @@ class TestScanChatTopics:
         assert row["topic_description"] == "Existing rich description"
 
     @pytest.mark.asyncio
-    async def test_empty_sample_first_scan_skips_llm(
-        self, patched_db_conn, clean_db
-    ):
+    async def test_empty_sample_first_scan_skips_llm(self, patched_db_conn, clean_db):
         """Media-only chat, no prior scan -> skip LLM, chat title fallback."""
-        await self._seed_group(
-            clean_db, -100123, title="Photo Channel", username=None
-        )
+        await self._seed_group(clean_db, -100123, title="Photo Channel", username=None)
 
         mock_client = MagicMock()
         mock_client.call = AsyncMock(
             return_value={"messages": [{"media": {"type": "photo"}}], "count": 1}
         )
 
-        with patch(
-            "app.spam.chat_topics.get_mtproto_client",
-            return_value=mock_client,
-        ), patch(
-            "app.spam.chat_topics.derive_topic_summary",
-        ) as mock_derive:
+        with (
+            patch(
+                "app.spam.chat_topics.get_mtproto_client",
+                return_value=mock_client,
+            ),
+            patch(
+                "app.spam.chat_topics.derive_topic_summary",
+            ) as mock_derive,
+        ):
             result = await scan_chat_topics(-100123)
 
         assert result.status == "empty_first_scan"
@@ -337,9 +349,7 @@ class TestScanChatTopics:
         assert "Photo Channel" in row["topic_description"]
 
     @pytest.mark.asyncio
-    async def test_empty_sample_rescan_keeps_existing(
-        self, patched_db_conn, clean_db
-    ):
+    async def test_empty_sample_rescan_keeps_existing(self, patched_db_conn, clean_db):
         """Media-only chat with prior scan -> no LLM call, no write."""
         await self._seed_group(
             clean_db,
@@ -355,12 +365,15 @@ class TestScanChatTopics:
             return_value={"messages": [{"media": {"type": "photo"}}], "count": 1}
         )
 
-        with patch(
-            "app.spam.chat_topics.get_mtproto_client",
-            return_value=mock_client,
-        ), patch(
-            "app.spam.chat_topics.derive_topic_summary",
-        ) as mock_derive:
+        with (
+            patch(
+                "app.spam.chat_topics.get_mtproto_client",
+                return_value=mock_client,
+            ),
+            patch(
+                "app.spam.chat_topics.derive_topic_summary",
+            ) as mock_derive,
+        ):
             result = await scan_chat_topics(-100123)
 
         assert result.status == "empty_kept_existing"
@@ -383,19 +396,20 @@ class TestScanChatTopics:
     @pytest.mark.asyncio
     async def test_fetch_failure_returns_failed(self, patched_db_conn, clean_db):
         """Plain group fetch error -> FAILED, no write, no LLM."""
-        await self._seed_group(
-            clean_db, -100123, title="T", username=None
-        )
+        await self._seed_group(clean_db, -100123, title="T", username=None)
 
         mock_client = MagicMock()
         mock_client.call = AsyncMock(side_effect=MtprotoHttpError("bridge down"))
 
-        with patch(
-            "app.spam.chat_topics.get_mtproto_client",
-            return_value=mock_client,
-        ), patch(
-            "app.spam.chat_topics.derive_topic_summary",
-        ) as mock_derive:
+        with (
+            patch(
+                "app.spam.chat_topics.get_mtproto_client",
+                return_value=mock_client,
+            ),
+            patch(
+                "app.spam.chat_topics.derive_topic_summary",
+            ) as mock_derive,
+        ):
             result = await scan_chat_topics(-100123)
 
         assert result.status == "failed"
@@ -431,9 +445,7 @@ class TestLiveResolveLinkedChannel:
         chat.linked_chat_id = None
         chat.title = "Some Group"
         chat.username = "some_group"
-        with patch(
-            "app.common.bot.bot.get_chat", new=AsyncMock(return_value=chat)
-        ):
+        with patch("app.common.bot.bot.get_chat", new=AsyncMock(return_value=chat)):
             result = await _resolve_linked_channel(-100123)
         assert result == {
             "linked_channel_id": None,
@@ -446,7 +458,7 @@ class TestScanLiveResolve:
     async def _seed_group(self, clean_db, group_id, **fields):
         async with clean_db.acquire() as conn:
             cols = ", ".join(fields.keys())
-            vals = ", ".join(f"${i+1}" for i in range(len(fields)))
+            vals = ", ".join(f"${i + 1}" for i in range(len(fields)))
             await conn.execute(
                 f"INSERT INTO groups (group_id, {cols}) VALUES ($1, {vals})",
                 group_id,
@@ -476,19 +488,23 @@ class TestScanLiveResolve:
         summary.description = "Real-estate channel."
         summary.short_description = "Real estate"
 
-        with patch(
-            "app.spam.chat_topics.get_mtproto_client",
-            return_value=mock_client,
-        ), patch(
-            "app.spam.chat_topics.derive_topic_summary",
-            return_value=summary,
-        ), patch(
-            "app.spam.chat_topics._resolve_linked_channel",
-            return_value={
-                "linked_channel_id": -100777,
-                "title": "Invest Channel",
-                "username": "flipping_invest",
-            },
+        with (
+            patch(
+                "app.spam.chat_topics.get_mtproto_client",
+                return_value=mock_client,
+            ),
+            patch(
+                "app.spam.chat_topics.derive_topic_summary",
+                return_value=summary,
+            ),
+            patch(
+                "app.spam.chat_topics._resolve_linked_channel",
+                return_value={
+                    "linked_channel_id": -100777,
+                    "title": "Invest Channel",
+                    "username": "flipping_invest",
+                },
+            ),
         ):
             result = await scan_chat_topics(-100123)
 
@@ -526,15 +542,19 @@ class TestScanLiveResolve:
         summary.description = "PHP jobs."
         summary.short_description = "PHP jobs"
 
-        with patch(
-            "app.spam.chat_topics.get_mtproto_client",
-            return_value=mock_client,
-        ), patch(
-            "app.spam.chat_topics.derive_topic_summary",
-            return_value=summary,
-        ), patch(
-            "app.spam.chat_topics._resolve_linked_channel",
-            return_value=None,
+        with (
+            patch(
+                "app.spam.chat_topics.get_mtproto_client",
+                return_value=mock_client,
+            ),
+            patch(
+                "app.spam.chat_topics.derive_topic_summary",
+                return_value=summary,
+            ),
+            patch(
+                "app.spam.chat_topics._resolve_linked_channel",
+                return_value=None,
+            ),
         ):
             result = await scan_chat_topics(-100123)
 
@@ -562,19 +582,23 @@ class TestScanLiveResolve:
         summary.description = "Group."
         summary.short_description = "Group"
 
-        with patch(
-            "app.spam.chat_topics.get_mtproto_client",
-            return_value=mock_client,
-        ), patch(
-            "app.spam.chat_topics.derive_topic_summary",
-            return_value=summary,
-        ), patch(
-            "app.spam.chat_topics._resolve_linked_channel",
-            return_value={
-                "linked_channel_id": None,
-                "title": "Real Group Title",
-                "username": "real_group",
-            },
+        with (
+            patch(
+                "app.spam.chat_topics.get_mtproto_client",
+                return_value=mock_client,
+            ),
+            patch(
+                "app.spam.chat_topics.derive_topic_summary",
+                return_value=summary,
+            ),
+            patch(
+                "app.spam.chat_topics._resolve_linked_channel",
+                return_value={
+                    "linked_channel_id": None,
+                    "title": "Real Group Title",
+                    "username": "real_group",
+                },
+            ),
         ):
             result = await scan_chat_topics(-100123)
 
@@ -590,6 +614,7 @@ class TestScanLiveResolve:
         assert row["linked_channel_id"] is None
         assert row["title"] == "Real Group Title"
         assert row["username"] == "real_group"
+
 
 # ---------------------------------------------------------------------------
 # Bio signal (issue #15): _fetch_chat_bio + scan wiring
@@ -645,7 +670,7 @@ class TestScanBioSignal:
     async def _seed_group(self, clean_db, group_id, **fields):
         async with clean_db.acquire() as conn:
             cols = ", ".join(fields.keys())
-            vals = ", ".join(f"${i+1}" for i in range(len(fields)))
+            vals = ", ".join(f"${i + 1}" for i in range(len(fields)))
             await conn.execute(
                 f"INSERT INTO groups (group_id, {cols}) VALUES ($1, {vals})",
                 group_id,
@@ -653,23 +678,16 @@ class TestScanBioSignal:
             )
 
     @pytest.mark.asyncio
-    async def test_plain_group_bio_prepended_to_corpus(
-        self, patched_db_conn, clean_db
-    ):
+    async def test_plain_group_bio_prepended_to_corpus(self, patched_db_conn, clean_db):
         """Group (megagroup reality: bio via getFullChannel) leads the corpus."""
         await self._seed_group(clean_db, -100123, title="PHP Jobs", username=None)
 
         async def fake_call(method, **kwargs):
             if method == "channels.getFullChannel":
-                return {
-                    "full_chat": {
-                        "about": "PHP jobs and Laravel freelancing"
-                    }
-                }
+                return {"full_chat": {"about": "PHP jobs and Laravel freelancing"}}
             if method == "messages.getFullChat":
                 return {"full_chat": {"about": ""}}
-            return {"messages": [{"message": "What's the best framework?"}],
-                    "count": 1}
+            return {"messages": [{"message": "What's the best framework?"}], "count": 1}
 
         mock_client = MagicMock()
         mock_client.call = AsyncMock(side_effect=fake_call)
@@ -683,12 +701,15 @@ class TestScanBioSignal:
             s.short_description = "PHP jobs"
             return s
 
-        with patch(
-            "app.spam.chat_topics.get_mtproto_client",
-            return_value=mock_client,
-        ), patch(
-            "app.spam.chat_topics.derive_topic_summary",
-            side_effect=fake_derive,
+        with (
+            patch(
+                "app.spam.chat_topics.get_mtproto_client",
+                return_value=mock_client,
+            ),
+            patch(
+                "app.spam.chat_topics.derive_topic_summary",
+                side_effect=fake_derive,
+            ),
         ):
             result = await scan_chat_topics(-100123)
 
@@ -699,9 +720,7 @@ class TestScanBioSignal:
         assert "What's the best framework?" in derive_inputs["text"]
 
     @pytest.mark.asyncio
-    async def test_bio_only_corpus_derives_via_llm(
-        self, patched_db_conn, clean_db
-    ):
+    async def test_bio_only_corpus_derives_via_llm(self, patched_db_conn, clean_db):
         """Media-only chat with a bio -> derive from bio, no title fallback."""
         await self._seed_group(clean_db, -100123, title="Photo Dump", username=None)
 
@@ -717,13 +736,16 @@ class TestScanBioSignal:
         summary.description = "Drone photo channel."
         summary.short_description = "drone photos"
 
-        with patch(
-            "app.spam.chat_topics.get_mtproto_client",
-            return_value=mock_client,
-        ), patch(
-            "app.spam.chat_topics.derive_topic_summary",
-            return_value=summary,
-        ) as mock_derive:
+        with (
+            patch(
+                "app.spam.chat_topics.get_mtproto_client",
+                return_value=mock_client,
+            ),
+            patch(
+                "app.spam.chat_topics.derive_topic_summary",
+                return_value=summary,
+            ) as mock_derive,
+        ):
             result = await scan_chat_topics(-100123)
 
         assert result.status == "ok"
@@ -744,8 +766,7 @@ class TestScanBioSignal:
                 return {"full_chat": {"about": "VPS and hosting deals"}}
             if method == "messages.getFullChat":
                 return {"full_chat": {"about": "group bio (must NOT be used)"}}
-            return {"messages": [{"message": "Channel post about hosting"}],
-                    "count": 1}
+            return {"messages": [{"message": "Channel post about hosting"}], "count": 1}
 
         mock_client = MagicMock()
         mock_client.call = AsyncMock(side_effect=fake_call)
@@ -759,12 +780,15 @@ class TestScanBioSignal:
             s.short_description = "VPS deals"
             return s
 
-        with patch(
-            "app.spam.chat_topics.get_mtproto_client",
-            return_value=mock_client,
-        ), patch(
-            "app.spam.chat_topics.derive_topic_summary",
-            side_effect=fake_derive,
+        with (
+            patch(
+                "app.spam.chat_topics.get_mtproto_client",
+                return_value=mock_client,
+            ),
+            patch(
+                "app.spam.chat_topics.derive_topic_summary",
+                side_effect=fake_derive,
+            ),
         ):
             result = await scan_chat_topics(-100123)
 

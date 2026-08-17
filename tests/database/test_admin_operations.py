@@ -52,7 +52,9 @@ async def test_cycle_moderation_mode(patched_db_conn, clean_db, sample_user):
 
         assert await get_moderation_mode(sample_user.admin_id) == ModerationMode.NOTIFY
 
-        assert await cycle_moderation_mode(sample_user.admin_id) == ModerationMode.DELETE
+        assert (
+            await cycle_moderation_mode(sample_user.admin_id) == ModerationMode.DELETE
+        )
         assert await get_moderation_mode(sample_user.admin_id) == ModerationMode.DELETE
 
         assert (
@@ -64,7 +66,9 @@ async def test_cycle_moderation_mode(patched_db_conn, clean_db, sample_user):
             == ModerationMode.DELETE_SILENT
         )
 
-        assert await cycle_moderation_mode(sample_user.admin_id) == ModerationMode.NOTIFY
+        assert (
+            await cycle_moderation_mode(sample_user.admin_id) == ModerationMode.NOTIFY
+        )
         assert await get_moderation_mode(sample_user.admin_id) == ModerationMode.NOTIFY
 
 
@@ -309,6 +313,7 @@ async def test_get_admin_stats_7d_slices(patched_db_conn, clean_db, monkeypatch)
         "app.database.group_operations.get_admin_groups",
         fake_get_admin_groups,
     )
+
     async def fake_get_weekly_stats(_group_ids):
         return {group_id: {"processed": 0, "spam": 0}}
 
@@ -320,8 +325,8 @@ async def test_get_admin_stats_7d_slices(patched_db_conn, clean_db, monkeypatch)
     stats = await get_admin_stats(admin_id)
 
     global_stats = stats["global"]
-    assert global_stats["approved"] == 3       # all time
-    assert global_stats["approved_7d"] == 2    # last 7 days only
+    assert global_stats["approved"] == 3  # all time
+    assert global_stats["approved_7d"] == 2  # last 7 days only
     assert global_stats["spam_examples"] == 3  # all time
     assert global_stats["spam_examples_7d"] == 2  # last 7 days only
 

@@ -48,11 +48,15 @@ async def test_cleanup_group_data_paused_status(patched_db_conn, clean_db):
             group_id,
         )
 
-    await cleanup_group_data(group_id, status=GroupStatus.PAUSED, reason="low_balance_unpaid")
+    await cleanup_group_data(
+        group_id, status=GroupStatus.PAUSED, reason="low_balance_unpaid"
+    )
 
     async with clean_db.acquire() as conn:
         # Row survives with new status
-        row = await conn.fetchrow("SELECT status FROM groups WHERE group_id = $1", group_id)
+        row = await conn.fetchrow(
+            "SELECT status FROM groups WHERE group_id = $1", group_id
+        )
         assert row is not None
         assert row["status"] == "paused"
         # Mappings + approved_members deleted
@@ -88,7 +92,9 @@ async def test_cleanup_group_data_old_row_captures_pre_transition_state(
             group_id,
         )
 
-    await cleanup_group_data(group_id, status=GroupStatus.LEFT, reason="inaccessible_chat")
+    await cleanup_group_data(
+        group_id, status=GroupStatus.LEFT, reason="inaccessible_chat"
+    )
 
     async with clean_db.acquire() as conn:
         ev = await conn.fetchrow(
@@ -230,9 +236,7 @@ async def test_update_group_admins_already_active_no_reactivation_event(
     group_id = -1005
     admin_id = 9005
     async with clean_db.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO groups (group_id) VALUES ($1)", group_id
-        )
+        await conn.execute("INSERT INTO groups (group_id) VALUES ($1)", group_id)
         await conn.execute(
             "INSERT INTO administrators (admin_id) VALUES ($1)", admin_id
         )
@@ -303,9 +307,7 @@ async def test_cleanup_pending_spam_examples_keeps_recent(patched_db_conn, clean
     assert deleted == 0  # kept: <7 days old
 
     async with clean_db.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT 1 FROM spam_examples WHERE message_id = 1"
-        )
+        row = await conn.fetchrow("SELECT 1 FROM spam_examples WHERE message_id = 1")
         assert row is not None
 
 
@@ -319,7 +321,10 @@ async def test_cleanup_pending_spam_examples_deletes_old_writes_batch_event(
     # Three old pending examples
     for i in range(3):
         await insert_pending_spam_example(
-            chat_id=-1001, message_id=i + 1, text=f"old {i}", effective_user_id=42,
+            chat_id=-1001,
+            message_id=i + 1,
+            text=f"old {i}",
+            effective_user_id=42,
         )
     async with clean_db.acquire() as conn:
         await conn.execute(
@@ -357,7 +362,8 @@ async def test_scheduled_tasks_pending_spam_default_is_seven(monkeypatch):
 async def test_scheduled_tasks_pending_spam_reads_config(monkeypatch):
     """_get_cache_ttl_days honors config.cache.pending_spam_ttl_days."""
     monkeypatch.setattr(
-        scheduled_tasks, "load_config",
+        scheduled_tasks,
+        "load_config",
         lambda: {"cache": {"pending_spam_ttl_days": 14}},
     )
     ttls = scheduled_tasks._get_cache_ttl_days()
@@ -371,7 +377,9 @@ async def test_cleanup_group_data_missing_group_writes_no_phantom_event(
     """cleanup_group_data on a non-existent group_id must not write a phantom
     entity_events row (audit integrity) and must not raise."""
     missing_id = -99999
-    await cleanup_group_data(missing_id, status=GroupStatus.LEFT, reason="inaccessible_chat")
+    await cleanup_group_data(
+        missing_id, status=GroupStatus.LEFT, reason="inaccessible_chat"
+    )
 
     async with clean_db.acquire() as conn:
         evs = await conn.fetch(
@@ -379,7 +387,9 @@ async def test_cleanup_group_data_missing_group_writes_no_phantom_event(
         )
         assert evs == []
         # No mappings were deleted (nothing to delete), group still absent
-        row = await conn.fetchrow("SELECT 1 FROM groups WHERE group_id = $1", missing_id)
+        row = await conn.fetchrow(
+            "SELECT 1 FROM groups WHERE group_id = $1", missing_id
+        )
         assert row is None
 
 

@@ -144,12 +144,15 @@ class TestEndToEndFlow:
         summary.description = "PHP jobs discussion for freelancers."
         summary.short_description = "PHP jobs"
 
-        with patch(
-            "app.spam.chat_topics.get_mtproto_client",
-            return_value=mock_client,
-        ), patch(
-            "app.spam.chat_topics.derive_topic_summary",
-            return_value=summary,
+        with (
+            patch(
+                "app.spam.chat_topics.get_mtproto_client",
+                return_value=mock_client,
+            ),
+            patch(
+                "app.spam.chat_topics.derive_topic_summary",
+                return_value=summary,
+            ),
         ):
             from app.spam.chat_topics import scan_chat_topics
 
@@ -162,6 +165,7 @@ class TestEndToEndFlow:
         group = await get_group(-100123)
         assert group.topic_description_short == "PHP jobs"
         assert group.topic_description == "PHP jobs discussion for freelancers."
+
 
 # ---------------------------------------------------------------------------
 # 4. Trojan Horse regression (design §5)
@@ -214,12 +218,8 @@ class TestTrojanHorseRegression:
         from app.spam.prompt_builder import format_spam_request
         from app.types import SpamClassificationContext
 
-        ctx = SpamClassificationContext(
-            chat_topics="PHP jobs", bio="spammy promo bio"
-        )
-        request = json.loads(
-            format_spam_request("Buy my crypto course here!", ctx)
-        )
+        ctx = SpamClassificationContext(chat_topics="PHP jobs", bio="spammy promo bio")
+        request = json.loads(format_spam_request("Buy my crypto course here!", ctx))
         assert request["chat_topic"] == "PHP jobs"
         assert request["message"] == "Buy my crypto course here!"
         assert request["user_bio"] == "spammy promo bio"

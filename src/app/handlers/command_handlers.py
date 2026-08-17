@@ -572,9 +572,13 @@ async def handle_stats_command(message: types.Message) -> str:
                 )
                 html_blocks.append(card)
 
-            md_groups = "## " + t(lang, "stats.by_groups") + "\n\n" + "\n".join(group_rows)
+            md_groups = (
+                "## " + t(lang, "stats.by_groups") + "\n\n" + "\n".join(group_rows)
+            )
             html_groups = (
-                "<b>" + t(lang, "stats.by_groups") + "</b>\n\n"
+                "<b>"
+                + t(lang, "stats.by_groups")
+                + "</b>\n\n"
                 + "\n\n".join(html_blocks)
             )
         else:
@@ -588,13 +592,16 @@ async def handle_stats_command(message: types.Message) -> str:
         md_text = (
             md_balance
             + "\n\n"
-            + "## " + t(lang, "stats.summary")
+            + "## "
+            + t(lang, "stats.summary")
             + "\n\n"
             + "\n".join(md_rows)
             + "\n\n"
             + md_groups
             + "\n\n"
-            + "<sub>" + _md_escape(legend) + "</sub>"
+            + "<sub>"
+            + _md_escape(legend)
+            + "</sub>"
         )
 
         spent_line_week = (
@@ -609,11 +616,18 @@ async def handle_stats_command(message: types.Message) -> str:
         html_text = (
             t(lang, "stats.balance", balance=balance)
             + "\n\n"
-            + "<b>" + t(lang, "stats.summary") + "</b>\n"
-            + spent_line_week + "\n"
-            + spent_line_all + "\n\n"
-            + html_groups + "\n\n"
-            + "<i>" + html.escape(legend, quote=True) + "</i>"
+            + "<b>"
+            + t(lang, "stats.summary")
+            + "</b>\n"
+            + spent_line_week
+            + "\n"
+            + spent_line_all
+            + "\n\n"
+            + html_groups
+            + "\n\n"
+            + "<i>"
+            + html.escape(legend, quote=True)
+            + "</i>"
         )
 
         bot = message.bot

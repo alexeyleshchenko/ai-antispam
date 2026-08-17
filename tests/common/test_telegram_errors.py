@@ -21,9 +21,7 @@ from src.app.common.telegram_errors import (
 
 
 def test_is_group_inaccessible_error_chat_not_found():
-    err = TelegramBadRequest(
-        method=MagicMock(), message="Bad Request: chat not found"
-    )
+    err = TelegramBadRequest(method=MagicMock(), message="Bad Request: chat not found")
     assert is_group_inaccessible_error(err) is True
 
 
@@ -120,9 +118,7 @@ def test_is_message_not_found_error_delete():
 
 
 def test_is_message_not_found_error_unrelated():
-    err = TelegramBadRequest(
-        method=MagicMock(), message="Bad Request: chat not found"
-    )
+    err = TelegramBadRequest(method=MagicMock(), message="Bad Request: chat not found")
     assert is_message_not_found_error(err) is False
 
 
@@ -163,9 +159,7 @@ def test_is_bot_to_bot_disabled_error():
 
 def test_is_bot_to_bot_disabled_error_unrelated():
     """Unrelated errors should not be classified as bot-to-bot disabled."""
-    err = TelegramBadRequest(
-        method=MagicMock(), message="Bad Request: chat not found"
-    )
+    err = TelegramBadRequest(method=MagicMock(), message="Bad Request: chat not found")
     assert is_bot_to_bot_disabled_error(err) is False
 
 

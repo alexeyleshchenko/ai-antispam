@@ -13,7 +13,9 @@ MENTION_REGEX = re.compile(r"@([a-zA-Z0-9_]{5,32})")
 T_ME_USERNAME_REGEX = re.compile(
     r"t\.me/([a-zA-Z0-9_]{5,32})(?:\s|$|/|\))", re.IGNORECASE
 )
-T_ME_URL_IN_ENTITY_REGEX = re.compile(r"t\.me/([a-zA-Z0-9_]{5,32})(?:/|$|\?)", re.IGNORECASE)
+T_ME_URL_IN_ENTITY_REGEX = re.compile(
+    r"t\.me/([a-zA-Z0-9_]{5,32})(?:/|$|\?)", re.IGNORECASE
+)
 
 
 def _entity_field(entity: Any, field: str, default: Any = None) -> Any:

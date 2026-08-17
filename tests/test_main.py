@@ -17,7 +17,9 @@ from src.app.main import (
 async def test_handle_unhandled_exception_returns_503_for_transient():
     span = MagicMock()
     err = TelegramNetworkError(method=MagicMock(), message="network down")
-    response = await handle_unhandled_exception(span, err, {"update_id": 1}, elapsed=1.0)
+    response = await handle_unhandled_exception(
+        span, err, {"update_id": 1}, elapsed=1.0
+    )
     assert response.status == 503
     body = json.loads(response.text)
     assert body.get("retry") is True
@@ -39,7 +41,9 @@ async def test_handle_unhandled_exception_no_retry_when_no_time_left():
     span = MagicMock()
     err = TelegramNetworkError(method=MagicMock(), message="network")
     elapsed = float(WEBHOOK_TIMEOUT - 1)
-    response = await handle_unhandled_exception(span, err, {"update_id": 1}, elapsed=elapsed)
+    response = await handle_unhandled_exception(
+        span, err, {"update_id": 1}, elapsed=elapsed
+    )
     assert response.status == 200
 
 
@@ -57,7 +61,10 @@ def test_update_type_single():
 
 def test_update_type_unknown_and_multiple():
     assert _update_type({"update_id": 1}) == "unknown"
-    assert _update_type({"update_id": 1, "message": {}, "edited_message": {}}) == "multiple"
+    assert (
+        _update_type({"update_id": 1, "message": {}, "edited_message": {}})
+        == "multiple"
+    )
 
 
 def test_log_update_received_callback_logs_info_with_context(caplog):

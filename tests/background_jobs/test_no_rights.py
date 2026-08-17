@@ -103,8 +103,11 @@ async def test_leave_no_rights_groups_leaves_when_no_rights():
         await leave_no_rights_groups()
 
         mock_cleanup.assert_called_once_with(
-            100, 'Test Group', 'test',
-            status='paused', reason='no_rights_past_grace',
+            100,
+            "Test Group",
+            "test",
+            status="paused",
+            reason="no_rights_past_grace",
         )
         mock_send.assert_called_once()
         assert "Test Group" in str(mock_send.call_args) or "100" in str(
@@ -188,8 +191,11 @@ async def test_leave_no_rights_groups_cleans_stale_group_chat_not_found():
         await leave_no_rights_groups()
 
         mock_cleanup.assert_called_once_with(
-            -1001234567890, 'Stale Group', None,
-            status='paused', reason='no_rights_past_grace',
+            -1001234567890,
+            "Stale Group",
+            None,
+            status="paused",
+            reason="no_rights_past_grace",
         )
         mock_send.assert_called_once()
 
@@ -248,8 +254,11 @@ async def test_leave_no_rights_groups_cleans_stale_group_bot_kicked():
         await leave_no_rights_groups()
 
         mock_cleanup.assert_called_once_with(
-            -1009876543210, 'Kicked Group', None,
-            status='paused', reason='no_rights_past_grace',
+            -1009876543210,
+            "Kicked Group",
+            None,
+            status="paused",
+            reason="no_rights_past_grace",
         )
 
 
@@ -292,8 +301,11 @@ async def test_leave_no_rights_groups_logs_title_username(caplog):
             await leave_no_rights_groups()
 
         mock_cleanup.assert_called_once_with(
-            -100123, "Test Group", "testgroup",
-            status='paused', reason='no_rights_past_grace',
+            -100123,
+            "Test Group",
+            "testgroup",
+            status="paused",
+            reason="no_rights_past_grace",
         )
 
     assert any(
@@ -342,8 +354,11 @@ async def test_leave_no_rights_groups_falls_back_to_bare_id(caplog):
             await leave_no_rights_groups()
 
         mock_cleanup.assert_called_once_with(
-            -100123, None, None,
-            status='paused', reason='no_rights_past_grace',
+            -100123,
+            None,
+            None,
+            status="paused",
+            reason="no_rights_past_grace",
         )
 
     assert any(

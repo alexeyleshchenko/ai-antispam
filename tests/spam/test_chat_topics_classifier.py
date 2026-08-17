@@ -104,9 +104,8 @@ class TestBuildSystemPrompt:
         prompt = await self._build("PHP jobs discussion.")
         assert "## CHAT TOPIC CONTEXT" in prompt
         # Section ordering: after discussion context, before response format.
-        assert (
-            prompt.index("## CHAT TOPIC CONTEXT")
-            < prompt.index("## RESPONSE FORMAT")
+        assert prompt.index("## CHAT TOPIC CONTEXT") < prompt.index(
+            "## RESPONSE FORMAT"
         )
 
     async def test_trojan_horse_section_still_present(self):

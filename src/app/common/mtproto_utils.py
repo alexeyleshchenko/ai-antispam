@@ -49,9 +49,7 @@ def bot_api_chat_id_to_mtproto(chat_id: int) -> int | str:
         return chat_id
 
 
-def get_mtproto_chat_identifier(
-    chat_id: int, username: str | None = None
-) -> int | str:
+def get_mtproto_chat_identifier(chat_id: int, username: str | None = None) -> int | str:
     """
     Get the appropriate MTProto identifier for a chat, preferring username over ID.
 

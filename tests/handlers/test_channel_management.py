@@ -237,7 +237,11 @@ class TestDecisionFlowProtectBranch:
             # Never leaves despite DM failure
             bot.leave_chat.assert_not_awaited()
             # The fallback posted into the discussion group (-1002222222222)
-            posted = [c for c in bot.send_message.call_args_list if c.args[0] == -1002222222222]
+            posted = [
+                c
+                for c in bot.send_message.call_args_list
+                if c.args[0] == -1002222222222
+            ]
             assert posted, "expected a message posted into the discussion group"
 
 
@@ -368,13 +372,13 @@ class TestPollDiscussionMembership:
     @pytest.mark.asyncio
     async def test_returns_true_when_member(self):
         """First successful member result flips the branch."""
-        from src.app.handlers.message.channel_management import _poll_discussion_membership
+        from src.app.handlers.message.channel_management import (
+            _poll_discussion_membership,
+        )
 
         bot = AsyncMock()
         bot.id = 7574715711
-        bot.get_chat_member = AsyncMock(
-            return_value=MagicMock(status="member")
-        )
+        bot.get_chat_member = AsyncMock(return_value=MagicMock(status="member"))
 
         result = await _poll_discussion_membership(
             -1002222222222, bot, attempts=3, interval=0.01
@@ -384,13 +388,13 @@ class TestPollDiscussionMembership:
     @pytest.mark.asyncio
     async def test_returns_false_after_window(self):
         """No member status within the window → False."""
-        from src.app.handlers.message.channel_management import _poll_discussion_membership
+        from src.app.handlers.message.channel_management import (
+            _poll_discussion_membership,
+        )
 
         bot = AsyncMock()
         bot.id = 7574715711
-        bot.get_chat_member = AsyncMock(
-            return_value=MagicMock(status="left")
-        )
+        bot.get_chat_member = AsyncMock(return_value=MagicMock(status="left"))
 
         result = await _poll_discussion_membership(
             -1002222222222, bot, attempts=3, interval=0.01
@@ -400,13 +404,13 @@ class TestPollDiscussionMembership:
     @pytest.mark.asyncio
     async def test_exception_treated_as_not_member(self):
         """get_chat_member raising (e.g. not in chat yet) keeps polling."""
-        from src.app.handlers.message.channel_management import _poll_discussion_membership
+        from src.app.handlers.message.channel_management import (
+            _poll_discussion_membership,
+        )
 
         bot = AsyncMock()
         bot.id = 7574715711
-        bot.get_chat_member = AsyncMock(
-            side_effect=Exception("user not found")
-        )
+        bot.get_chat_member = AsyncMock(side_effect=Exception("user not found"))
 
         result = await _poll_discussion_membership(
             -1002222222222, bot, attempts=3, interval=0.01
@@ -494,7 +498,9 @@ class TestProtectedChannelGuard:
             # Registry access would raise: channel_post must never touch it.
             class _RegistryBomb(dict):
                 def __getitem__(self, k):
-                    raise AssertionError("channel_post must not read _pending_composites")
+                    raise AssertionError(
+                        "channel_post must not read _pending_composites"
+                    )
 
             with (
                 patch(
@@ -512,11 +518,17 @@ class TestProtectedChannelGuard:
                 ),
                 patch(
                     "src.app.handlers.status_handlers._composites_lock",
-                    MagicMock(side_effect=AssertionError("channel_post must not lock composites")),
+                    MagicMock(
+                        side_effect=AssertionError(
+                            "channel_post must not lock composites"
+                        )
+                    ),
                 ),
                 patch(
                     "src.app.handlers.status_handlers.asyncio.sleep",
-                    AsyncMock(side_effect=AssertionError("channel_post must not settle")),
+                    AsyncMock(
+                        side_effect=AssertionError("channel_post must not settle")
+                    ),
                 ),
             ):
                 result = await handle_channel_post(message)
@@ -593,14 +605,17 @@ class TestProtectedChannelGuard:
         message.chat.title = "Test Channel"
         message.chat.username = None
 
-        with patch(
-            "src.app.handlers.message.channel_management._is_protected_channel",
-            new_callable=AsyncMock,
-            side_effect=ProtectedChannelCheckUnavailable("db down"),
-        ), patch(
-            "src.app.handlers.message.channel_management.notify_channel_admins_and_leave",
-            new_callable=AsyncMock,
-        ) as mock_notify:
+        with (
+            patch(
+                "src.app.handlers.message.channel_management._is_protected_channel",
+                new_callable=AsyncMock,
+                side_effect=ProtectedChannelCheckUnavailable("db down"),
+            ),
+            patch(
+                "src.app.handlers.message.channel_management.notify_channel_admins_and_leave",
+                new_callable=AsyncMock,
+            ) as mock_notify,
+        ):
             result = await handle_channel_post(message)
         assert result == "channel_post_skipped_db_unavailable"
         mock_notify.assert_not_awaited()
@@ -623,8 +638,6 @@ class TestProtectedChannelGuard:
             with pytest.raises(ProtectedChannelCheckUnavailable):
                 await _is_protected_channel(-1007777777777)
         _protected_channel_ids.discard(-1007777777777)
-
-
 
 
 class TestWithForbiddenRetry:

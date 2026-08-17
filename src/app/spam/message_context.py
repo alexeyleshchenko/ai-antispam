@@ -82,10 +82,16 @@ def extract_reply_context(message: types.Message) -> str | None:
     # Cross-chat reply — reply to a message from another channel/chat
     if message.external_reply:
         source = _format_external_source(message.external_reply.origin)
-        quoted = message.quote.text[:2000].strip() if message.quote and message.quote.text else None
+        quoted = (
+            message.quote.text[:2000].strip()
+            if message.quote and message.quote.text
+            else None
+        )
         logger.debug(
             "Cross-channel reply detected: origin_type=%s, source=%s, quoted_len=%s",
-            message.external_reply.origin.type if message.external_reply.origin else None,
+            message.external_reply.origin.type
+            if message.external_reply.origin
+            else None,
             source,
             len(quoted) if quoted else 0,
         )

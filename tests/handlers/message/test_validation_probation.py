@@ -74,10 +74,10 @@ async def test_fetch_linked_chat_id_logs_title_username_on_failure(caplog):
     with patch("src.app.handlers.message.validation.bot") as mock_bot:
         mock_bot.get_chat = AsyncMock(side_effect=Exception("TelegramForbiddenError"))
 
-        with caplog.at_level(logging.WARNING, logger="src.app.handlers.message.validation"):
-            result = await fetch_linked_chat_id(
-                -100123, "Test Group", "testgroup"
-            )
+        with caplog.at_level(
+            logging.WARNING, logger="src.app.handlers.message.validation"
+        ):
+            result = await fetch_linked_chat_id(-100123, "Test Group", "testgroup")
 
         assert result is None
 
@@ -94,11 +94,17 @@ async def test_get_and_check_group_logs_title_username_on_missing(caplog):
     """
     get_and_check_group 'not found' log carries the passed title/username.
     """
-    with patch("src.app.handlers.message.validation.get_group", new_callable=AsyncMock) as mock_get_group:
+    with patch(
+        "src.app.handlers.message.validation.get_group", new_callable=AsyncMock
+    ) as mock_get_group:
         mock_get_group.return_value = None
 
-        with caplog.at_level(logging.INFO, logger="src.app.handlers.message.validation"):
-            group, reason = await get_and_check_group(-100123, "Test Group", "testgroup")
+        with caplog.at_level(
+            logging.INFO, logger="src.app.handlers.message.validation"
+        ):
+            group, reason = await get_and_check_group(
+                -100123, "Test Group", "testgroup"
+            )
 
         assert group is None
         assert reason == "error_message_group_not_found"
