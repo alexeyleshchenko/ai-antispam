@@ -212,8 +212,120 @@ async def test_get_admin_stats_no_groups(patched_db_conn, clean_db):
     assert "processed" in global_stats
     assert "spam" in global_stats
     assert "approved" in global_stats
+    assert "approved_7d" in global_stats
     assert "spam_examples" in global_stats
+    assert "spam_examples_7d" in global_stats
     assert global_stats["processed"] == 0
     assert global_stats["spam"] == 0
     assert global_stats["approved"] == 0
+    assert global_stats["approved_7d"] == 0
     assert global_stats["spam_examples"] == 0
+    assert global_stats["spam_examples_7d"] == 0
+
+
+@pytest.mark.asyncio
+async def test_get_admin_stats_7d_slices(patched_db_conn, clean_db, monkeypatch):
+    """7-day slices count only rows created within the last week."""
+    admin_id = 12345
+    group_id = 98765
+
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO administrators (admin_id, credits, moderation_mode)
+            VALUES ($1, $2, 'notify')
+            """,
+            admin_id,
+            100,
+        )
+        await conn.execute(
+            """
+            INSERT INTO groups (group_id)
+            VALUES ($1)
+            """,
+            group_id,
+        )
+        await conn.execute(
+            """
+            INSERT INTO group_administrators (group_id, admin_id)
+            VALUES ($1, $2)
+            """,
+            group_id,
+            admin_id,
+        )
+        # 2 approved last week + 1 older.
+        await conn.execute(
+            """
+            INSERT INTO approved_members (group_id, member_id, approved_at)
+            VALUES ($1, 1, NOW() - INTERVAL '2 days')
+            """,
+            group_id,
+        )
+        await conn.execute(
+            """
+            INSERT INTO approved_members (group_id, member_id, approved_at)
+            VALUES ($1, 2, NOW() - INTERVAL '5 days')
+            """,
+            group_id,
+        )
+        await conn.execute(
+            """
+            INSERT INTO approved_members (group_id, member_id, approved_at)
+            VALUES ($1, 3, NOW() - INTERVAL '30 days')
+            """,
+            group_id,
+        )
+        # 2 confirmed spam examples last week + 1 older.
+        for n in (1, 2):
+            await conn.execute(
+                """
+                INSERT INTO spam_examples (admin_id, text, score, confirmed, created_at)
+                VALUES ($1, $2, 90, true, NOW() - INTERVAL '3 days')
+                """,
+                admin_id,
+                f"spam-{n}",
+            )
+        await conn.execute(
+            """
+            INSERT INTO spam_examples (admin_id, text, score, confirmed, created_at)
+            VALUES ($1, $2, 90, true, NOW() - INTERVAL '40 days')
+            """,
+            admin_id,
+            "old-spam",
+        )
+
+    async def fake_get_admin_groups(_admin_id):
+        return [
+            {
+                "id": group_id,
+                "title": "Test Group",
+                "is_moderation_enabled": True,
+                "topic_description_short": None,
+                "topic_updated_at": None,
+            }
+        ]
+
+    monkeypatch.setattr(
+        "app.database.group_operations.get_admin_groups",
+        fake_get_admin_groups,
+    )
+    async def fake_get_weekly_stats(_group_ids):
+        return {group_id: {"processed": 0, "spam": 0}}
+
+    monkeypatch.setattr(
+        "app.common.logfire_lookup.get_weekly_stats",
+        fake_get_weekly_stats,
+    )
+
+    stats = await get_admin_stats(admin_id)
+
+    global_stats = stats["global"]
+    assert global_stats["approved"] == 3       # all time
+    assert global_stats["approved_7d"] == 2    # last 7 days only
+    assert global_stats["spam_examples"] == 3  # all time
+    assert global_stats["spam_examples_7d"] == 2  # last 7 days only
+
+    assert len(stats["groups"]) == 1
+    group_stats = stats["groups"][0]
+    assert group_stats["approved_users_count"] == 3
+    assert group_stats["approved_users_count_7d"] == 2

@@ -199,7 +199,9 @@ class TestStatsCommandRendering:
                 "processed": 55,
                 "spam": 53,
                 "approved": 520,
+                "approved_7d": 12,
                 "spam_examples": 142,
+                "spam_examples_7d": 7,
             },
             "groups": [
                 {
@@ -264,7 +266,7 @@ class TestStatsCommandRendering:
             in md
         )
         assert "|---|---|---|---|---|---|" in md
-        assert "| Last 7 days | 57 | 55 | 53 | — | — |" in md
+        assert "| Last 7 days | 57 | 55 | 53 | 12 | 7 |" in md
         assert "| All time | 5433 | — | — | 520 | 142 |" in md
 
         # Groups table: topic as a subscript line inside the first column.
@@ -294,7 +296,9 @@ class TestStatsCommandRendering:
                 "processed": 55,
                 "spam": 53,
                 "approved": 520,
+                "approved_7d": 12,
                 "spam_examples": 142,
+                "spam_examples_7d": 7,
             },
             "groups": [
                 {
@@ -338,7 +342,7 @@ class TestStatsCommandRendering:
         # Same data as a readable HTML card, no Rich-Markdown table markup.
         assert "<b>Realty Chat</b>" in text
         assert "Real estate deal case studies" in text
-        assert "Last 7 days: ⭐ 57 · 📨 55 · 🗑 53" in text
+        assert "Last 7 days: ⭐ 57 · 📨 55 · 🗑 53 · 👤 12 · 📝 7" in text
         assert "All time: ⭐ 5433 · 👤 520 · 📝 142" in text
         assert "<b>📊 Statistics</b>" in text
         assert "| Period |" not in text

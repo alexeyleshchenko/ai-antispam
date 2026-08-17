@@ -158,13 +158,13 @@ class SQLiteConnectionAdapter:
     def _convert_any_function_to_sqlite(self, query, args):
         """Convert PostgreSQL ANY() function calls to SQLite-compatible syntax"""
         # Handle ANY(array) operations - convert to IN clauses
-        any_pattern = r"(\w+)\s*=\s*ANY\s*\(\$\d+\)"
+        any_pattern = r"(\w+)\s*=\s*ANY\s*\(\$\d+(?:::\w+\[\])?\)"
         match = re.search(any_pattern, query, re.IGNORECASE)
         if match:
             column_name = match.group(1)
-            # Replace ANY($N) with IN (?, ?, ...) and expand the array parameter
+            # Replace ANY($N::bigint[]) with IN (?, ?, ...) and expand the array parameter
             param_index = (
-                int(re.search(r"ANY\s*\(\$(\d+)\)", query, re.IGNORECASE).group(1)) - 1
+                int(re.search(r"ANY\s*\(\$(\d+)", query, re.IGNORECASE).group(1)) - 1
             )
             if param_index < len(args) and isinstance(args[param_index], list):
                 array_values = args[param_index]

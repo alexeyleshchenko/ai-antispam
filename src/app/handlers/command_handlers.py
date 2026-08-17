@@ -503,8 +503,8 @@ async def handle_stats_command(message: types.Message) -> str:
                     str(spent_week),
                     str(global_stats["processed"]),
                     str(global_stats["spam"]),
-                    "—",
-                    "—",
+                    str(global_stats["approved_7d"]),
+                    str(global_stats["spam_examples_7d"]),
                 ]
             )
             + " |"
@@ -599,7 +599,8 @@ async def handle_stats_command(message: types.Message) -> str:
 
         spent_line_week = (
             f"{t(lang, 'stats.period_week')}: ⭐ {spent_week} · "
-            f"📨 {global_stats['processed']} · 🗑 {global_stats['spam']}"
+            f"📨 {global_stats['processed']} · 🗑 {global_stats['spam']} · "
+            f"👤 {global_stats['approved_7d']} · 📝 {global_stats['spam_examples_7d']}"
         )
         spent_line_all = (
             f"{t(lang, 'stats.period_all')}: ⭐ {spent_all} · "
