@@ -40,7 +40,7 @@ spam:
   recent_posts_limit: 5      # Number of recent channel posts to fetch for analysis
   # Chat-topic scan (/scan): fetch cap for recent messages; LLM-input budget is
   # capped separately by topic_max_message_chars / topic_max_total_chars.
-  topic_scan_limit: 100
+  topic_scan_limit: 30
   topic_max_message_chars: 500    # Per-message truncation (head kept)
   topic_max_total_chars: 16000    # Total corpus budget ~= 4K tokens (fits any model)
   notify_spammers_via_mcp: false  # Enable MTProto promo DMs to blocked spammers/channel admins

@@ -103,6 +103,8 @@ async def scan_chat_topics(group_id: int) -> ChatTopicScanResult
      `collect_channel_summary_by_id` — mirror its error handling).
 
 4. **Trim sample to a hard context budget** (worst case 100 × 4096 chars ≈ 100K+
+   tokens — see the cap fix below; `topic_scan_limit` now 30, so worst case is
+   30 × 4096 chars, further bounded by `topic_max_total_chars`).
    tokens would blow every rotation model — cap is mandatory). Two layers, newest-first:
    - **Per-message:** truncate each sampled message text to `topic_max_message_chars`
      (default 500 chars, head kept — topic signal lives at the start).
@@ -201,7 +203,7 @@ avoids that collision entirely; (c) the admin can scan a chat without joining it
 ### 3.7 Config (`config.yaml`, `spam:` section)
 
 ```yaml
-topic_scan_limit: 100        # recent messages fetched per topic scan (FETCH bound)
+topic_scan_limit: 30         # recent messages fetched per topic scan (FETCH bound)
 topic_max_message_chars: 500 # per-message truncation head cap (context bound layer 1)
 topic_max_total_chars: 16000 # total corpus chars budget → LLM input ≈4K tokens (context bound layer 2)
 ```
@@ -240,6 +242,10 @@ topic_max_total_chars: 16000 # total corpus chars budget → LLM input ≈4K tok
     store/clear topic.
   - Scan filtering: channel → channel-peer only; group → excludes bot's own +
     `/`-commands; private-channel fallback to discussion.
+  - **Spam self-exclusion (accepted 2026-08-17): deleted spam is gone from
+    Telegram, so getHistory never returns it (handle_spam → bot.delete_message);
+    residual = kept low-confidence spam only. No message-ID→outcome index
+    (schema cost > benefit).**
   - **Context trim: per-message truncation to 500 chars (head kept); total corpus
     stops at 16,000 chars (newest-first); 100 long 4096-char messages → bounded
     ≤16K chars input, and the derivation call provably fits the window**
