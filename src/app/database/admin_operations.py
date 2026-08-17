@@ -330,6 +330,21 @@ async def get_spent_credits_last_week(admin_id: int) -> int:
         )
 
 
+async def get_spent_credits_all_time(admin_id: int) -> int:
+    """Get total spent credits for all time"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            """
+            SELECT COALESCE(SUM(ABS(amount)), 0)
+            FROM transactions
+            WHERE admin_id = $1
+            AND amount < 0
+        """,
+            admin_id,
+        )
+
+
 async def get_all_admins() -> list[Administrator]:
     """Get list of all administrators"""
     pool = await get_pool()

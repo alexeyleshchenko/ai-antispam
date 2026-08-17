@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.app.database.models import ModerationMode
 from src.app.handlers.command_handlers import (
     handle_help_command,
     handle_stats_command,
@@ -189,10 +188,10 @@ def _stats_message():
 
 
 class TestStatsCommandRendering:
-    """/stats rendering: localized topic age, no 'old', blank line between groups."""
+    """/stats renders a native Rich-Message report: period + per-group tables."""
 
     @pytest.mark.asyncio
-    async def test_groups_separated_by_blank_line_with_localized_age(self):
+    async def test_stats_renders_rich_tables_with_periods_and_topics(self):
         message = _stats_message()
         three_days_ago = datetime.now(UTC) - timedelta(days=3)
         admin_stats = {
@@ -235,12 +234,12 @@ class TestStatsCommandRendering:
                 AsyncMock(return_value=57),
             ),
             patch(
-                "src.app.handlers.command_handlers.get_admin_stats",
-                AsyncMock(return_value=admin_stats),
+                "src.app.handlers.command_handlers.get_spent_credits_all_time",
+                AsyncMock(return_value=5433),
             ),
             patch(
-                "src.app.handlers.command_handlers.get_moderation_mode",
-                AsyncMock(return_value=ModerationMode.DELETE),
+                "src.app.handlers.command_handlers.get_admin_stats",
+                AsyncMock(return_value=admin_stats),
             ),
         ):
             result = await handle_stats_command(message)
@@ -248,27 +247,43 @@ class TestStatsCommandRendering:
         assert result == "command_stats_sent"
         message.reply.assert_not_called()
 
-        # Rich-message path: native GFM table with localized headers.
+        # Rich-message path: native GFM markdown for sendRichMessage.
         message.bot.send_rich_message.assert_awaited_once()
         kwargs = message.bot.send_rich_message.call_args.kwargs
         assert kwargs["chat_id"] == message.chat.id
         md = kwargs["rich_message"].markdown
 
-        # Header row + separator row.
-        assert "| Group | Msgs | Spam | Users | Age | Description |" in md
-        assert "|---|---|---|---|---|---|" in md
-        # Group row: status inside the group cell, description column, localized age.
+        # h1 report title (balance) + h2 section headings.
+        assert "# 💰 Balance: <b>667</b> stars" in md
+        assert "## 📊 Statistics" in md
+        assert "## 👥 By groups" in md
+
+        # Period table: last 7 days vs all time; "—" where untracked.
         assert (
-            "| ✅ Realty Chat | 55 | 53 | 520 | 3d ago | Real estate deal case studies |"
+            "| Period | ⭐ Spent | 📨 Checked | 🗑 Spam | 👤 Approved | 📝 Training |"
             in md
         )
-        # No scan => em dash age; description still rendered.
-        assert "| ❌ PHP Jobs | 0 | 0 | 1 | — | PHP freelancing |" in md
+        assert "|---|---|---|---|---|---|" in md
+        assert "| Last 7 days | 57 | 55 | 53 | — | — |" in md
+        assert "| All time | 5433 | — | — | 520 | 142 |" in md
+
+        # Groups table: topic as a subscript line inside the first column.
+        assert "| Group | 📨 Checked (7d) | 🗑 Spam (7d) | 👤 Approved (all) |" in md
+        assert (
+            "| ✅ Realty Chat<br><sub>Real estate deal case studies</sub> | 55 | 53 | 520 |"
+            in md
+        )
+        assert "| ❌ PHP Jobs<br><sub>PHP freelancing</sub> | 0 | 0 | 1 |" in md
+
+        # Subscript legend at the end; no mode line; no age column.
+        assert "<sub>ℹ️" in md
+        assert "Current mode" not in md
+        assert "Age" not in md
         assert "old" not in md
 
     @pytest.mark.asyncio
     async def test_rich_message_falls_back_to_html_when_api_rejects(self):
-        """When sendRichMessage raises, /stats still answers with the HTML cards."""
+        """When sendRichMessage raises, /stats still answers with the HTML fallback."""
         message = _stats_message()
         message.bot.send_rich_message = AsyncMock(
             side_effect=RuntimeError("rich API unsupported")
@@ -306,12 +321,12 @@ class TestStatsCommandRendering:
                 AsyncMock(return_value=57),
             ),
             patch(
-                "src.app.handlers.command_handlers.get_admin_stats",
-                AsyncMock(return_value=admin_stats),
+                "src.app.handlers.command_handlers.get_spent_credits_all_time",
+                AsyncMock(return_value=5433),
             ),
             patch(
-                "src.app.handlers.command_handlers.get_moderation_mode",
-                AsyncMock(return_value=ModerationMode.DELETE),
+                "src.app.handlers.command_handlers.get_admin_stats",
+                AsyncMock(return_value=admin_stats),
             ),
         ):
             result = await handle_stats_command(message)
@@ -320,6 +335,12 @@ class TestStatsCommandRendering:
         message.bot.send_rich_message.assert_awaited_once()
         message.reply.assert_awaited_once()
         text = message.reply.call_args.args[0]
+        # Same data as a readable HTML card, no Rich-Markdown table markup.
         assert "<b>Realty Chat</b>" in text
-        assert "Real estate deal case studies · 3d ago" in text
+        assert "Real estate deal case studies" in text
+        assert "Last 7 days: ⭐ 57 · 📨 55 · 🗑 53" in text
+        assert "All time: ⭐ 5433 · 👤 520 · 📝 142" in text
+        assert "<b>📊 Statistics</b>" in text
+        assert "| Period |" not in text
+        assert "Current mode" not in text
         assert "old" not in text

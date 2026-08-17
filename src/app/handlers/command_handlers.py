@@ -27,7 +27,7 @@ from ..database import (
     get_admin_credits,
     get_admin_groups,
     get_admin_stats,
-    get_moderation_mode,
+    get_spent_credits_all_time,
     get_spent_credits_last_week,
     initialize_new_admin,
     update_admin_username_if_needed,
@@ -471,110 +471,149 @@ async def handle_stats_command(message: types.Message) -> str:
     try:
         balance = await get_admin_credits(user_id)
         spent_week = await get_spent_credits_last_week(user_id)
+        spent_all = await get_spent_credits_all_time(user_id)
         admin_stats = await get_admin_stats(user_id)
         global_stats = admin_stats["global"]
         groups = admin_stats["groups"]
 
-        # Summary prefix — identical for the rich (markdown) and the fallback
-        # (HTML) renderings; locale strings mix plain text and <b> tags, which
-        # the Rich-Markdown parser (GFM + inline HTML) understands too.
-        summary_prefix = (
-            t(lang, "stats.balance", balance=balance)
-            + "\n"
-            + t(lang, "stats.spent_week", spent=spent_week)
-            + "\n\n"
-            + t(lang, "stats.stats_7d")
-            + "\n"
-            + t(lang, "stats.processed", count=global_stats["processed"])
-            + "\n"
-            + t(lang, "stats.spam_blocked", count=global_stats["spam"])
-            + "\n\n"
-            + t(lang, "stats.by_groups")
-            + "\n"
-            + t(lang, "stats.approved_users", count=global_stats["approved"])
-            + "\n"
-            + t(lang, "stats.spam_examples", count=global_stats["spam_examples"])
-            + "\n\n"
+        # --- Rich-Markdown (GFM) rendering — native Telegram Rich Message ---
+
+        # h1 heading: the report title (balance). Locale strings mix plain text
+        # and <b> tags, which the Rich-Markdown parser (GFM + inline HTML)
+        # understands too.
+        md_balance = "# " + t(lang, "stats.balance", balance=balance)
+
+        # 3x6 period table: last-7-days vs all-time across the tracked metrics.
+        # "—" marks metrics that are not tracked for that period.
+        period_headers = (
+            t(lang, "stats.table_period"),
+            t(lang, "stats.table_spent"),
+            t(lang, "stats.table_checked"),
+            t(lang, "stats.table_spam"),
+            t(lang, "stats.table_approved"),
+            t(lang, "stats.table_training"),
+        )
+        md_rows = ["| " + " | ".join(period_headers) + " |"]
+        md_rows.append("|" + "---|" * len(period_headers))
+        md_rows.append(
+            "| "
+            + " | ".join(
+                [
+                    _md_escape(t(lang, "stats.period_week")),
+                    str(spent_week),
+                    str(global_stats["processed"]),
+                    str(global_stats["spam"]),
+                    "—",
+                    "—",
+                ]
+            )
+            + " |"
+        )
+        md_rows.append(
+            "| "
+            + " | ".join(
+                [
+                    _md_escape(t(lang, "stats.period_all")),
+                    str(spent_all),
+                    "—",
+                    "—",
+                    str(global_stats["approved"]),
+                    str(global_stats["spam_examples"]),
+                ]
+            )
+            + " |"
         )
 
         if groups:
-            md_header = t(lang, "stats.by_groups_header")
-            html_rest = md_header + "\n"
-            blocks: list[str] = []
-
-            # Rich-Markdown (GFM) table — renders as a native Telegram table
-            # via sendRichMessage (Bot API 10.1+).
-            headers = (
+            # Per-group table: group name (topic as a subscript line inside the
+            # first cell) + per-period metrics.
+            group_headers = (
                 t(lang, "stats.table_group"),
-                t(lang, "stats.table_messages"),
-                t(lang, "stats.table_spam"),
-                t(lang, "stats.table_users"),
-                t(lang, "stats.table_age"),
-                t(lang, "stats.table_description"),
+                t(lang, "stats.table_checked_7d"),
+                t(lang, "stats.table_spam_7d"),
+                t(lang, "stats.table_approved_all"),
             )
-            md_rows = ["| " + " | ".join(headers) + " |"]
-            md_rows.append("|" + "---|" * len(headers))
+            group_rows = ["| " + " | ".join(group_headers) + " |"]
+            group_rows.append("|" + "---|" * len(group_headers))
 
+            html_blocks: list[str] = []
             for group in groups:
                 status_emoji = "✅" if group["is_moderation_enabled"] else "❌"
-                safe_title = html.escape(group["title"] or "", quote=True)
-                md_title = _md_escape(group["title"])
                 g_stats = group["stats"]
                 approved_users = group["approved_users_count"]
+                safe_title = html.escape(group["title"] or "", quote=True)
                 topic_short = group.get("topic_description_short")
 
-                # HTML card line (fallback rendering).
-                stats_line = (
-                    f"   └ 📨 {g_stats['processed']} | "
-                    f"🗑 {g_stats['spam']} | "
-                    f"👤 {approved_users}"
-                )
-
-                # Chat-topic line: short description + localized age when a scan
-                # exists (no hardcoded "old" suffix — wording lives in locales).
+                # Rich table row: name + subscript topic on its own line.
+                md_title = f"{status_emoji} {_md_escape(group['title'])}"
                 if topic_short:
-                    age = _format_topic_age(group.get("topic_updated_at"), lang)
-                    topic_line = f" │ {html.escape(topic_short, quote=True)}"
-                    if age:
-                        topic_line += f" · {age}"
-                    stats_line += topic_line
-
-                blocks.append(f"{status_emoji} <b>{safe_title}</b>\n{stats_line}")
-
-                # Rich table row — same data, markdown-escaped cells.
-                md_age = _format_topic_age(group.get("topic_updated_at"), lang) or "—"
-                md_rows.append(
+                    md_title += f"<br><sub>{_md_escape(topic_short)}</sub>"
+                group_rows.append(
                     "| "
                     + " | ".join(
                         [
-                            f"{status_emoji} {md_title}",
+                            md_title,
                             str(g_stats["processed"]),
                             str(g_stats["spam"]),
                             str(approved_users),
-                            md_age,
-                            _md_escape(topic_short),
                         ]
                     )
                     + " |"
                 )
 
-            html_rest += "\n\n".join(blocks)
-            md_rest = md_header + "\n\n" + "\n".join(md_rows)
+                # HTML fallback card: same data as a readable text block.
+                card = f"{status_emoji} <b>{safe_title}</b>"
+                if topic_short:
+                    card += f"\n   📋 {html.escape(topic_short, quote=True)}"
+                card += (
+                    f"\n   📨 {g_stats['processed']} · "
+                    f"🗑 {g_stats['spam']} · "
+                    f"👤 {approved_users}"
+                )
+                html_blocks.append(card)
+
+            md_groups = "## " + t(lang, "stats.by_groups") + "\n\n" + "\n".join(group_rows)
+            html_groups = (
+                "<b>" + t(lang, "stats.by_groups") + "</b>\n\n"
+                + "\n\n".join(html_blocks)
+            )
         else:
             no_groups = t(lang, "stats.no_groups")
-            html_rest = no_groups
-            md_rest = no_groups
+            md_groups = no_groups
+            html_groups = no_groups
 
-        moderation_mode = await get_moderation_mode(user_id)
-        mode_key = {
-            ModerationMode.NOTIFY: "stats.mode_notify",
-            ModerationMode.DELETE: "stats.mode_delete",
-            ModerationMode.DELETE_SILENT: "stats.mode_delete_silent",
-        }[moderation_mode]
-        mode = t(lang, mode_key)
-        mode_line = t(lang, "stats.current_mode", mode=mode)
-        html_text = summary_prefix + html_rest + "\n\n" + mode_line
-        md_text = summary_prefix + md_rest + "\n\n" + mode_line
+        # Subscript legend below everything (renders as small text).
+        legend = t(lang, "stats.legend")
+
+        md_text = (
+            md_balance
+            + "\n\n"
+            + "## " + t(lang, "stats.summary")
+            + "\n\n"
+            + "\n".join(md_rows)
+            + "\n\n"
+            + md_groups
+            + "\n\n"
+            + "<sub>" + _md_escape(legend) + "</sub>"
+        )
+
+        spent_line_week = (
+            f"{t(lang, 'stats.period_week')}: ⭐ {spent_week} · "
+            f"📨 {global_stats['processed']} · 🗑 {global_stats['spam']}"
+        )
+        spent_line_all = (
+            f"{t(lang, 'stats.period_all')}: ⭐ {spent_all} · "
+            f"👤 {global_stats['approved']} · 📝 {global_stats['spam_examples']}"
+        )
+        html_text = (
+            t(lang, "stats.balance", balance=balance)
+            + "\n\n"
+            + "<b>" + t(lang, "stats.summary") + "</b>\n"
+            + spent_line_week + "\n"
+            + spent_line_all + "\n\n"
+            + html_groups + "\n\n"
+            + "<i>" + html.escape(legend, quote=True) + "</i>"
+        )
 
         bot = message.bot
         if bot is None:
@@ -582,8 +621,9 @@ async def handle_stats_command(message: types.Message) -> str:
             return "command_stats_sent"
 
         try:
-            # Native table needs a Bot API server with Rich Messages support
-            # (Bot API 10.1+); fall back to classic HTML if the API refuses.
+            # Native Rich Message needs a Bot API server with Rich Messages
+            # support (Bot API 10.1+); fall back to classic HTML if the API
+            # refuses.
             await bot.send_rich_message(
                 chat_id=message.chat.id,
                 rich_message=InputRichMessage(markdown=md_text),
