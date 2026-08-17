@@ -1,3 +1,4 @@
+import json
 import logging
 from typing import cast
 
@@ -7,7 +8,7 @@ from ..common.bot import bot
 from ..common.telegram_errors import GROUP_ANONYMOUS_BOT_ID, is_group_inaccessible_error
 from ..common.utils import format_chat_log, load_config
 from . import admin_operations
-from .models import Group
+from .models import Group, GroupStatus
 from .postgres_connection import get_pool
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,7 @@ async def get_group(group_id: int) -> Group | None:
             admin_ids=admin_ids,
             moderation_enabled=group_data["moderation_enabled"],
             member_ids=member_ids,
+            status=GroupStatus(group_data.get("status", GroupStatus.ACTIVE.value)),
             title=group_data.get("title"),
             username=group_data.get("username"),
             topic_description=group_data.get("topic_description"),
@@ -162,12 +164,38 @@ async def deduct_credits_from_admins(group_id: int, amount: int) -> int:
         return admin_row["admin_id"]
 
 
-async def cleanup_group_data(group_id: int) -> None:
-    """Clean up all database records for a group"""
-    logger.info(f"Cleaning up database records for group {format_chat_log(group_id)}")
+async def cleanup_group_data(
+    group_id: int,
+    status: GroupStatus | str = GroupStatus.LEFT,
+    reason: str | None = None,
+) -> None:
+    """Soft-remove a group (deletion-policy E+C).
+
+    Mappings (group_administrators, approved_members) are hard-deleted — they are
+    re-creatable on reactivation. The groups row is NEVER deleted: it transitions to
+    `status` (paused/left) for audit + rollback, and an append-only event is logged.
+    """
+    logger.info(
+        f"Deactivating database records for group {format_chat_log(group_id)} "
+        f"(status={status.value if isinstance(status, GroupStatus) else status})"
+    )
+
+    status_value = status.value if isinstance(status, GroupStatus) else str(status)
 
     pool = await get_pool()
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
+        # Snapshot the row before the transition (audit)
+        old_row = await conn.fetchrow(
+            "SELECT * FROM groups WHERE group_id = $1",
+            group_id,
+        )
+        if old_row is None:
+            logger.info(
+                f"cleanup_group_data: group {format_chat_log(group_id)} "
+                "not found — skipping cleanup"
+            )
+            return
+
         # Remove all admin associations
         await conn.execute(
             """
@@ -186,17 +214,35 @@ async def cleanup_group_data(group_id: int) -> None:
             group_id,
         )
 
-        # Remove the group itself
+        # Soft-disable the group itself (E+C: no hard delete)
+        # NOTE: $1 must appear in text order (SET) and $2 after it (WHERE) so the
+        # SQLite test adapter's positional $N→? rewrite binds correctly. Same query
+        # works on asyncpg (Postgres $N is by number, not position).
         await conn.execute(
             """
-            DELETE FROM groups
-            WHERE group_id = $1
+            UPDATE groups
+            SET status = $1, last_active = NOW()
+            WHERE group_id = $2
             """,
+            status_value,
             group_id,
         )
 
+        # Append-only audit event
+        await conn.execute(
+            """
+            INSERT INTO entity_events (entity_type, entity_id, action, reason, old_row)
+            VALUES ('group', $1, $2, $3, $4)
+            """,
+            group_id,
+            f"group_{status_value}",
+            reason or "group_cleanup",
+            json.dumps(dict(old_row), default=str) if old_row else None,
+        )
+
     logger.info(
-        f"Successfully cleaned up database records for group {format_chat_log(group_id)}"
+        f"Successfully deactivated database records for group {format_chat_log(group_id)} "
+        f"(status={status_value})"
     )
 
 
@@ -229,7 +275,11 @@ async def clear_no_rights_detected_at(group_id: int) -> None:
 
 
 async def get_groups_with_no_rights_past_grace(grace_days: int) -> list[int]:
-    """Return group IDs where no_rights_detected_at is set and past grace period."""
+    """Return group IDs where no_rights_detected_at is set and past grace period.
+
+    Excludes paused/left groups (E+C deletion policy): re-add is what clears the
+    timestamp, and the no_rights job is only meant to act on currently-active rows.
+    """
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -238,8 +288,10 @@ async def get_groups_with_no_rights_past_grace(grace_days: int) -> list[int]:
             FROM groups
             WHERE no_rights_detected_at IS NOT NULL
               AND no_rights_detected_at + make_interval(days => $1) <= NOW()
+              AND status = $2
             """,
             grace_days,
+            GroupStatus.ACTIVE.value,
         )
         return [row["group_id"] for row in rows]
 
@@ -264,7 +316,8 @@ async def get_admin_groups(admin_id: int) -> list[dict]:
         rows = await conn.fetch(
             """
             SELECT g.group_id, g.title, g.moderation_enabled,
-                   g.topic_description_short, g.topic_updated_at
+                   g.topic_description_short, g.topic_updated_at,
+                   g.status
             FROM groups g
             JOIN group_administrators ga ON g.group_id = ga.group_id
             WHERE ga.admin_id = $1
@@ -285,6 +338,7 @@ async def get_admin_groups(admin_id: int) -> list[dict]:
                         "is_moderation_enabled": row["moderation_enabled"],
                         "topic_description_short": row["topic_description_short"],
                         "topic_updated_at": row["topic_updated_at"],
+                        "status": row["status"],
                     }
                 )
             except Exception as e:
@@ -307,7 +361,9 @@ async def get_admin_groups(admin_id: int) -> list[dict]:
         # Clean up inaccessible groups (after the loop to avoid connection issues)
         for group_id in inaccessible_groups:
             try:
-                await cleanup_group_data(group_id)
+                await cleanup_group_data(
+                    group_id, status=GroupStatus.LEFT, reason="inaccessible_chat"
+                )
             except Exception as e:  # noqa: BLE001
                 logger.error(
                     f"Failed to cleanup inaccessible group {format_chat_log(group_id)}: {e}"
@@ -481,6 +537,32 @@ async def update_group_admins(
             group_title,
             group_username,
         )
+
+        # E+C: re-add reactivates a paused/left group + clears no_rights_detected_at
+        # (avoids the daily no-rights job re-triggering leave on a stale timestamp).
+        # Fresh inserts and still-active groups have status='active' — IF branch skipped.
+        prior = await conn.fetchrow(
+            "SELECT status FROM groups WHERE group_id = $1", group_id
+        )
+        if prior and prior["status"] != GroupStatus.ACTIVE.value:
+            await conn.execute(
+                """
+                UPDATE groups
+                SET status = $1, no_rights_detected_at = NULL
+                WHERE group_id = $2
+                """,
+                GroupStatus.ACTIVE.value,
+                group_id,
+            )
+            await conn.execute(
+                """
+                INSERT INTO entity_events (entity_type, entity_id, action, reason)
+                VALUES ('group', $1, $2, $3)
+                """,
+                group_id,
+                "group_reactivated",
+                "re_add",
+            )
 
         # Handle both old format (just IDs) and new format (IDs with usernames)
         usernames = cast(

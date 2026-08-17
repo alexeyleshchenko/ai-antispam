@@ -250,9 +250,22 @@ async def test_get_admin_groups_inaccessible_logs_info_and_cleans_db(
     assert not any(r.levelno >= logging.WARNING for r in caplog.records)
     assert any("inaccessible during admin stats" in r.message for r in caplog.records)
 
+    # E+C deletion policy: group row survives with lifecycle status + audit event
     async with clean_db.acquire() as conn:
-        row = await conn.fetchrow("SELECT 1 FROM groups WHERE group_id = $1", group_id)
-        assert row is None
+        group_row = await conn.fetchrow(
+            "SELECT status FROM groups WHERE group_id = $1", group_id
+        )
+        assert group_row is not None
+        assert group_row["status"] == "left"
+
+        event_row = await conn.fetchrow(
+            "SELECT action, reason FROM entity_events "
+            "WHERE entity_type = 'group' AND entity_id = $1",
+            group_id,
+        )
+        assert event_row is not None
+        assert event_row["action"] == "group_left"
+        assert event_row["reason"] == "inaccessible_chat"
 
 
 @pytest.mark.asyncio

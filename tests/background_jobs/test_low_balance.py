@@ -167,7 +167,10 @@ async def test_leave_sole_payer_groups_leaves_and_notifies():
         await leave_sole_payer_groups(111)
 
         assert mock_cleanup.call_count == 1
-        mock_cleanup.assert_called_with(100, 'Test', 'test')
+        mock_cleanup.assert_called_with(
+            100, 'Test', 'test',
+            status='paused', reason='low_balance_unpaid',
+        )
         mock_send.assert_called_once()
         assert "100" in str(mock_send.call_args) or "Test" in str(mock_send.call_args)
 

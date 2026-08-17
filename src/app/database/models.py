@@ -10,6 +10,19 @@ class ModerationMode(StrEnum):
     DELETE_SILENT = "delete_silent"
 
 
+class GroupStatus(StrEnum):
+    """Lifecycle status (deletion-policy E+C) — replaces hard DELETE for groups.
+
+    active: bot in the chat, moderation running
+    paused: bot left due to payment/no-rights, row retained for audit + rollback
+    left:   bot removed / chat inaccessible, row retained for audit + rollback
+    """
+
+    ACTIVE = "active"
+    PAUSED = "paused"
+    LEFT = "left"
+
+
 class Administrator(BaseModel):
     """Enhanced administrator model with validation"""
 
@@ -47,6 +60,7 @@ class Group(BaseModel):
     group_id: int
     admin_ids: list[int]
     moderation_enabled: bool = True
+    status: GroupStatus = GroupStatus.ACTIVE
     member_ids: list[int] = []
     title: str | None = None
     username: str | None = None

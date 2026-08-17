@@ -6,6 +6,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 
 from src.app.common.notifications import notify_admins_with_fallback_and_cleanup
 from src.app.common.notifications import perform_complete_group_cleanup
+from src.app.database.models import GroupStatus
 
 
 @pytest.fixture
@@ -57,7 +58,10 @@ class TestNotifyAdminsWithCleanup:
             assert mock_bot.get_chat.call_count == len(admin_ids) * 2
 
             # Should call the complete cleanup function
-            mock_cleanup.assert_called_once_with(group_id, None, None)
+            mock_cleanup.assert_called_once_with(
+                group_id, None, None,
+                status="left", reason="notification_delivery_failure",
+            )
 
             # Should return cleanup result
             assert result["group_cleaned_up"] is True
@@ -136,7 +140,11 @@ async def test_perform_complete_group_cleanup_chat_not_found_still_cleans_db():
         success = await perform_complete_group_cleanup(-1001234567890)
 
     assert success is True
-    mock_cleanup.assert_called_once_with(-1001234567890)
+    mock_cleanup.assert_called_once_with(
+        -1001234567890,
+        status=GroupStatus.LEFT,
+        reason=None,
+    )
 
 
 @pytest.mark.asyncio
@@ -161,7 +169,11 @@ async def test_perform_complete_group_cleanup_bot_kicked_still_cleans_db():
         success = await perform_complete_group_cleanup(-1001234567890)
 
     assert success is True
-    mock_cleanup.assert_called_once_with(-1001234567890)
+    mock_cleanup.assert_called_once_with(
+        -1001234567890,
+        status=GroupStatus.LEFT,
+        reason=None,
+    )
 
 
 @pytest.mark.asyncio
