@@ -224,7 +224,7 @@ stats:
   table_checked_7d: "📨 Checked (7d)"
   table_spam_7d: "🗑 Spam (7d)"
   table_approved_all: "👤 Approved (all)"
-  legend: "ℹ️ Spent — stars used for moderation. Checked & Spam cover the last 7 days; Approved & Training cover all time. «—» means the metric isn't tracked for that period."
+  legend: "ℹ️ Spent — stars used for moderation. Checked & Spam cover the last 7 days (no all-time history kept); Approved & Training cover both periods. «—» means the metric isn't tracked for that period."
   error: "An error occurred while fetching statistics."
 
 topic_age:

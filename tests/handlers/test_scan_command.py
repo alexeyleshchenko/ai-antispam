@@ -312,6 +312,9 @@ class TestStatsTopicLine:
             "app.handlers.command_handlers.get_spent_credits_last_week",
             AsyncMock(return_value=0),
         ), patch(
+            "app.handlers.command_handlers.get_spent_credits_all_time",
+            AsyncMock(return_value=0),
+        ), patch(
             "app.handlers.command_handlers.get_admin_stats",
             AsyncMock(
                 return_value={
@@ -319,7 +322,9 @@ class TestStatsTopicLine:
                         "processed": 10,
                         "spam": 2,
                         "approved": 5,
+                        "approved_7d": 0,
                         "spam_examples": 3,
+                        "spam_examples_7d": 0,
                     },
                     "groups": groups,
                 }
@@ -347,6 +352,9 @@ class TestStatsTopicLine:
             "app.handlers.command_handlers.get_spent_credits_last_week",
             AsyncMock(return_value=0),
         ), patch(
+            "app.handlers.command_handlers.get_spent_credits_all_time",
+            AsyncMock(return_value=0),
+        ), patch(
             "app.handlers.command_handlers.get_admin_stats",
             AsyncMock(
                 return_value={
@@ -354,7 +362,9 @@ class TestStatsTopicLine:
                         "processed": 10,
                         "spam": 2,
                         "approved": 5,
+                        "approved_7d": 0,
                         "spam_examples": 3,
+                        "spam_examples_7d": 0,
                     },
                     "groups": groups,
                 }

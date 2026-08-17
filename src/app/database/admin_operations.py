@@ -548,12 +548,24 @@ async def get_admin_stats(admin_id: int) -> dict[str, Any]:
                 """,
                 admin_id,
             )
+            spam_examples_count_7d = await conn.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM spam_examples
+                WHERE admin_id = $1
+                  AND (confirmed IS NOT DISTINCT FROM true)
+                  AND created_at >= NOW() - INTERVAL '7 days'
+                """,
+                admin_id,
+            )
         return {
             "global": {
                 "processed": 0,
                 "spam": 0,
                 "approved": 0,
+                "approved_7d": 0,
                 "spam_examples": spam_examples_count or 0,
+                "spam_examples_7d": spam_examples_count_7d or 0,
             },
             "groups": [],
         }
@@ -574,6 +586,17 @@ async def get_admin_stats(admin_id: int) -> dict[str, Any]:
             group_ids,
         )
 
+        approved_counts_7d = await conn.fetch(
+            """
+            SELECT group_id, COUNT(*) as count
+            FROM approved_members
+            WHERE group_id = ANY($1::bigint[])
+              AND approved_at >= NOW() - INTERVAL '7 days'
+            GROUP BY group_id
+            """,
+            group_ids,
+        )
+
         spam_examples_count = await conn.fetchval(
             """
             SELECT COUNT(*)
@@ -583,11 +606,24 @@ async def get_admin_stats(admin_id: int) -> dict[str, Any]:
             admin_id,
         )
 
+        spam_examples_count_7d = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM spam_examples
+            WHERE admin_id = $1
+              AND (confirmed IS NOT DISTINCT FROM true)
+              AND created_at >= NOW() - INTERVAL '7 days'
+            """,
+            admin_id,
+        )
+
     approved_map = {row["group_id"]: row["count"] for row in approved_counts}
+    approved_map_7d = {row["group_id"]: row["count"] for row in approved_counts_7d}
 
     global_processed = 0
     global_spam = 0
     global_approved = sum(approved_map.values())
+    global_approved_7d = sum(approved_map_7d.values())
 
     enriched_groups = []
     for group in groups:
@@ -602,18 +638,27 @@ async def get_admin_stats(admin_id: int) -> dict[str, Any]:
                 "title": group["title"],
                 "is_moderation_enabled": group["is_moderation_enabled"],
                 "approved_users_count": approved_map.get(gid, 0),
+                "approved_users_count_7d": approved_map_7d.get(gid, 0),
                 "stats": w_stats,
                 "topic_description_short": group.get("topic_description_short"),
                 "topic_updated_at": group.get("topic_updated_at"),
             }
         )
 
+    # Most active groups first — legible order for the /stats table.
+    enriched_groups.sort(
+        key=lambda g: (g["stats"] or {}).get("processed", 0),
+        reverse=True,
+    )
+
     return {
         "global": {
             "processed": global_processed,
             "spam": global_spam,
             "approved": global_approved,
+            "approved_7d": global_approved_7d,
             "spam_examples": spam_examples_count or 0,
+            "spam_examples_7d": spam_examples_count_7d or 0,
         },
         "groups": enriched_groups,
     }
