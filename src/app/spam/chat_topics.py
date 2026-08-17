@@ -27,6 +27,7 @@ from ..common.mtproto_client import (
 )
 from ..common.mtproto_utils import bot_api_chat_id_to_mtproto
 from ..common.utils import format_chat_log, load_config
+from ..database.group_operations import update_group_metadata
 from ..database.postgres_connection import get_pool
 from .mtproto_history import (
     extract_message_text,
@@ -77,6 +78,35 @@ async def _load_group_row(group_id: int) -> dict | None:
             group_id,
         )
         return dict(row) if row else None
+
+
+async def _resolve_linked_channel(group_id: int) -> dict | None:
+    """Live-resolve chat metadata via the Bot API (issue #5).
+
+    The DB row for a linked discussion often lacks linked_channel_id (and
+    title/username). The bot is a member of every monitored chat, so
+    bot.get_chat() returns authoritative metadata. Never raises: any failure
+    returns None and the scan falls back to plain-group logic.
+
+    Returns a dict with keys linked_channel_id/title/username (each possibly
+    None), or None if the chat could not be resolved.
+    """
+    try:
+        from ..common.bot import bot  # lazy: BOT_TOKEN may be unset at import
+
+        chat = await bot.get_chat(group_id)
+        linked = getattr(chat, "linked_chat_id", None)
+        return {
+            "linked_channel_id": int(linked) if linked else None,
+            "title": getattr(chat, "title", None),
+            "username": getattr(chat, "username", None),
+        }
+    except Exception as exc:  # noqa: BLE001 — resolution failure is non-fatal
+        logger.info(
+            f"Topic scan: live chat resolve failed for {format_chat_log(group_id)}",
+            extra={"error": str(exc)},
+        )
+        return None
 
 
 async def _save_topic(
@@ -184,12 +214,35 @@ async def scan_chat_topics(group_id: int) -> ChatTopicScanResult:
         limit = _topic_scan_limit()
 
         # Resolve the fetch peer.
+        # Issue #5: DB metadata is often stale/empty for linked discussions —
+        # resolve the link live when the row lacks it, and heal the row.
+        if linked_channel_id is None:
+            resolved = await _resolve_linked_channel(group_id)
+            if resolved is not None:
+                try:
+                    await update_group_metadata(
+                        group_id,
+                        title=resolved.get("title"),
+                        username=resolved.get("username"),
+                        linked_channel_id=resolved.get("linked_channel_id"),
+                    )
+                except Exception as exc:  # noqa: BLE001 — heal is best-effort
+                    logger.warning(
+                        f"Topic scan: metadata heal failed for {chat_log}",
+                        extra={"error": str(exc)},
+                    )
+                if resolved.get("linked_channel_id"):
+                    linked_channel_id = resolved["linked_channel_id"]
+                    title = resolved.get("title") or title
+                    username = resolved.get("username") or username
+
         # Sample purity note (accepted, 2026-08-17, efficiency review): spam
         # messages that moderation DELETED (high-confidence auto-delete) are
         # removed from Telegram itself, so getHistory never returns them — the
         # sample is self-cleaning of handled spam. Residual pollution is only
         # low-confidence spam that was kept (skip_auto_delete, admins notified).
         # Accepted as-is: no message-ID->outcome index (schema cost > benefit).
+
         # Channel-protected discussion (linked_channel_id set): scan the channel
         # peer directly — channel posts are owner-authored by construction (the
         # "filter by channel owner" requirement). Fall back to the discussion

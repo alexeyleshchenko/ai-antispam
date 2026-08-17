@@ -710,6 +710,44 @@ async def activate_discussion_group(group_id: int) -> bool:
         return updated is not None
 
 
+async def update_group_metadata(
+    group_id: int,
+    title: str | None = None,
+    username: str | None = None,
+    linked_channel_id: int | None = None,
+) -> None:
+    """Fill NULL metadata fields on a groups row (never clobbers existing values).
+
+    Used by the chat-topic scan to heal stale rows (issue #5): when a
+    discussion group's linked channel is discovered live, the resolved channel
+    id and any missing title/username are persisted so `/stats` metadata is
+    complete and future scans skip the get_chat round-trip. COALESCE semantics:
+    only NULL fields are filled; existing values are never overwritten.
+    Does not touch moderation_enabled or the topic_* columns.
+
+    Args:
+        group_id: The groups row to update
+        title: Title to fill if currently NULL (e.g. from Telegram get_chat)
+        username: Username to fill if currently NULL
+        linked_channel_id: Linked channel id to fill if currently NULL
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE groups
+            SET title = COALESCE($1, title),
+                username = COALESCE($2, username),
+                linked_channel_id = COALESCE($3, linked_channel_id)
+            WHERE group_id = $4
+            """,
+            title,
+            username,
+            linked_channel_id,
+            group_id,
+        )
+
+
 async def get_protected_channel_ids() -> list[int]:
     """Return distinct channel ids whose discussion groups the bot protects.
 
