@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from typing import cast
@@ -68,18 +69,33 @@ async def get_group(group_id: int) -> Group | None:
         )
 
 
-async def set_group_moderation(group_id: int, enabled: bool) -> None:
-    """Enable/disable moderation for a group"""
+async def set_group_moderation(
+    group_id: int,
+    enabled: bool,
+    title: str | None = None,
+    username: str | None = None,
+) -> None:
+    """Enable/disable moderation for a group.
+
+    Callers that have chat metadata in hand (e.g. from bot.get_chat) should pass
+    title/username so a fresh row is never created bare (no-metadata gap):
+    ON CONFLICT fills metadata with COALESCE, preserving existing values when the
+    caller has nothing new (title/username None).
+    """
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO groups (group_id, moderation_enabled, last_active)
-            VALUES ($1, $2, NOW())
+            INSERT INTO groups (group_id, title, username, moderation_enabled, last_active)
+            VALUES ($1, $2, $3, $4, NOW())
             ON CONFLICT (group_id) DO UPDATE
-            SET moderation_enabled = $2, last_active = NOW()
+            SET moderation_enabled = EXCLUDED.moderation_enabled, last_active = NOW(),
+                title = COALESCE(EXCLUDED.title, groups.title),
+                username = COALESCE(EXCLUDED.username, groups.username)
         """,
             group_id,
+            title,
+            username,
             enabled,
         )
 
@@ -702,3 +718,90 @@ async def get_protected_channel_ids() -> list[int]:
         "WHERE linked_channel_id IS NOT NULL"
     )
     return [row["linked_channel_id"] for row in rows]
+
+
+async def heal_bare_group_rows(concurrency: int = 5, limit: int = 500) -> dict[str, int]:
+    """Resolve bare groups rows (title/username NULL) via the Telegram API.
+
+    Closes the no-metadata gap going forward: any row created without chat
+    metadata (e.g. a bare set_group_moderation insert) is healed by the daily
+    scheduled job within 24h. Fills title, username and linked_channel_id
+    (COALESCE-only — never overwrites existing values). Chats the bot cannot
+    reach (forbidden / bad request / chat not found) or that resolve to
+    non-group chats (no title) are skipped and counted, never raised — the
+    loop must survive a single dead row.
+
+    Args:
+        concurrency: max parallel bot.get_chat calls (Telegram rate-limit safe).
+        limit: max rows to attempt per run.
+
+    Returns:
+        Summary dict: {"healed": n, "skipped": n, "total": n}.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT group_id FROM groups
+            WHERE title IS NULL AND username IS NULL
+            ORDER BY group_id
+            LIMIT $1
+            """,
+            limit,
+        )
+    if not rows:
+        logger.info("heal_bare_group_rows: no bare rows to heal")
+        return {"healed": 0, "skipped": 0, "total": 0}
+
+    healed = 0
+    skipped = 0
+    sem = asyncio.Semaphore(concurrency)
+
+    async def heal_one(group_id: int) -> None:
+        nonlocal healed, skipped
+        async with sem:
+            try:
+                chat = await bot.get_chat(group_id)
+                chat_title = getattr(chat, "title", None)
+                if not chat_title:
+                    # Private chats / irregular rows: never healable, leave for
+                    # the purge flow instead of re-selecting them every day.
+                    logger.info(
+                        f"heal_bare_group_rows: {format_chat_log(group_id)} "
+                        "resolves to a chat without a title — skipping"
+                    )
+                    skipped += 1
+                    return
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        UPDATE groups
+                        SET title = COALESCE($1, title),
+                            username = COALESCE($2, username),
+                            linked_channel_id = COALESCE($3, linked_channel_id)
+                        WHERE group_id = $4
+                        """,
+                        chat_title,
+                        getattr(chat, "username", None),
+                        getattr(chat, "linked_chat_id", None),
+                        group_id,
+                    )
+                healed += 1
+            except Exception as e:  # noqa: BLE001
+                if is_group_inaccessible_error(e) or isinstance(e, TelegramBadRequest):
+                    logger.info(
+                        f"heal_bare_group_rows: skipping inaccessible chat "
+                        f"{format_chat_log(group_id)}: {e}"
+                    )
+                else:
+                    logger.warning(
+                        f"heal_bare_group_rows: failed for "
+                        f"{format_chat_log(group_id)}: {e}"
+                    )
+                skipped += 1
+
+    await asyncio.gather(*(heal_one(row["group_id"]) for row in rows))
+    logger.info(
+        f"heal_bare_group_rows: healed={healed} skipped={skipped} total={len(rows)}"
+    )
+    return {"healed": healed, "skipped": skipped, "total": len(rows)}

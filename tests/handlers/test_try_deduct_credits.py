@@ -161,3 +161,50 @@ async def test_send_group_deactivation_message_failure_logs_chat_context(caplog)
         and "bot is not a member" in r.getMessage()
         for r in caplog.records
     )
+
+
+@pytest.mark.asyncio
+async def test_handle_deactivation_passes_metadata_to_set_group_moderation():
+    """
+    handle_deactivation writes the chat metadata it fetches (no-metadata gap):
+    set_group_moderation is called with (chat_id, False, title, username).
+    """
+    from src.app.handlers.try_deduct_credits import handle_deactivation
+
+    chat = Chat(id=-100123, type="supergroup", title="Test Group", username="testgroup")
+
+    with (
+        patch("src.app.handlers.try_deduct_credits.bot") as mock_bot,
+        patch(
+            "src.app.handlers.try_deduct_credits.set_group_moderation",
+            new_callable=AsyncMock,
+        ) as mock_set_moderation,
+    ):
+        mock_bot.get_chat = AsyncMock(return_value=chat)
+        mock_bot.get_chat_administrators = AsyncMock(return_value=[])
+
+        await handle_deactivation(-100123)
+
+    mock_set_moderation.assert_awaited_once_with(-100123, False, "Test Group", "testgroup")
+
+
+@pytest.mark.asyncio
+async def test_handle_deactivation_get_chat_failure_still_disables_moderation():
+    """
+    If get_chat fails, deactivation still happens (metadata best-effort):
+    set_group_moderation called with None title/username, no crash.
+    """
+    from src.app.handlers.try_deduct_credits import handle_deactivation
+
+    with (
+        patch("src.app.handlers.try_deduct_credits.bot") as mock_bot,
+        patch(
+            "src.app.handlers.try_deduct_credits.set_group_moderation",
+            new_callable=AsyncMock,
+        ) as mock_set_moderation,
+    ):
+        mock_bot.get_chat = AsyncMock(side_effect=Exception("network down"))
+
+        await handle_deactivation(-100123)
+
+    mock_set_moderation.assert_awaited_once_with(-100123, False, None, None)
