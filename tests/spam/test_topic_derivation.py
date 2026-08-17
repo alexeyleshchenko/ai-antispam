@@ -1,5 +1,5 @@
 """Tests for chat-topic derivation: TopicSummary schema, fallback builder, and
-the derive_topic_summary routing (gateway -> OpenRouter -> None)."""
+the derive_topic_summary routing (OpenRouter free-first -> gateway fallback -> None)."""
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -49,29 +49,13 @@ class TestTopicSummaryFromTitle:
 
 
 class TestDeriveTopicSummary:
-    """Routing: gateway first, OpenRouter rotation, None on total failure."""
+    """Routing: OpenRouter free pool first, gateway as safety net, None on total failure."""
 
     @pytest.mark.asyncio
-    async def test_gateway_success_returns_summary(self):
+    async def test_openrouter_success_returns_summary_gateway_never_called(self):
+        """Free-first: a successful OpenRouter call returns WITHOUT touching the gateway."""
         fake_output = TopicSummary(
-            description="Gateway-derived topic.", short_description="Gateway topic"
-        )
-        fake_result = MagicMock()
-        fake_result.output = fake_output
-        agent = MagicMock()
-        agent.run = AsyncMock(return_value=fake_result)
-
-        with patch("src.app.agents.get_gateway_topic_agent", return_value=agent):
-            result = await derive_topic_summary("sample text", timeout=1)
-
-        assert result == fake_output
-        agent.run.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_gateway_failure_falls_back_to_openrouter(self):
-        fake_output = TopicSummary(
-            description="OpenRouter-derived topic.",
-            short_description="OR topic",
+            description="OpenRouter-derived topic.", short_description="OR topic"
         )
         fake_result = MagicMock()
         fake_result.output = fake_output
@@ -80,14 +64,14 @@ class TestDeriveTopicSummary:
         or_agent.run = AsyncMock(return_value=fake_result)
 
         with patch(
-            "src.app.agents.get_gateway_topic_agent",
-            side_effect=RuntimeError("gateway down"),
-        ), patch(
             "src.app.agents._get_openrouter_topic_agents",
             return_value=[or_agent],
         ), patch(
             "src.app.agents.get_openrouter_topic_agent",
             return_value=or_agent,
+        ), patch(
+            "src.app.agents.get_gateway_topic_agent",
+            side_effect=AssertionError("gateway must not be called when OpenRouter succeeds"),
         ):
             result = await derive_topic_summary("sample text", timeout=1)
 
@@ -95,42 +79,65 @@ class TestDeriveTopicSummary:
         or_agent.run.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_all_models_fail_returns_none(self):
+    async def test_empty_openrouter_pool_falls_back_to_gateway(self):
+        """No free models (or pool build failed) -> gateway is the safety net."""
+        fake_output = TopicSummary(
+            description="Gateway-derived topic.", short_description="Gateway topic"
+        )
+        fake_result = MagicMock()
+        fake_result.output = fake_output
+        agent = MagicMock()
+        agent.run = AsyncMock(return_value=fake_result)
+
         with patch(
-            "src.app.agents.get_gateway_topic_agent",
-            side_effect=RuntimeError("gateway down"),
-        ), patch(
             "src.app.agents._get_openrouter_topic_agents",
             return_value=[],
+        ), patch(
+            "src.app.agents.get_gateway_topic_agent",
+            return_value=agent,
         ):
             result = await derive_topic_summary("sample text", timeout=1)
 
-        assert result is None
+        assert result == fake_output
+        agent.run.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_openrouter_pool_build_failure_returns_none(self):
-        """Missing OPENROUTER_API_KEY must not let an exception escape."""
+    async def test_openrouter_pool_build_failure_falls_back_to_gateway(self):
+        """Pool build failure must NOT let an exception escape; gateway still tried."""
+        fake_output = TopicSummary(
+            description="Gateway-derived topic.", short_description="Gateway topic"
+        )
+        fake_result = MagicMock()
+        fake_result.output = fake_output
+        gateway_agent = MagicMock()
+        gateway_agent.run = AsyncMock(return_value=fake_result)
+
         with patch(
-            "src.app.agents.get_gateway_topic_agent",
-            side_effect=RuntimeError("gateway down"),
-        ), patch(
             "src.app.agents._get_openrouter_topic_agents",
             side_effect=ValueError("OPENROUTER_API_KEY environment variable is required"),
+        ), patch(
+            "src.app.agents.get_gateway_topic_agent",
+            return_value=gateway_agent,
         ):
             result = await derive_topic_summary("sample text", timeout=1)
 
-        assert result is None
+        assert result == fake_output
+        gateway_agent.run.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_openrouter_exhausted_returns_none(self):
-        """Every OpenRouter agent fails -> None (no exception escapes)."""
+    async def test_openrouter_exhausted_falls_back_to_gateway(self):
+        """Every OpenRouter agent fails -> gateway tried next, not None."""
+        fake_output = TopicSummary(
+            description="Gateway-derived topic.", short_description="Gateway topic"
+        )
+        fake_result = MagicMock()
+        fake_result.output = fake_output
         failing_agent = MagicMock()
         failing_agent.run = AsyncMock(side_effect=RuntimeError("model exploded"))
+        gateway_agent = MagicMock()
+        gateway_agent.run = AsyncMock(return_value=fake_result)
 
         with patch(
-            "src.app.agents.get_gateway_topic_agent",
-            side_effect=RuntimeError("gateway down"),
-        ), patch(
             "src.app.agents._get_openrouter_topic_agents",
             return_value=[failing_agent],
         ), patch(
@@ -139,6 +146,47 @@ class TestDeriveTopicSummary:
         ), patch(
             "src.app.agents._next_openrouter_topic_agent",
             return_value=failing_agent,
+        ), patch(
+            "src.app.agents.get_gateway_topic_agent",
+            return_value=gateway_agent,
+        ):
+            result = await derive_topic_summary("sample text", timeout=1)
+
+        assert result == fake_output
+        gateway_agent.run.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_all_models_fail_returns_none(self):
+        """OpenRouter pool empty AND gateway fails -> None (no exception escapes)."""
+        with patch(
+            "src.app.agents._get_openrouter_topic_agents",
+            return_value=[],
+        ), patch(
+            "src.app.agents.get_gateway_topic_agent",
+            side_effect=RuntimeError("gateway down"),
+        ):
+            result = await derive_topic_summary("sample text", timeout=1)
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_openrouter_exhausted_and_gateway_down_returns_none(self):
+        """Whole pool fails AND gateway fails -> None (no exception escapes)."""
+        failing_agent = MagicMock()
+        failing_agent.run = AsyncMock(side_effect=RuntimeError("model exploded"))
+
+        with patch(
+            "src.app.agents._get_openrouter_topic_agents",
+            return_value=[failing_agent],
+        ), patch(
+            "src.app.agents.get_openrouter_topic_agent",
+            return_value=failing_agent,
+        ), patch(
+            "src.app.agents._next_openrouter_topic_agent",
+            return_value=failing_agent,
+        ), patch(
+            "src.app.agents.get_gateway_topic_agent",
+            side_effect=RuntimeError("gateway down"),
         ):
             result = await derive_topic_summary("sample text", timeout=1)
 

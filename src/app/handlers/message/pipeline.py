@@ -170,7 +170,7 @@ async def handle_moderated_message(
     # None (no scan yet / scan failed) -> classifier behaves exactly as before.
     ctx = message_context_result.context
     if ctx is not None:
-        ctx.chat_topics = group.topic_description
+        ctx.chat_topics = group.topic_description_short
 
     try:
         if message_context_result.is_story:

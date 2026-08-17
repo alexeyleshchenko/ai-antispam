@@ -40,21 +40,16 @@ class SpamClassification(BaseModel):
 class TopicSummary(BaseModel):
     """Structured output for chat-topic derivation.
 
-    `description` is a 2-4 sentence profile of what the chat is normally
-    about; `short_description` is the stats-safe one-liner (<= 120 chars).
+    Full profile (`description`) is the classifier signal; `short_description`
+    is the stats-safe label. Length/shape rules live in
+    `TOPIC_SUMMARY_INSTRUCTIONS`.
     """
 
     description: str = Field(
-        description=(
-            "2-4 sentence profile of what this chat/channel is normally about: "
-            "the recurring subjects, tone, and typical discussions."
-        )
+        description="Profile of what this chat/channel is normally about."
     )
     short_description: str = Field(
-        description=(
-            "A single line (max 120 characters) summarising the chat topic, "
-            "safe to display in a stats table."
-        ),
+        description="Stats-safe label for this chat's topic.",
         max_length=120,
     )
 
@@ -296,35 +291,25 @@ async def derive_topic_summary(
 ) -> TopicSummary | None:
     """Derive a chat-topic summary from sampled message text.
 
-    Tries the gateway model first, then rotates through the OpenRouter pool.
-    Returns None if every model fails (no exception escapes). The caller
-    decides the fallback (chat title on first scan, keep existing on re-scan).
+    Routes OpenRouter free pool FIRST (derivation is a manual /scan — no latency
+    SLA, non-critical, fallback = title), then the gateway model as the safety
+    net, then None. Returns None if every model fails (no exception escapes).
+    The caller decides the fallback (chat title on first scan, keep existing on
+    re-scan).
     """
     if timeout is None:
         timeout = get_llm_route_timeout()
     model_settings = ModelSettings(timeout=timeout)
 
-    # Try gateway first
-    try:
-        with logfire.span("topic_derivation_gateway_call"):
-            agent = get_gateway_topic_agent()
-            result = await agent.run(
-                sample_text,
-                instructions=TOPIC_SUMMARY_INSTRUCTIONS,
-                model_settings=model_settings,
-            )
-        return result.output
-    except Exception as e:  # noqa: BLE001
-        logfire.exception("topic_derivation_gateway_failure")
-        logger.warning(f"Gateway topic derivation failed: {e}, trying OpenRouter")
-
-    # OpenRouter pool with rotation
+    # OpenRouter free pool with rotation first (free-first routing, efficiency
+    # review 2026-08-17): derivation is manual + non-critical, so a flaky free
+    # model failing just falls through to the gateway.
     try:
         agents = _get_openrouter_topic_agents()
     except Exception as e:  # noqa: BLE001
         logfire.exception("topic_derivation_openrouter_pool_failure")
         logger.error(f"Failed to build OpenRouter topic agent pool: {e}")
-        return None
+        agents = []
     num_models = len(agents)
 
     for attempt in range(num_models):
@@ -344,6 +329,20 @@ async def derive_topic_summary(
             )
             _next_openrouter_topic_agent()
             continue
+
+    # Gateway as the safety net — only reached when the whole free pool failed.
+    try:
+        with logfire.span("topic_derivation_gateway_call"):
+            agent = get_gateway_topic_agent()
+            result = await agent.run(
+                sample_text,
+                instructions=TOPIC_SUMMARY_INSTRUCTIONS,
+                model_settings=model_settings,
+            )
+        return result.output
+    except Exception as e:  # noqa: BLE001
+        logfire.exception("topic_derivation_gateway_failure")
+        logger.warning(f"Gateway topic derivation failed: {e}")
 
     logger.error("All topic derivation agents failed")
     return None
