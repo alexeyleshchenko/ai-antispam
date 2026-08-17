@@ -223,6 +223,12 @@ stats:
   mode_delete_silent: "🔇 Тихое автоудаление"
   current_mode: "Текущий режим: <b>{mode}</b>"
   error: "Произошла ошибка при получении статистики."
+  table_group: "Группа"
+  table_messages: "Сообщ"
+  table_spam: "Спам"
+  table_users: "Польз"
+  table_age: "Возраст"
+  table_description: "Описание"
 
 topic_age:
   today: "сегодня"

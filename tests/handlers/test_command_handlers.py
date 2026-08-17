@@ -183,6 +183,8 @@ def _stats_message():
     user.id = 12345
     message.from_user = user
     message.reply = AsyncMock()
+    message.bot = MagicMock()
+    message.bot.send_rich_message = AsyncMock()
     return message
 
 
@@ -244,16 +246,80 @@ class TestStatsCommandRendering:
             result = await handle_stats_command(message)
 
         assert result == "command_stats_sent"
-        text = message.reply.call_args.args[0]
+        message.reply.assert_not_called()
 
-        # Localized age, no hardcoded " old" suffix.
+        # Rich-message path: native GFM table with localized headers.
+        message.bot.send_rich_message.assert_awaited_once()
+        kwargs = message.bot.send_rich_message.call_args.kwargs
+        assert kwargs["chat_id"] == message.chat.id
+        md = kwargs["rich_message"].markdown
+
+        # Header row + separator row.
+        assert "| Group | Msgs | Spam | Users | Age | Description |" in md
+        assert "|---|---|---|---|---|---|" in md
+        # Group row: status inside the group cell, description column, localized age.
+        assert (
+            "| ✅ Realty Chat | 55 | 53 | 520 | 3d ago | Real estate deal case studies |"
+            in md
+        )
+        # No scan => em dash age; description still rendered.
+        assert "| ❌ PHP Jobs | 0 | 0 | 1 | — | PHP freelancing |" in md
+        assert "old" not in md
+
+    @pytest.mark.asyncio
+    async def test_rich_message_falls_back_to_html_when_api_rejects(self):
+        """When sendRichMessage raises, /stats still answers with the HTML cards."""
+        message = _stats_message()
+        message.bot.send_rich_message = AsyncMock(
+            side_effect=RuntimeError("rich API unsupported")
+        )
+        three_days_ago = datetime.now(UTC) - timedelta(days=3)
+        admin_stats = {
+            "global": {
+                "processed": 55,
+                "spam": 53,
+                "approved": 520,
+                "spam_examples": 142,
+            },
+            "groups": [
+                {
+                    "title": "Realty Chat",
+                    "is_moderation_enabled": True,
+                    "approved_users_count": 520,
+                    "stats": {"processed": 55, "spam": 53},
+                    "topic_description_short": "Real estate deal case studies",
+                    "topic_updated_at": three_days_ago,
+                },
+            ],
+        }
+        with (
+            patch(
+                "src.app.handlers.command_handlers.get_admin",
+                AsyncMock(return_value=MagicMock(language_code="en")),
+            ),
+            patch(
+                "src.app.handlers.command_handlers.get_admin_credits",
+                AsyncMock(return_value=667),
+            ),
+            patch(
+                "src.app.handlers.command_handlers.get_spent_credits_last_week",
+                AsyncMock(return_value=57),
+            ),
+            patch(
+                "src.app.handlers.command_handlers.get_admin_stats",
+                AsyncMock(return_value=admin_stats),
+            ),
+            patch(
+                "src.app.handlers.command_handlers.get_moderation_mode",
+                AsyncMock(return_value=ModerationMode.DELETE),
+            ),
+        ):
+            result = await handle_stats_command(message)
+
+        assert result == "command_stats_sent"
+        message.bot.send_rich_message.assert_awaited_once()
+        message.reply.assert_awaited_once()
+        text = message.reply.call_args.args[0]
+        assert "<b>Realty Chat</b>" in text
         assert "Real estate deal case studies · 3d ago" in text
         assert "old" not in text
-
-        # Exactly one blank line separates the two group blocks.
-        first_block = (
-            "✅ <b>Realty Chat</b>\n"
-            "   └ 📨 55 | 🗑 53 | 👤 520 │ Real estate deal case studies · 3d ago"
-        )
-        assert f"{first_block}\n\n❌ <b>PHP Jobs</b>" in text
-        assert "PHP freelancing" in text
