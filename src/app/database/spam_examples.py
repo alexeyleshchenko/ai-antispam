@@ -1,4 +1,6 @@
+import json
 import logging
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import logfire
@@ -69,24 +71,45 @@ async def insert_pending_spam_example(
         return row["id"]
 
 
-async def cleanup_pending_spam_examples(days: int = 3) -> int:
+async def cleanup_pending_spam_examples(days: int = 7) -> int:
     """
     Remove stale pending spam examples (confirmed=false, older than days).
-    Returns deleted count.
+    Returns deleted count. Appends a single batch event to entity_events
+    (E+C deletion policy) for audit.
+
+    NOTE: the cutoff is computed in Python and passed as a timestamp param
+    instead of `NOW() - INTERVAL '1 day' * $1` — same semantics on Postgres,
+    and translatable by the SQLite test adapter (which cannot express the
+    INTERVAL-multiplier form).
     """
+    cutoff = datetime.now(UTC) - timedelta(days=days)
     pool = await get_pool()
     async with pool.acquire() as conn:
         result = await conn.execute(
             """
             DELETE FROM spam_examples
             WHERE confirmed = false
-            AND created_at < NOW() - INTERVAL '1 day' * $1
+            AND created_at < $1
             """,
-            days,
+            cutoff,
         )
     count = int(result.split()[-1]) if result else 0
     if count > 0:
         logger.info(f"Cleaned up {count} stale pending spam examples")
+        # Append-only audit log (one row per run, not per row)
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO entity_events (entity_type, action, reason, old_row)
+                    VALUES ('spam_example', $1, $2, $3)
+                    """,
+                    "ttl_pending_cleanup",
+                    f"ttl_{days}d",
+                    json.dumps({"deleted_count": count}),
+                )
+        except Exception:
+            logger.exception("Failed to write TTL batch event to entity_events")
     return count
 
 

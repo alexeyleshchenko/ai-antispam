@@ -9,6 +9,7 @@ from aiogram.types import InlineKeyboardMarkup
 from tenacity import RetryError
 
 from ..database.group_operations import cleanup_group_data
+from ..database.models import GroupStatus
 from .bot import bot
 from .telegram_errors import (
     GROUP_ANONYMOUS_BOT_ID,
@@ -28,8 +29,14 @@ async def perform_complete_group_cleanup(
     group_id: int,
     group_title: str | None = None,
     group_username: str | None = None,
+    status: GroupStatus | str = GroupStatus.LEFT,
+    reason: str | None = None,
 ) -> bool:
-    """Perform complete group cleanup: leave chat and clean database. Returns success status."""
+    """Perform complete group cleanup: leave chat and soft-remove DB records.
+
+    Returns success status. `status`/`reason` describe the lifecycle transition
+    (deletion-policy E+C): no-rights/unpaid → PAUSED, removed/inaccessible → LEFT.
+    """
     try:
         await bot.leave_chat(group_id)
     except Exception as leave_e:
@@ -44,7 +51,7 @@ async def perform_complete_group_cleanup(
             return False
 
     try:
-        await cleanup_group_data(group_id)
+        await cleanup_group_data(group_id, status=status, reason=reason)
         return True
     except Exception:
         logger.exception(
@@ -276,7 +283,13 @@ async def notify_admins_with_fallback_and_cleanup(
                 exc_info=True,
             )
             if cleanup_if_group_fails:
-                cleanup_success = await perform_complete_group_cleanup(group_id, group_title, group_username)
+                cleanup_success = await perform_complete_group_cleanup(
+                    group_id,
+                    group_title,
+                    group_username,
+                    status="left",
+                    reason="notification_delivery_failure",
+                )
                 result["group_cleaned_up"] = cleanup_success
                 if cleanup_success:
                     logger.info(

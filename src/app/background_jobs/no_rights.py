@@ -46,7 +46,9 @@ async def _leave_group_and_record_for_notification(
         )
     except Exception:  # noqa: BLE001
         display = str(group_id)
-    success = await perform_complete_group_cleanup(group_id, title, username)
+    success = await perform_complete_group_cleanup(
+        group_id, title, username, status="paused", reason="no_rights_past_grace"
+    )
     if success and group and group.admin_ids:
         for admin_id in group.admin_ids:
             if admin_id not in admin_to_left_groups:

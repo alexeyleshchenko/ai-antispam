@@ -77,10 +77,22 @@ async def create_schema(conn: asyncpg.Connection):
                 title VARCHAR(255),
                 username VARCHAR(255),
                 moderation_enabled BOOLEAN DEFAULT true,
+                status VARCHAR(20) NOT NULL DEFAULT 'active',
                 linked_channel_id BIGINT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 last_active TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 no_rights_detected_at TIMESTAMPTZ
+            );
+
+            -- Entity lifecycle events (append-only audit log, deletion-policy E+C)
+            CREATE TABLE IF NOT EXISTS entity_events (
+                id BIGSERIAL PRIMARY KEY,
+                entity_type VARCHAR(50) NOT NULL,
+                entity_id BIGINT,  -- NULL for batch events (e.g. TTL cleanup)
+                action VARCHAR(100) NOT NULL,
+                reason TEXT,
+                old_row JSONB,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
 
             -- Group administrators mapping
@@ -166,6 +178,13 @@ async def create_schema(conn: asyncpg.Connection):
             -- Groups indexes
             CREATE INDEX IF NOT EXISTS idx_groups_moderation ON groups(moderation_enabled);
             CREATE INDEX IF NOT EXISTS idx_groups_last_active ON groups(last_active);
+            CREATE INDEX IF NOT EXISTS idx_groups_status ON groups(status);
+
+            -- Entity events indexes
+            CREATE INDEX IF NOT EXISTS idx_entity_events_entity
+                ON entity_events(entity_type, entity_id);
+            CREATE INDEX IF NOT EXISTS idx_entity_events_created
+                ON entity_events(created_at);
 
             -- Message history indexes
             CREATE INDEX IF NOT EXISTS idx_message_history_admin ON message_history(admin_id);
@@ -206,6 +225,10 @@ async def create_schema(conn: asyncpg.Connection):
         )
         await conn.execute(
             "ALTER TABLE groups ADD COLUMN IF NOT EXISTS topic_updated_at TIMESTAMPTZ"
+        )
+        # Lifecycle status (deletion-policy E+C: soft state replaces hard delete)
+        await conn.execute(
+            "ALTER TABLE groups ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'active'"
         )
     except Exception as e:
         raise RuntimeError(f"Failed to run migrations: {e}") from e

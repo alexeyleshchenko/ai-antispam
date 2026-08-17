@@ -28,7 +28,7 @@ def _get_cache_ttl_days() -> dict[str, int]:
     return {
         "message_lookup": cfg.get("message_lookup_ttl_days", 7),
         "message_history": cfg.get("message_history_ttl_days", 1),
-        "pending_spam": cfg.get("pending_spam_ttl_days", 3),
+        "pending_spam": cfg.get("pending_spam_ttl_days", 7),
     }
 
 
