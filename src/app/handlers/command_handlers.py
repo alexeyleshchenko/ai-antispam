@@ -7,7 +7,12 @@ from typing import cast
 from aiogram import F, types
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
-from aiogram.types import Chat, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    Chat,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputRichMessage,
+)
 
 from ..common.bot import bot
 from ..common.utils import (
@@ -327,6 +332,21 @@ def _format_topic_age(topic_updated_at, lang: str) -> str | None:
     return t(lang, "topic_age.days", days=days)
 
 
+def _md_escape(text: str | None) -> str:
+    """Escape a string for a Rich-Markdown (GFM) table cell.
+
+    Pipe, backslash, backticks and emphasis markers are special in GFM cells;
+    escape them so group titles and topic descriptions arrive verbatim.
+    Newlines are collapsed to spaces (a cell must stay on one line).
+    """
+    if not text:
+        return ""
+    out = text.replace("\\", "\\\\").replace("|", "\\|")
+    for ch in "`*_[]~":
+        out = out.replace(ch, "\\" + ch)
+    return " ".join(out.split())
+
+
 @dp.message(Command("scan"), F.chat.type == "private")
 async def handle_scan_command(message: types.Message) -> str:
     """
@@ -455,14 +475,15 @@ async def handle_stats_command(message: types.Message) -> str:
         global_stats = admin_stats["global"]
         groups = admin_stats["groups"]
 
-        message_text = (
+        # Summary prefix — identical for the rich (markdown) and the fallback
+        # (HTML) renderings; locale strings mix plain text and <b> tags, which
+        # the Rich-Markdown parser (GFM + inline HTML) understands too.
+        summary_prefix = (
             t(lang, "stats.balance", balance=balance)
             + "\n"
             + t(lang, "stats.spent_week", spent=spent_week)
             + "\n\n"
-        )
-        message_text += (
-            t(lang, "stats.stats_7d")
+            + t(lang, "stats.stats_7d")
             + "\n"
             + t(lang, "stats.processed", count=global_stats["processed"])
             + "\n"
@@ -477,23 +498,40 @@ async def handle_stats_command(message: types.Message) -> str:
         )
 
         if groups:
-            message_text += t(lang, "stats.by_groups_header") + "\n"
+            md_header = t(lang, "stats.by_groups_header")
+            html_rest = md_header + "\n"
             blocks: list[str] = []
+
+            # Rich-Markdown (GFM) table — renders as a native Telegram table
+            # via sendRichMessage (Bot API 10.1+).
+            headers = (
+                t(lang, "stats.table_group"),
+                t(lang, "stats.table_messages"),
+                t(lang, "stats.table_spam"),
+                t(lang, "stats.table_users"),
+                t(lang, "stats.table_age"),
+                t(lang, "stats.table_description"),
+            )
+            md_rows = ["| " + " | ".join(headers) + " |"]
+            md_rows.append("|" + "---|" * len(headers))
+
             for group in groups:
                 status_emoji = "✅" if group["is_moderation_enabled"] else "❌"
                 safe_title = html.escape(group["title"] or "", quote=True)
+                md_title = _md_escape(group["title"])
                 g_stats = group["stats"]
+                approved_users = group["approved_users_count"]
+                topic_short = group.get("topic_description_short")
 
-                # Формируем строку статистики группы
+                # HTML card line (fallback rendering).
                 stats_line = (
                     f"   └ 📨 {g_stats['processed']} | "
                     f"🗑 {g_stats['spam']} | "
-                    f"👤 {group['approved_users_count']}"
+                    f"👤 {approved_users}"
                 )
 
                 # Chat-topic line: short description + localized age when a scan
                 # exists (no hardcoded "old" suffix — wording lives in locales).
-                topic_short = group.get("topic_description_short")
                 if topic_short:
                     age = _format_topic_age(group.get("topic_updated_at"), lang)
                     topic_line = f" │ {html.escape(topic_short, quote=True)}"
@@ -502,9 +540,30 @@ async def handle_stats_command(message: types.Message) -> str:
                     stats_line += topic_line
 
                 blocks.append(f"{status_emoji} <b>{safe_title}</b>\n{stats_line}")
-            message_text += "\n\n".join(blocks)
+
+                # Rich table row — same data, markdown-escaped cells.
+                md_age = _format_topic_age(group.get("topic_updated_at"), lang) or "—"
+                md_rows.append(
+                    "| "
+                    + " | ".join(
+                        [
+                            f"{status_emoji} {md_title}",
+                            str(g_stats["processed"]),
+                            str(g_stats["spam"]),
+                            str(approved_users),
+                            md_age,
+                            _md_escape(topic_short),
+                        ]
+                    )
+                    + " |"
+                )
+
+            html_rest += "\n\n".join(blocks)
+            md_rest = md_header + "\n\n" + "\n".join(md_rows)
         else:
-            message_text += t(lang, "stats.no_groups")
+            no_groups = t(lang, "stats.no_groups")
+            html_rest = no_groups
+            md_rest = no_groups
 
         moderation_mode = await get_moderation_mode(user_id)
         mode_key = {
@@ -513,10 +572,27 @@ async def handle_stats_command(message: types.Message) -> str:
             ModerationMode.DELETE_SILENT: "stats.mode_delete_silent",
         }[moderation_mode]
         mode = t(lang, mode_key)
-        message_text += "\n\n" + t(lang, "stats.current_mode", mode=mode)
+        mode_line = t(lang, "stats.current_mode", mode=mode)
+        html_text = summary_prefix + html_rest + "\n\n" + mode_line
+        md_text = summary_prefix + md_rest + "\n\n" + mode_line
 
-        await message.reply(message_text, parse_mode="HTML")
-        return "command_stats_sent"
+        bot = message.bot
+        if bot is None:
+            await message.reply(html_text, parse_mode="HTML")
+            return "command_stats_sent"
+
+        try:
+            # Native table needs a Bot API server with Rich Messages support
+            # (Bot API 10.1+); fall back to classic HTML if the API refuses.
+            await bot.send_rich_message(
+                chat_id=message.chat.id,
+                rich_message=InputRichMessage(markdown=md_text),
+            )
+            return "command_stats_sent"
+        except Exception as e:  # noqa: BLE001
+            logger.info("Rich message rejected, falling back to HTML: %s", e)
+            await message.reply(html_text, parse_mode="HTML")
+            return "command_stats_sent"
 
     except Exception as e:
         logger.info(f"Error handling stats command: {e}", exc_info=True)
