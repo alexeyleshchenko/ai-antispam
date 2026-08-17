@@ -4,17 +4,27 @@ Phase 1: manual /scan only. Covers peer selection (channel vs plain group),
 message filtering, trimming, derivation fallbacks, and DB writes.
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from app.common.mtproto_client import MtprotoHttpError
 from app.spam.chat_topics import (
+    _fetch_chat_bio,
     _is_bot_own_message,
     _is_command_message,
     _resolve_linked_channel,
     _trim_sample,
     scan_chat_topics,
 )
+
+
+def _last_history_peer(mock_client) -> int:
+    """Peer of the last messages.getHistory call (skips bio lookups)."""
+    for c in reversed(mock_client.call.call_args_list):
+        if c.args and c.args[0] == "messages.getHistory":
+            return c.kwargs["params"]["peer"]
+    raise AssertionError("no messages.getHistory call recorded")
 
 
 # ---------------------------------------------------------------------------
@@ -166,8 +176,7 @@ class TestScanChatTopics:
             result = await scan_chat_topics(-100123)
 
         assert result.status == "ok"
-        call_args = mock_client.call.call_args
-        assert call_args[1]["params"]["peer"] == 777  # -100777 -> 777
+        assert _last_history_peer(mock_client) == 777  # -100777 -> 777
 
     @pytest.mark.asyncio
     async def test_linked_channel_fallback_to_discussion(
@@ -181,14 +190,17 @@ class TestScanChatTopics:
         mock_client = MagicMock()
 
         async def fake_call(method, **kwargs):
-            if kwargs["params"]["peer"] == 777:
+            if method == "messages.getHistory" and kwargs["params"]["peer"] == 777:
                 raise MtprotoHttpError("channel not accessible")
-            return {
-                "messages": [
-                    {"message": "discussion comment about PHP"},
-                ],
-                "count": 1,
-            }
+            if method == "messages.getHistory":
+                return {
+                    "messages": [
+                        {"message": "discussion comment about PHP"},
+                    ],
+                    "count": 1,
+                }
+            # Bio lookups (getFullChannel / getFullChat) — no bio set here.
+            return {"_": "chatFull"}
 
         mock_client.call = AsyncMock(side_effect=fake_call)
 
@@ -206,9 +218,13 @@ class TestScanChatTopics:
             result = await scan_chat_topics(-100123)
 
         assert result.status == "ok"
-        assert mock_client.call.call_count == 2  # channel failed, group succeeded
-        last_args = mock_client.call.call_args_list[-1]
-        assert last_args[1]["params"]["peer"] == 123  # -100123 -> 123
+        # Channel getHistory failed -> discussion getHistory succeeded.
+        history_peers = [
+            c.kwargs["params"]["peer"]
+            for c in mock_client.call.call_args_list
+            if c.args and c.args[0] == "messages.getHistory"
+        ]
+        assert history_peers == [777, 123]
 
     @pytest.mark.asyncio
     async def test_first_scan_derivation_failure_uses_title(
@@ -478,8 +494,7 @@ class TestScanLiveResolve:
 
         assert result.status == "ok"
         # Channel peer fetched (not the discussion's own messages)
-        call_args = mock_client.call.call_args
-        assert call_args[1]["params"]["peer"] == 777  # -100777 -> 777
+        assert _last_history_peer(mock_client) == 777  # -100777 -> 777
 
         # Metadata healed on the row
         async with clean_db.acquire() as conn:
@@ -525,8 +540,7 @@ class TestScanLiveResolve:
 
         assert result.status == "ok"
         # Plain-group peer, not a channel
-        call_args = mock_client.call.call_args
-        assert call_args[1]["params"]["peer"] == 123  # -100123 -> 123
+        assert _last_history_peer(mock_client) == 123  # -100123 -> 123
 
     @pytest.mark.asyncio
     async def test_live_resolve_heals_metadata_without_link(
@@ -565,8 +579,7 @@ class TestScanLiveResolve:
             result = await scan_chat_topics(-100123)
 
         assert result.status == "ok"
-        call_args = mock_client.call.call_args
-        assert call_args[1]["params"]["peer"] == 123
+        assert _last_history_peer(mock_client) == 123
 
         async with clean_db.acquire() as conn:
             row = await conn.fetchrow(
@@ -577,3 +590,184 @@ class TestScanLiveResolve:
         assert row["linked_channel_id"] is None
         assert row["title"] == "Real Group Title"
         assert row["username"] == "real_group"
+
+# ---------------------------------------------------------------------------
+# Bio signal (issue #15): _fetch_chat_bio + scan wiring
+# ---------------------------------------------------------------------------
+
+
+class TestFetchChatBio:
+    @pytest.mark.asyncio
+    async def test_channel_about_returned_stripped(self):
+        client = MagicMock()
+        client.call = AsyncMock(
+            return_value={"full_chat": {"about": "  Real estate fund insights  "}}
+        )
+        assert await _fetch_chat_bio(client, 777) == "Real estate fund insights"
+        client.call.assert_awaited_once_with(
+            "channels.getFullChannel", params={"channel": 777}, resolve=True
+        )
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_full_chat_for_plain_groups(self):
+        client = MagicMock()
+
+        async def fake(method, **kwargs):
+            if method == "channels.getFullChannel":
+                return {"full_chat": {"about": ""}}
+            return {"full_chat": {"about": "plain group bio"}}
+
+        client.call = AsyncMock(side_effect=fake)
+        assert await _fetch_chat_bio(client, 123) == "plain group bio"
+
+    @pytest.mark.asyncio
+    async def test_empty_abouts_return_none_after_both_attempts(self):
+        client = MagicMock()
+        client.call = AsyncMock(return_value={"_": "chatFull"})
+        assert await _fetch_chat_bio(client, 123) is None
+        assert client.call.await_count == 2  # getFullChannel + getFullChat
+
+    @pytest.mark.asyncio
+    async def test_bridge_failures_return_none(self):
+        client = MagicMock()
+        client.call = AsyncMock(side_effect=MtprotoHttpError("nope"))
+        assert await _fetch_chat_bio(client, 123) is None
+        assert client.call.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_none_peer_no_calls(self):
+        client = MagicMock()
+        assert await _fetch_chat_bio(client, None) is None
+        client.call.assert_not_called()
+
+
+class TestScanBioSignal:
+    async def _seed_group(self, clean_db, group_id, **fields):
+        async with clean_db.acquire() as conn:
+            cols = ", ".join(fields.keys())
+            vals = ", ".join(f"${i+1}" for i in range(len(fields)))
+            await conn.execute(
+                f"INSERT INTO groups (group_id, {cols}) VALUES ($1, {vals})",
+                group_id,
+                *fields.values(),
+            )
+
+    @pytest.mark.asyncio
+    async def test_plain_group_bio_prepended_to_corpus(
+        self, patched_db_conn, clean_db
+    ):
+        """Group (megagroup reality: bio via getFullChannel) leads the corpus."""
+        await self._seed_group(clean_db, -100123, title="PHP Jobs", username=None)
+
+        async def fake_call(method, **kwargs):
+            if method == "channels.getFullChannel":
+                return {
+                    "full_chat": {
+                        "about": "PHP jobs and Laravel freelancing"
+                    }
+                }
+            if method == "messages.getFullChat":
+                return {"full_chat": {"about": ""}}
+            return {"messages": [{"message": "What's the best framework?"}],
+                    "count": 1}
+
+        mock_client = MagicMock()
+        mock_client.call = AsyncMock(side_effect=fake_call)
+
+        derive_inputs: dict[str, str] = {}
+
+        def fake_derive(text):
+            derive_inputs["text"] = text
+            s = MagicMock()
+            s.description = "PHP jobs."
+            s.short_description = "PHP jobs"
+            return s
+
+        with patch(
+            "app.spam.chat_topics.get_mtproto_client",
+            return_value=mock_client,
+        ), patch(
+            "app.spam.chat_topics.derive_topic_summary",
+            side_effect=fake_derive,
+        ):
+            result = await scan_chat_topics(-100123)
+
+        assert result.status == "ok"
+        assert derive_inputs["text"].startswith(
+            "[CHAT BIO] PHP jobs and Laravel freelancing"
+        )
+        assert "What's the best framework?" in derive_inputs["text"]
+
+    @pytest.mark.asyncio
+    async def test_bio_only_corpus_derives_via_llm(
+        self, patched_db_conn, clean_db
+    ):
+        """Media-only chat with a bio -> derive from bio, no title fallback."""
+        await self._seed_group(clean_db, -100123, title="Photo Dump", username=None)
+
+        async def fake_call(method, **kwargs):
+            if method == "channels.getFullChannel":
+                return {"full_chat": {"about": "Curated drone photography"}}
+            return {"messages": [{"media": {"type": "photo"}}], "count": 1}
+
+        mock_client = MagicMock()
+        mock_client.call = AsyncMock(side_effect=fake_call)
+
+        summary = MagicMock()
+        summary.description = "Drone photo channel."
+        summary.short_description = "drone photos"
+
+        with patch(
+            "app.spam.chat_topics.get_mtproto_client",
+            return_value=mock_client,
+        ), patch(
+            "app.spam.chat_topics.derive_topic_summary",
+            return_value=summary,
+        ) as mock_derive:
+            result = await scan_chat_topics(-100123)
+
+        assert result.status == "ok"
+        mock_derive.assert_awaited_once()
+        assert mock_derive.await_args.args[0] == "[CHAT BIO] Curated drone photography"
+
+    @pytest.mark.asyncio
+    async def test_linked_channel_bio_used_when_channel_readable(
+        self, patched_db_conn, clean_db
+    ):
+        """Linked discussion: bio comes from the CHANNEL, not the group."""
+        await self._seed_group(
+            clean_db, -100123, title="Discussion", linked_channel_id=-100777
+        )
+
+        async def fake_call(method, **kwargs):
+            if method == "channels.getFullChannel":
+                return {"full_chat": {"about": "VPS and hosting deals"}}
+            if method == "messages.getFullChat":
+                return {"full_chat": {"about": "group bio (must NOT be used)"}}
+            return {"messages": [{"message": "Channel post about hosting"}],
+                    "count": 1}
+
+        mock_client = MagicMock()
+        mock_client.call = AsyncMock(side_effect=fake_call)
+
+        derive_inputs: dict[str, str] = {}
+
+        def fake_derive(text):
+            derive_inputs["text"] = text
+            s = MagicMock()
+            s.description = "VPS channel."
+            s.short_description = "VPS deals"
+            return s
+
+        with patch(
+            "app.spam.chat_topics.get_mtproto_client",
+            return_value=mock_client,
+        ), patch(
+            "app.spam.chat_topics.derive_topic_summary",
+            side_effect=fake_derive,
+        ):
+            result = await scan_chat_topics(-100123)
+
+        assert result.status == "ok"
+        assert derive_inputs["text"].startswith("[CHAT BIO] VPS and hosting deals")
+        assert "group bio" not in derive_inputs["text"]

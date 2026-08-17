@@ -304,8 +304,12 @@ async def handle_help_command(message: types.Message) -> str:
     return "command_help_sent"
 
 
-def _format_topic_age(topic_updated_at) -> str | None:
-    """Humanize topic age for the /scan result line. Returns None if unknown."""
+def _format_topic_age(topic_updated_at, lang: str) -> str | None:
+    """Humanized, localized topic age for /scan and /stats lines.
+
+    Returns None when the age is unknown; otherwise a localized phrase like
+    "today" / "3d ago" (en) or "сегодня" / "3 дн. назад" (ru).
+    """
     if not topic_updated_at:
         return None
     from datetime import datetime
@@ -319,10 +323,8 @@ def _format_topic_age(topic_updated_at) -> str | None:
         topic_updated_at = topic_updated_at.replace(tzinfo=UTC)
     days = (datetime.now(UTC) - topic_updated_at).days
     if days <= 0:
-        return "today"
-    if days == 1:
-        return "1d"
-    return f"{days}d"
+        return t(lang, "topic_age.today")
+    return t(lang, "topic_age.days", days=days)
 
 
 @dp.message(Command("scan"), F.chat.type == "private")
@@ -394,7 +396,7 @@ async def _run_scan_and_report(message: types.Message, group: dict, lang: str) -
     if result.status == "ok":
         # The scan just wrote topic_updated_at = NOW(), so the age is always
         # "today" — the pre-scan group dict would show a stale value instead.
-        age = _format_topic_age(datetime.now(UTC))
+        age = _format_topic_age(datetime.now(UTC), lang)
         age_note = f" ({age})" if age else ""
         await message.answer(
             t(
@@ -476,6 +478,7 @@ async def handle_stats_command(message: types.Message) -> str:
 
         if groups:
             message_text += t(lang, "stats.by_groups_header") + "\n"
+            blocks: list[str] = []
             for group in groups:
                 status_emoji = "✅" if group["is_moderation_enabled"] else "❌"
                 safe_title = html.escape(group["title"] or "", quote=True)
@@ -488,16 +491,18 @@ async def handle_stats_command(message: types.Message) -> str:
                     f"👤 {group['approved_users_count']}"
                 )
 
-                # Chat-topic line: short description + age when a scan exists.
+                # Chat-topic line: short description + localized age when a scan
+                # exists (no hardcoded "old" suffix — wording lives in locales).
                 topic_short = group.get("topic_description_short")
                 if topic_short:
-                    age = _format_topic_age(group.get("topic_updated_at"))
+                    age = _format_topic_age(group.get("topic_updated_at"), lang)
                     topic_line = f" │ {html.escape(topic_short, quote=True)}"
                     if age:
-                        topic_line += f" · {age} old"
+                        topic_line += f" · {age}"
                     stats_line += topic_line
 
-                message_text += f"{status_emoji} <b>{safe_title}</b>\n{stats_line}\n"
+                blocks.append(f"{status_emoji} <b>{safe_title}</b>\n{stats_line}")
+            message_text += "\n\n".join(blocks)
         else:
             message_text += t(lang, "stats.no_groups")
 

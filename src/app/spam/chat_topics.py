@@ -184,6 +184,32 @@ async def _fetch_sample(
     return sample, None
 
 
+async def _fetch_chat_bio(client: MtprotoHttpClient, peer: int | str) -> str | None:
+    """Fetch the chat/channel bio (about text) via the MTProto bridge.
+
+    Channels and supergroups expose it via channels.getFullChannel; plain
+    groups via messages.getFullChat. The bio is an optional extra signal for
+    the topic derivation — any failure or empty about returns None, never
+    raises (a missing bio must not fail a scan).
+    """
+    if peer is None:
+        return None
+    attempts = (
+        ("channels.getFullChannel", {"channel": peer}),
+        ("messages.getFullChat", {"chat_id": peer}),
+    )
+    for method, params in attempts:
+        try:
+            res = await client.call(method, params=params, resolve=True)
+        except MtprotoHttpError:
+            continue
+        full = res.get("full_chat") or {}
+        about = (full.get("about") or "").strip()
+        if about:
+            return about
+    return None
+
+
 async def scan_chat_topics(group_id: int) -> ChatTopicScanResult:
     """Derive and store a topic profile for a monitored chat.
 
@@ -247,6 +273,7 @@ async def scan_chat_topics(group_id: int) -> ChatTopicScanResult:
         # peer directly — channel posts are owner-authored by construction (the
         # "filter by channel owner" requirement). Fall back to the discussion
         # group's own messages if the channel peer is unreadable.
+        bio = None
         if linked_channel_id is not None:
             channel_peer = bot_api_chat_id_to_mtproto(linked_channel_id)
             sample, error = await _fetch_sample(client, channel_peer, limit)
@@ -257,14 +284,18 @@ async def scan_chat_topics(group_id: int) -> ChatTopicScanResult:
                     extra={"error": str(error)},
                 )
                 discussion_peer = username or bot_api_chat_id_to_mtproto(group_id)
+                bio = await _fetch_chat_bio(client, discussion_peer)
                 sample, error = await _fetch_sample(client, discussion_peer, limit)
                 if error:
                     return ChatTopicScanResult(
                         status="failed", detail="both_peers_unreadable"
                     )
+            else:
+                bio = await _fetch_chat_bio(client, channel_peer)
         else:
             # Plain group / discussion: all messages, minus bot-own + commands.
             peer = username or bot_api_chat_id_to_mtproto(group_id)
+            bio = await _fetch_chat_bio(client, peer)
             messages, _total, error = await fetch_recent_messages(client, peer, limit)
             if error:
                 return ChatTopicScanResult(status="failed", detail="fetch_failed")
@@ -277,9 +308,16 @@ async def scan_chat_topics(group_id: int) -> ChatTopicScanResult:
             max_total = _max_total_chars()
             sample = _trim_sample(raw, max_msg=max_msg, max_total=max_total)
 
-        # Empty sample: skip the LLM call entirely.
-        if not sample:
-            logger.info(f"Topic scan: empty sample for {chat_log}, skipping LLM")
+        # Corpus = sampled messages plus the chat/channel bio (if any): the bio
+        # anchors the topic derivation even in media-heavy chats with little text,
+        # and is fetched for the peer whose messages were actually scanned.
+        corpus = list(sample)
+        if bio:
+            corpus.insert(0, f"[CHAT BIO] {bio}")
+
+        # Empty corpus (no messages AND no bio): skip the LLM call entirely.
+        if not corpus:
+            logger.info(f"Topic scan: empty corpus for {chat_log}, skipping LLM")
             if was_scanned_before:
                 return ChatTopicScanResult(status="empty_kept_existing")
             # First scan: chat title fallback — state never empty.
@@ -295,7 +333,7 @@ async def scan_chat_topics(group_id: int) -> ChatTopicScanResult:
             )
 
         # Derive via LLM (gateway -> OpenRouter rotation, never raises).
-        sample_text = "\n---\n".join(sample)
+        sample_text = "\n---\n".join(corpus)
         summary = await derive_topic_summary(sample_text)
 
         if summary is None:

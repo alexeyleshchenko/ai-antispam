@@ -5,10 +5,10 @@ keyboard with scan_chat:<id> buttons. Callback re-validates admin, runs the scan
 and reports the outcome. Age helper formats topic_updated_at.
 """
 
-import pytest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from aiogram.types import CallbackQuery, Chat, Message, User
 
 from app.database import (
@@ -58,26 +58,33 @@ def _group_dict(group_id: int, title: str, topic_short=None, topic_updated=None)
 
 
 class TestFormatTopicAge:
+    """Localized age — English expectations unless ru explicitly passed."""
+
     def test_none_returns_none(self):
-        assert _format_topic_age(None) is None
+        assert _format_topic_age(None, "en") is None
 
     def test_today(self):
-        assert _format_topic_age(datetime.now(timezone.utc)) == "today"
+        assert _format_topic_age(datetime.now(UTC), "en") == "today"
 
     def test_three_days(self):
-        old = datetime.now(timezone.utc) - timedelta(days=3)
-        assert _format_topic_age(old) == "3d"
+        old = datetime.now(UTC) - timedelta(days=3)
+        assert _format_topic_age(old, "en") == "3d ago"
 
     def test_one_day(self):
-        old = datetime.now(timezone.utc) - timedelta(days=1)
-        assert _format_topic_age(old) == "1d"
+        old = datetime.now(UTC) - timedelta(days=1)
+        assert _format_topic_age(old, "en") == "1d ago"
 
     def test_iso_string_input(self):
-        old = datetime.now(timezone.utc) - timedelta(days=5)
-        assert _format_topic_age(old.isoformat()) == "5d"
+        old = datetime.now(UTC) - timedelta(days=5)
+        assert _format_topic_age(old.isoformat(), "en") == "5d ago"
 
     def test_garbage_string(self):
-        assert _format_topic_age("not-a-date") is None
+        assert _format_topic_age("not-a-date", "en") is None
+
+    def test_russian_localized(self):
+        old = datetime.now(UTC) - timedelta(days=2)
+        assert _format_topic_age(old, "ru") == "2 дн. назад"
+        assert _format_topic_age(datetime.now(UTC), "ru") == "сегодня"
 
 
 class TestScanCommand:
@@ -171,7 +178,7 @@ class TestScanCallback:
                 -100123,
                 "PHP Jobs",
                 topic_short="PHP jobs",
-                topic_updated=datetime.now(timezone.utc) - timedelta(days=3),
+                topic_updated=datetime.now(UTC) - timedelta(days=3),
             )
         ]
         with patch(
@@ -294,7 +301,7 @@ class TestStatsTopicLine:
         msg = _scan_message()
         groups = self._stats_groups(
             topic_short="PHP jobs",
-            topic_updated=datetime.now(timezone.utc) - timedelta(days=3),
+            topic_updated=datetime.now(UTC) - timedelta(days=3),
         )
         with patch(
             "app.handlers.command_handlers.get_admin",
@@ -327,7 +334,8 @@ class TestStatsTopicLine:
         assert result == "command_stats_sent"
         sent = msg.reply.call_args.args[0]
         assert "PHP jobs" in sent
-        assert "3d old" in sent
+        assert "3d ago" in sent  # localized, no hardcoded " old" suffix
+        assert "old" not in sent
 
     @pytest.mark.asyncio
     async def test_no_topic_leaves_line_unchanged(self):
