@@ -14,7 +14,6 @@ from aiogram.types import CallbackQuery, Chat, Message, User
 from app.database import (
     get_admin_groups,  # noqa: F401 — re-exported: used for patching by name
 )
-from app.database.models import ModerationMode
 from app.handlers.callback_handlers import (
     _reply_scan_result,
     handle_scan_chat_callback,
@@ -281,7 +280,7 @@ class TestReplyScanResult:
         cb.message.edit_text.assert_awaited_once()
 
 class TestStatsTopicLine:
-    """/stats per-group line: short topic + age when present, unchanged when NULL."""
+    """/stats HTML fallback: short topic shown; NULL topic leaves the card clean."""
 
     @staticmethod
     def _stats_groups(topic_short=None, topic_updated=None):
@@ -325,16 +324,13 @@ class TestStatsTopicLine:
                     "groups": groups,
                 }
             ),
-        ), patch(
-            "app.handlers.command_handlers.get_moderation_mode",
-            AsyncMock(return_value=ModerationMode.NOTIFY),
         ):
             result = await handle_stats_command(msg)
 
         assert result == "command_stats_sent"
         sent = msg.reply.call_args.args[0]
-        assert "PHP jobs" in sent
-        assert "3d ago" in sent  # localized, no hardcoded " old" suffix
+        assert "PHP Jobs" in sent
+        assert "📋 PHP jobs" in sent  # topic line in the HTML fallback card
         assert "old" not in sent
 
     @pytest.mark.asyncio
@@ -363,14 +359,11 @@ class TestStatsTopicLine:
                     "groups": groups,
                 }
             ),
-        ), patch(
-            "app.handlers.command_handlers.get_moderation_mode",
-            AsyncMock(return_value=ModerationMode.NOTIFY),
         ):
             result = await handle_stats_command(msg)
 
         assert result == "command_stats_sent"
         sent = msg.reply.call_args.args[0]
         assert "PHP Jobs" in sent
-        assert " │ " not in sent
+        assert "📋" not in sent  # no topic → no topic line in the card
         assert "old" not in sent
