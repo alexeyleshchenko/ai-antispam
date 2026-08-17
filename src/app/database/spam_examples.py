@@ -84,6 +84,9 @@ async def cleanup_pending_spam_examples(days: int = 7) -> int:
     """
     cutoff = datetime.now(UTC) - timedelta(days=days)
     pool = await get_pool()
+    # DELETE + audit event share one connection: the audit row is written from
+    # the same pool/connection as the DELETE, so a connection-level failure
+    # cannot leave a destroy-without-record gap (finding from PR review).
     async with pool.acquire() as conn:
         result = await conn.execute(
             """
@@ -93,12 +96,11 @@ async def cleanup_pending_spam_examples(days: int = 7) -> int:
             """,
             cutoff,
         )
-    count = int(result.split()[-1]) if result else 0
-    if count > 0:
-        logger.info(f"Cleaned up {count} stale pending spam examples")
-        # Append-only audit log (one row per run, not per row)
-        try:
-            async with pool.acquire() as conn:
+        count = int(result.split()[-1]) if result else 0
+        if count > 0:
+            logger.info(f"Cleaned up {count} stale pending spam examples")
+            try:
+                # Append-only audit log (one row per run, not per row)
                 await conn.execute(
                     """
                     INSERT INTO entity_events (entity_type, action, reason, old_row)
@@ -108,8 +110,8 @@ async def cleanup_pending_spam_examples(days: int = 7) -> int:
                     f"ttl_{days}d",
                     json.dumps({"deleted_count": count}),
                 )
-        except Exception:
-            logger.exception("Failed to write TTL batch event to entity_events")
+            except Exception:
+                logger.exception("Failed to write TTL batch event to entity_events")
     return count
 
 

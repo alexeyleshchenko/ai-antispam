@@ -57,6 +57,7 @@ async def get_group(group_id: int) -> Group | None:
             admin_ids=admin_ids,
             moderation_enabled=group_data["moderation_enabled"],
             member_ids=member_ids,
+            status=GroupStatus(group_data.get("status", GroupStatus.ACTIVE.value)),
             title=group_data.get("title"),
             username=group_data.get("username"),
             topic_description=group_data.get("topic_description"),
@@ -182,12 +183,18 @@ async def cleanup_group_data(
     status_value = status.value if isinstance(status, GroupStatus) else str(status)
 
     pool = await get_pool()
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
         # Snapshot the row before the transition (audit)
         old_row = await conn.fetchrow(
             "SELECT * FROM groups WHERE group_id = $1",
             group_id,
         )
+        if old_row is None:
+            logger.info(
+                f"cleanup_group_data: group {format_chat_log(group_id)} "
+                "not found — skipping cleanup"
+            )
+            return
 
         # Remove all admin associations
         await conn.execute(
@@ -309,7 +316,8 @@ async def get_admin_groups(admin_id: int) -> list[dict]:
         rows = await conn.fetch(
             """
             SELECT g.group_id, g.title, g.moderation_enabled,
-                   g.topic_description_short, g.topic_updated_at
+                   g.topic_description_short, g.topic_updated_at,
+                   g.status
             FROM groups g
             JOIN group_administrators ga ON g.group_id = ga.group_id
             WHERE ga.admin_id = $1
@@ -330,6 +338,7 @@ async def get_admin_groups(admin_id: int) -> list[dict]:
                         "is_moderation_enabled": row["moderation_enabled"],
                         "topic_description_short": row["topic_description_short"],
                         "topic_updated_at": row["topic_updated_at"],
+                        "status": row["status"],
                     }
                 )
             except Exception as e:
@@ -552,7 +561,7 @@ async def update_group_admins(
                 """,
                 group_id,
                 "group_reactivated",
-                "group_reactivated",
+                "re_add",
             )
 
         # Handle both old format (just IDs) and new format (IDs with usernames)

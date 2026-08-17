@@ -23,7 +23,6 @@ from app.database.spam_examples import (
     insert_pending_spam_example,
 )
 
-
 # ---------- cleanup_group_data ----------
 
 
@@ -363,3 +362,38 @@ async def test_scheduled_tasks_pending_spam_reads_config(monkeypatch):
     )
     ttls = scheduled_tasks._get_cache_ttl_days()
     assert ttls["pending_spam"] == 14
+
+
+@pytest.mark.asyncio
+async def test_cleanup_group_data_missing_group_writes_no_phantom_event(
+    patched_db_conn, clean_db
+):
+    """cleanup_group_data on a non-existent group_id must not write a phantom
+    entity_events row (audit integrity) and must not raise."""
+    missing_id = -99999
+    await cleanup_group_data(missing_id, status=GroupStatus.LEFT, reason="inaccessible_chat")
+
+    async with clean_db.acquire() as conn:
+        evs = await conn.fetch(
+            "SELECT * FROM entity_events WHERE entity_id = $1", missing_id
+        )
+        assert evs == []
+        # No mappings were deleted (nothing to delete), group still absent
+        row = await conn.fetchrow("SELECT 1 FROM groups WHERE group_id = $1", missing_id)
+        assert row is None
+
+
+@pytest.mark.asyncio
+async def test_get_group_reads_status_from_db(patched_db_conn, clean_db):
+    """get_group must surface the stored lifecycle status (review finding #1)."""
+    from app.database.group_operations import get_group
+
+    group_id = -1006
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO groups (group_id, title, status) VALUES ($1, 'Paused', 'paused')",
+            group_id,
+        )
+    grp = await get_group(group_id)
+    assert grp is not None
+    assert grp.status == GroupStatus.PAUSED

@@ -349,6 +349,7 @@ async def truncate_all_tables(conn: asyncpg.Connection):
         SELECT string_agg(quote_ident(tablename), ', ')
         FROM pg_tables
         WHERE schemaname = 'public'
+        AND tablename != 'entity_events'  -- audit log is append-only, never truncated
         """
     )
 

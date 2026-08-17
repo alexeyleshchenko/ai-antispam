@@ -1,7 +1,7 @@
 # Deletion policy — options research
 
 **Date:** 2026-08-17
-**Status:** Research / decision input (untracked — not for commit until a direction is chosen)
+**Status:** Decided and implemented (PR #14 — E+C hybrid: lifecycle status + entity_events audit log)
 **Context:** Alexey wants "never delete anything automatically", active/inactive flags, audit + rollback. Suspects better practices exist. This doc researches them and maps them onto the ai-antispam schema (from `docs/deletion-audit.md`).
 
 ## The two goals, separated

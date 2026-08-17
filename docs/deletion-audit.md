@@ -16,25 +16,33 @@ Schema reference (FKs from `database_schema.py`):
 
 ---
 
-## 1. Groups — the only hard, intentional deletion
+## 1. Groups — lifecycle transition (E+C), no hard delete
 
-**Function:** `cleanup_group_data(group_id)` (`group_operations.py:181`)
-Deletes exactly three things, transactionally:
-`group_administrators`, `approved_members`, `groups` row.
+**Function:** `cleanup_group_data(group_id, status, reason)` (`group_operations.py:181`)
+Implements the E+C deletion policy (see `deletion-policy-options.md`): the `groups` row
+is **never deleted**. It transitions `status` to `paused`/`left`, snapshots the old row,
+and writes an append-only `entity_events` audit row. Only the re-creatable mappings are
+hard-deleted, transactionally:
+`group_administrators`, `approved_members`.
 
 **Note:** `cleanup_group_data` does **not** delete `spam_examples`, `message_lookup_cache`,
-`message_history`, or `transactions` — those survive a group removal.
+`message_history`, or `transactions` — those survive a group removal. Audit events go to
+`entity_events` (append-only; a batch event per TTL cleanup run).
 
 ### Triggers (4 independent paths → 2 functions)
 
 | Trigger | Code | When |
 |---|---|---|
-| **Admin listing discovers inaccessible chat** | `get_admin_groups` (`group_operations.py:326`) | Any `/stats`, `/scan`, admin-groups listing → `bot.get_chat` raises Forbidden → flagged inaccessible → `cleanup_group_data`. This is the PR #4 marker-fix path. |
-| **Bot lacks rights past grace** | `leave_no_rights_groups` → `perform_complete_group_cleanup` (`no_rights.py:49`) | **Daily job.** Bot missing `delete_messages`/`restrict_members` for > `no_rights_grace_days` (7) → re-verify via `get_chat_member` → `bot.leave_chat` + cleanup. |
-| **No payment, sole payer, day 7** | `leave_sole_payer_groups` → `perform_complete_group_cleanup` (`low_balance.py:170`) | **Daily job.** Depletion warning (day 1), final warning (day 6), at `grace_days` (7) the bot leaves every group where the admin is the only payer. Admin DMed `low_balance.left_groups` — **"training examples are preserved"** is promised to the user here. |
-| **Notification total failure** | `notify_admins_with_fallback_and_cleanup` → `perform_complete_group_cleanup` (`notifications.py:278`) | Live event. No admin reachable in private **and** group message send fails → leave + cleanup. |
+| **Admin listing discovers inaccessible chat** | `get_admin_groups` (`group_operations.py:326`) | Any `/stats`, `/scan`, admin-groups listing → `bot.get_chat` raises Forbidden → flagged inaccessible → `cleanup_group_data(status=left)`. This is the PR #4 marker-fix path. |
+| **Bot lacks rights past grace** | `leave_no_rights_groups` → `perform_complete_group_cleanup(status=paused)` (`no_rights.py:49`) | **Daily job.** Bot missing `delete_messages`/`restrict_members` for > `no_rights_grace_days` (7) → re-verify via `get_chat_member` → `bot.leave_chat` + transition. |
+| **No payment, sole payer, day 7** | `leave_sole_payer_groups` → `perform_complete_group_cleanup(status=paused)` (`low_balance.py:170`) | **Daily job.** Depletion warning (day 1), final warning (day 6), at `grace_days` (7) the bot leaves every group where the admin is the only payer. Admin DMed `low_balance.left_groups` — **"training examples are preserved"** is promised to the user here. |
+| **Notification total failure** | `notify_admins_with_fallback_and_cleanup` → `perform_complete_group_cleanup(status=left)` (`notifications.py:278`) | Live event. No admin reachable in private **and** group message send fails → leave + transition. |
 
 `perform_complete_group_cleanup` (`notifications.py:27`): `bot.leave_chat` (Telegram side) then `cleanup_group_data` (DB side).
+
+**Rollback:** re-adding the bot to a paused/left group reactivates it — `update_group_admins`
+flips `status → active` and clears stale `no_rights_detected_at`, logging a `group_reactivated`
+event (`reason: re_add`).
 
 ### Telegram-side side-effects of group removal
 - `bot.leave_chat` (always, on cleanup)
