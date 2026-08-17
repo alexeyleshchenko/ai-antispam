@@ -165,15 +165,19 @@ async def test_handle_moderated_message_increments_after_probation_message(
 async def test_handle_moderated_message_injects_chat_topic(
     mock_message, mock_message_context_result
 ):
-    """group.topic_description reaches classify_spam as context.chat_topics.
+    """group.topic_description_short reaches classify_spam as context.chat_topics.
 
     Regression for the wiring point between the stored topic profile and the
-    classifier: if the group shape or the ctx assignment changes, this test
-    catches it (the injection is the only place chat_topics is set).
+    classifier: the short label (not the full prose) is what gets injected —
+    if the group shape or the ctx assignment changes, this test catches it
+    (the injection is the only place chat_topics is set).
     """
     mock_group = MagicMock()
     mock_group.admin_ids = [1]
-    mock_group.topic_description = "PHP jobs"
+    mock_group.topic_description = (
+        "A long full description that must NOT reach the classifier."
+    )
+    mock_group.topic_description_short = "PHP jobs"
 
     # Real context object — not a mock — so the attribute set is observable.
     ctx = SpamClassificationContext()

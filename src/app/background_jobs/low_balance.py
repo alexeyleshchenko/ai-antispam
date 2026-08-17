@@ -167,7 +167,9 @@ async def leave_sole_payer_groups(admin_id: int) -> None:
             except Exception:  # noqa: BLE001
                 left_groups.append(str(group_id))
 
-            success = await perform_complete_group_cleanup(group_id, title, username)
+            success = await perform_complete_group_cleanup(
+                group_id, title, username, status="paused", reason="low_balance_unpaid"
+            )
             if success:
                 logger.info(
                     f"Left sole-payer group {format_chat_log(group_id, title, username)} for dry admin {format_user_log(admin_id)}"

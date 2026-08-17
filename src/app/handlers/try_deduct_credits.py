@@ -70,23 +70,45 @@ async def handle_deactivation(chat_id: int) -> None:
     Args:
         chat_id: ID чата
     """
-    await set_group_moderation(chat_id, False)
-    chat = await bot.get_chat(chat_id)
-    if not chat.title:
+    # Fetch chat metadata first (best-effort): the deactivation itself must
+    # still happen even if the fetch fails, but when we CAN get the info we
+    # pass it into set_group_moderation so a fresh row is never created bare
+    # (no-metadata gap). COALESCE keeps existing values when the fetch failed.
+    title = username = None
+    try:
+        chat = await bot.get_chat(chat_id)
+        title = getattr(chat, "title", None)
+        username = getattr(chat, "username", None)
+    except Exception:  # noqa: BLE001
         logger.warning(
-            f"Failed to get chat title for {format_chat_log(chat_id, getattr(chat, 'title', None), getattr(chat, 'username', None))}"
+            f"Failed to get chat info for {format_chat_log(chat_id)} during deactivation"
+        )
+
+    await set_group_moderation(chat_id, False, title, username)
+
+    # Never return early on a missing title: the disable already happened, and the
+    # admin-notification path must still run. Fall back to the chat id for display
+    # so admins are still notified about deactivation (PR review finding).
+    display_title = title or str(chat_id)
+
+    logger.info(f"Moderation disabled for {format_chat_log(chat_id, display_title, username)}")
+
+    try:
+        admins = await bot.get_chat_administrators(chat_id)
+    except Exception:  # noqa: BLE001
+        # Chat fully unreachable (e.g. bot removed): nothing to notify, but the
+        # disable already happened — log and stop gracefully, not a crash.
+        logger.warning(
+            f"Failed to list admins for {format_chat_log(chat_id, display_title, username)} "
+            "during deactivation — skipping admin notifications"
         )
         return
 
-    chat_username = getattr(chat, "username", None)
-    logger.info(f"Moderation disabled for {format_chat_log(chat_id, chat.title, chat_username)}")
-
-    admins = await bot.get_chat_administrators(chat_id)
     min_credits_admin, min_credits = await find_min_credits_admin(admins)
 
     if min_credits_admin:
         logger.info(
-            f"Min-credits admin {min_credits_admin.user.id} (balance={min_credits}) for {format_chat_log(chat_id, chat.title, chat_username)}"
+            f"Min-credits admin {min_credits_admin.user.id} (balance={min_credits}) for {format_chat_log(chat_id, display_title, username)}"
         )
         bot_info = await bot.me()
         ref_link = f"https://t.me/{bot_info.username}?start={min_credits_admin.user.id}"
@@ -119,7 +141,7 @@ async def handle_deactivation(chat_id: int) -> None:
         group_displays: dict[str, str] = {}
         for lang_code in set(admin_langs.values()) | {default_lang}:
             group_displays[lang_code] = format_chat_or_channel_display(
-                chat.title, chat_username, t(lang_code, "common.group")
+                title, username, t(lang_code, "common.group")
             )
 
         def _deactivation_message(admin_id: int) -> str:
@@ -139,13 +161,13 @@ async def handle_deactivation(chat_id: int) -> None:
             assume_human_admins=True,
         )
         logger.info(
-            f"Deactivation notification for {format_chat_log(chat_id, chat.title, chat_username)}: "
+            f"Deactivation notification for {format_chat_log(chat_id, title, username)}: "
             f"{len(notify_result.get('notified_private', []))} admins notified in private, "
             f"{len(notify_result.get('unreachable', []))} unreachable"
         )
     else:
         logger.info(
-            f"No min-credits admin found for {format_chat_log(chat_id, chat.title, chat_username)} — nothing to notify"
+            f"No min-credits admin found for {format_chat_log(chat_id, title, username)} — nothing to notify"
         )
 
 

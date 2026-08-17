@@ -49,7 +49,7 @@ class ChatTopicScanResult:
 
 def _topic_scan_limit() -> int:
     """Fetch cap — how many recent messages we pull from MTProto."""
-    limit = load_config().get("spam", {}).get("topic_scan_limit", 100)
+    limit = load_config().get("spam", {}).get("topic_scan_limit", 30)
     return limit if isinstance(limit, int) and limit > 0 else 100
 
 
@@ -235,6 +235,13 @@ async def scan_chat_topics(group_id: int) -> ChatTopicScanResult:
                     linked_channel_id = resolved["linked_channel_id"]
                     title = resolved.get("title") or title
                     username = resolved.get("username") or username
+
+        # Sample purity note (accepted, 2026-08-17, efficiency review): spam
+        # messages that moderation DELETED (high-confidence auto-delete) are
+        # removed from Telegram itself, so getHistory never returns them — the
+        # sample is self-cleaning of handled spam. Residual pollution is only
+        # low-confidence spam that was kept (skip_auto_delete, admins notified).
+        # Accepted as-is: no message-ID->outcome index (schema cost > benefit).
 
         # Channel-protected discussion (linked_channel_id set): scan the channel
         # peer directly — channel posts are owner-authored by construction (the

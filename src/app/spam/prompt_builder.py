@@ -219,7 +219,7 @@ Some signs of irrelevant replies:
         """Add guidance for interpreting the chat's known topic profile."""
         self.prompt_parts.append("""
 ## CHAT TOPIC CONTEXT
-The "chat_topic" section describes what this chat is normally about.
+The "chat_topic" section is a short label of what this chat is normally about.
 
 HIGH SPAM INDICATOR: Messages that are off-topic for this chat — promos, scams,
 irrelevant offers that do not fit the chat's normal subject matter.

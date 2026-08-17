@@ -12,6 +12,7 @@ import asyncio
 import logging
 
 from ..common.utils import load_config
+from ..database.group_operations import heal_bare_group_rows
 from ..database.message_lookup import cleanup_old_lookup_entries
 from ..database.message_operations import cleanup_old_message_history
 from ..database.spam_examples import cleanup_pending_spam_examples
@@ -28,7 +29,7 @@ def _get_cache_ttl_days() -> dict[str, int]:
     return {
         "message_lookup": cfg.get("message_lookup_ttl_days", 7),
         "message_history": cfg.get("message_history_ttl_days", 1),
-        "pending_spam": cfg.get("pending_spam_ttl_days", 3),
+        "pending_spam": cfg.get("pending_spam_ttl_days", 7),
     }
 
 
@@ -59,6 +60,11 @@ async def run_scheduled_jobs() -> None:
         await cleanup_pending_spam_examples(days=ttl["pending_spam"])
     except Exception:
         logger.exception("pending spam_examples cleanup failed")
+
+    try:
+        await heal_bare_group_rows()
+    except Exception:
+        logger.exception("bare group rows heal failed")
 
 
 async def scheduled_jobs_loop() -> None:

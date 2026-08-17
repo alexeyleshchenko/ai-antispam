@@ -12,6 +12,7 @@ from app.database import (
     deduct_credits_from_admins,
     get_admin_group_ids,
     get_admin_groups,
+    heal_bare_group_rows,
     get_groups_with_no_rights_past_grace,
     get_moderation_event_count,
     get_paying_admins,
@@ -250,9 +251,22 @@ async def test_get_admin_groups_inaccessible_logs_info_and_cleans_db(
     assert not any(r.levelno >= logging.WARNING for r in caplog.records)
     assert any("inaccessible during admin stats" in r.message for r in caplog.records)
 
+    # E+C deletion policy: group row survives with lifecycle status + audit event
     async with clean_db.acquire() as conn:
-        row = await conn.fetchrow("SELECT 1 FROM groups WHERE group_id = $1", group_id)
-        assert row is None
+        group_row = await conn.fetchrow(
+            "SELECT status FROM groups WHERE group_id = $1", group_id
+        )
+        assert group_row is not None
+        assert group_row["status"] == "left"
+
+        event_row = await conn.fetchrow(
+            "SELECT action, reason FROM entity_events "
+            "WHERE entity_type = 'group' AND entity_id = $1",
+            group_id,
+        )
+        assert event_row is not None
+        assert event_row["action"] == "group_left"
+        assert event_row["reason"] == "inaccessible_chat"
 
 
 @pytest.mark.asyncio
@@ -612,3 +626,157 @@ async def test_discussion_order_convergence_awaiting_rights(patched_db_conn, cle
         )
     assert row_b["linked_channel_id"] == channel_id
     assert (row_b["moderation_enabled"] is False) or (row_b["moderation_enabled"] == 0)
+
+
+@pytest.mark.asyncio
+async def test_set_group_moderation_fills_metadata_on_new_row(patched_db_conn, clean_db):
+    """Metadata passed to set_group_moderation lands on a fresh row (no-metadata gap)."""
+    group_id = -10012345
+    await set_group_moderation(group_id, True, "My Group", "mygroup")
+
+    async with clean_db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT title, username, moderation_enabled FROM groups WHERE group_id = $1",
+            group_id,
+        )
+    assert row["title"] == "My Group"
+    assert row["username"] == "mygroup"
+    assert row["moderation_enabled"] == 1
+
+
+@pytest.mark.asyncio
+async def test_set_group_moderation_keeps_existing_metadata(patched_db_conn, clean_db):
+    """COALESCE on conflict: existing title/username survive a metadata-less call.
+
+    The SQLite test harness rewrites ON CONFLICT DO UPDATE into INSERT OR REPLACE
+    (not representative of Postgres), so the COALESCE-preserve semantics are
+    verified by spying on the SQL the function sends: the ON CONFLICT branch must
+    reference COALESCE(EXCLUDED.*, groups.*).
+    """
+    group_id = -10012346
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO groups (group_id, title, username, moderation_enabled) "
+            "VALUES ($1, 'Existing', 'existing', TRUE)",
+            group_id,
+        )
+
+    async with clean_db.acquire() as conn:
+        with patch.object(conn, "execute", wraps=conn.execute) as spy:
+            await set_group_moderation(group_id, False)
+            sql = spy.call_args.args[0]
+
+    assert "COALESCE(EXCLUDED.title, groups.title)" in sql
+    assert "COALESCE(EXCLUDED.username, groups.username)" in sql
+    assert "moderation_enabled = EXCLUDED.moderation_enabled" in sql
+
+    # And the disable still lands (moderation flag flipped).
+    async with clean_db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT title, username, moderation_enabled FROM groups WHERE group_id = $1",
+            group_id,
+        )
+    assert row["moderation_enabled"] == 0
+
+
+@pytest.mark.asyncio
+async def test_set_group_moderation_backward_compatible_bare_call(patched_db_conn, clean_db):
+    """Old two-arg call still works (bare row creation remains allowed)."""
+    group_id = -10012347
+    await set_group_moderation(group_id, True)
+
+    async with clean_db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT title, username, moderation_enabled FROM groups WHERE group_id = $1",
+            group_id,
+        )
+    assert row["moderation_enabled"] == 1
+    assert row["title"] is None  # bare — healed later by the scheduled job
+
+
+@pytest.mark.asyncio
+async def test_heal_bare_group_rows_fills_metadata(patched_db_conn, clean_db):
+    """Bare rows are resolved and filled incl. linked_channel_id; exists rows untouched."""
+    bare_a = -1001
+    bare_b = -1002
+    known = -1003
+    async with clean_db.acquire() as conn:
+        await conn.execute("INSERT INTO groups (group_id, moderation_enabled) VALUES ($1, TRUE)", bare_a)
+        await conn.execute("INSERT INTO groups (group_id, moderation_enabled) VALUES ($1, TRUE)", bare_b)
+        await conn.execute(
+            "INSERT INTO groups (group_id, title, moderation_enabled) VALUES ($1, 'Known', TRUE)",
+            known,
+        )
+
+    def fake_chat(group_id):
+        return MagicMock(
+            title=f"Chat {group_id}",
+            username=f"user{group_id}",
+            linked_chat_id=-2001 if group_id == bare_a else None,
+        )
+
+    with patch("app.database.group_operations.bot") as mock_bot:
+        mock_bot.get_chat = AsyncMock(side_effect=lambda gid: fake_chat(gid))
+        summary = await heal_bare_group_rows(concurrency=2, limit=100)
+
+    assert summary["healed"] == 2
+    assert summary["skipped"] == 0
+    assert summary["total"] == 2
+
+    async with clean_db.acquire() as conn:
+        row_a = await conn.fetchrow("SELECT * FROM groups WHERE group_id = $1", bare_a)
+        row_b = await conn.fetchrow("SELECT * FROM groups WHERE group_id = $1", bare_b)
+        row_k = await conn.fetchrow("SELECT title FROM groups WHERE group_id = $1", known)
+    assert row_a["title"] == "Chat -1001"
+    assert row_a["username"] == "user-1001"
+    assert row_a["linked_channel_id"] == -2001
+    assert row_b["title"] == "Chat -1002"
+    assert row_k["title"] == "Known"  # non-bare row untouched
+
+
+@pytest.mark.asyncio
+async def test_heal_bare_group_rows_skips_unreachable_never_raises(
+    patched_db_conn, clean_db, caplog
+):
+    """Forbidden/bad-request chats are skipped+counted; the loop never raises."""
+    bare_a = -1001
+    bare_b = -1002
+    async with clean_db.acquire() as conn:
+        await conn.execute("INSERT INTO groups (group_id, moderation_enabled) VALUES ($1, TRUE)", bare_a)
+        await conn.execute("INSERT INTO groups (group_id, moderation_enabled) VALUES ($1, TRUE)", bare_b)
+
+    forbidden = TelegramForbiddenError(method=MagicMock(), message="Forbidden: bot is not a member")
+    bad = TelegramBadRequest(method=MagicMock(), message="Bad Request: chat not found")
+
+    def fake_get_chat(gid):
+        if gid == bare_a:
+            raise forbidden
+        raise bad
+
+    with patch("app.database.group_operations.bot") as mock_bot:
+        mock_bot.get_chat = AsyncMock(side_effect=fake_get_chat)
+        with caplog.at_level(logging.INFO, logger="app.database.group_operations"):
+            summary = await heal_bare_group_rows(concurrency=2, limit=100)
+
+    assert summary == {"healed": 0, "skipped": 2, "total": 2}
+    # rows still bare (untouched)
+    async with clean_db.acquire() as conn:
+        count = await conn.fetchval(
+            "SELECT count(*) FROM groups WHERE title IS NULL AND username IS NULL"
+        )
+    assert count == 2
+
+
+@pytest.mark.asyncio
+async def test_heal_bare_group_rows_skips_no_title_chats(patched_db_conn, clean_db):
+    """Private chats (no title) are skipped, not marked healed."""
+    bare_a = 123456  # positive id = private chat
+    async with clean_db.acquire() as conn:
+        await conn.execute("INSERT INTO groups (group_id, moderation_enabled) VALUES ($1, TRUE)", bare_a)
+
+    chat = MagicMock(title=None, username=None, linked_chat_id=None)
+    with patch("app.database.group_operations.bot") as mock_bot:
+        mock_bot.get_chat = AsyncMock(return_value=chat)
+        summary = await heal_bare_group_rows(concurrency=2, limit=100)
+
+    assert summary == {"healed": 0, "skipped": 1, "total": 1}

@@ -262,7 +262,7 @@ class SpamClassificationContext:
     is_channel_sender: bool = False
     # DB replay: raw ACCOUNT SIGNALS body from spam_examples / cache (photo + optional is_premium lines)
     account_signals_snapshot: str | None = None
-    # Chat-topic profile (derived by /scan): what this chat is normally about.
+    # Chat-topic signal (derived by /scan): short label of what this chat is normally about.
     chat_topics: str | None = None
 
     @property

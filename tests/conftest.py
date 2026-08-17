@@ -339,6 +339,7 @@ async def create_sqlite_schema(conn):
             title TEXT,
             username TEXT,
             moderation_enabled BOOLEAN DEFAULT 1,
+            status TEXT NOT NULL DEFAULT 'active',
             linked_channel_id INTEGER,
             topic_description TEXT,
             topic_description_short TEXT,
@@ -434,6 +435,18 @@ async def create_sqlite_schema(conn):
         );
     """)
 
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS entity_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type TEXT NOT NULL,
+            entity_id INTEGER,  -- NULL for batch events (e.g. TTL cleanup)
+            action TEXT NOT NULL,
+            reason TEXT,
+            old_row TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+
 
 async def truncate_sqlite_tables(conn):
     """Truncate all tables in SQLite"""
@@ -450,6 +463,7 @@ async def truncate_sqlite_tables(conn):
         "group_administrators",
         "groups",
         "administrators",
+        "entity_events",
     ]
 
     for table in tables:
