@@ -3,7 +3,13 @@ import json
 import logging
 from typing import cast
 
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+)
 
 from ..common.bot import bot
 from ..common.telegram_errors import GROUP_ANONYMOUS_BOT_ID, is_group_inaccessible_error
@@ -787,18 +793,27 @@ async def heal_bare_group_rows(concurrency: int = 5, limit: int = 500) -> dict[s
                         group_id,
                     )
                 healed += 1
-            except Exception as e:  # noqa: BLE001
-                if is_group_inaccessible_error(e) or isinstance(e, TelegramBadRequest):
-                    logger.info(
-                        f"heal_bare_group_rows: skipping inaccessible chat "
-                        f"{format_chat_log(group_id)}: {e}"
-                    )
-                else:
-                    logger.warning(
-                        f"heal_bare_group_rows: failed for "
-                        f"{format_chat_log(group_id)}: {e}"
-                    )
+            except (
+                TelegramBadRequest,
+                TelegramForbiddenError,
+                TelegramRetryAfter,
+                TelegramNetworkError,
+                TelegramAPIError,
+            ) as e:
+                # Telegram-side failures (chat inaccessible): expected, skip quietly
+                logger.info(
+                    f"heal_bare_group_rows: skipping inaccessible chat "
+                    f"{format_chat_log(group_id)}: {e}"
+                )
                 skipped += 1
+            except Exception as e:  # noqa: BLE001
+                # DB errors / unexpected failures: must NOT be swallowed as skips —
+                # a persistent DB issue would silently retry every bare row forever
+                # with no escalation (PR review finding).
+                logger.error(
+                    f"heal_bare_group_rows: DB/unknown failure for "
+                    f"{format_chat_log(group_id)}: {e}"
+                )
 
     await asyncio.gather(*(heal_one(row["group_id"]) for row in rows))
     logger.info(

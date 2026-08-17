@@ -86,20 +86,29 @@ async def handle_deactivation(chat_id: int) -> None:
 
     await set_group_moderation(chat_id, False, title, username)
 
-    if not title:
+    # Never return early on a missing title: the disable already happened, and the
+    # admin-notification path must still run. Fall back to the chat id for display
+    # so admins are still notified about deactivation (PR review finding).
+    display_title = title or str(chat_id)
+
+    logger.info(f"Moderation disabled for {format_chat_log(chat_id, display_title, username)}")
+
+    try:
+        admins = await bot.get_chat_administrators(chat_id)
+    except Exception:  # noqa: BLE001
+        # Chat fully unreachable (e.g. bot removed): nothing to notify, but the
+        # disable already happened — log and stop gracefully, not a crash.
         logger.warning(
-            f"Failed to get chat title for {format_chat_log(chat_id, title, username)}"
+            f"Failed to list admins for {format_chat_log(chat_id, display_title, username)} "
+            "during deactivation — skipping admin notifications"
         )
         return
 
-    logger.info(f"Moderation disabled for {format_chat_log(chat_id, title, username)}")
-
-    admins = await bot.get_chat_administrators(chat_id)
     min_credits_admin, min_credits = await find_min_credits_admin(admins)
 
     if min_credits_admin:
         logger.info(
-            f"Min-credits admin {min_credits_admin.user.id} (balance={min_credits}) for {format_chat_log(chat_id, title, username)}"
+            f"Min-credits admin {min_credits_admin.user.id} (balance={min_credits}) for {format_chat_log(chat_id, display_title, username)}"
         )
         bot_info = await bot.me()
         ref_link = f"https://t.me/{bot_info.username}?start={min_credits_admin.user.id}"
