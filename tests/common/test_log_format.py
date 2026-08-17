@@ -38,8 +38,7 @@ class TestFormatUserLog:
 
     def test_with_name_and_username(self):
         assert (
-            format_user_log(123, name="John", username="john")
-            == "123 ('John' @john)"
+            format_user_log(123, name="John", username="john") == "123 ('John' @john)"
         )
 
     def test_negative_id(self):

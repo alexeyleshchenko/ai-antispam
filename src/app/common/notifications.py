@@ -151,7 +151,9 @@ async def notify_admins_with_fallback_and_cleanup(
             # Use admin_chat if available, otherwise we'll handle fallback without it
             if admin_chat:
                 last_admin_info = admin_chat
-            logger.debug(f"Successfully notified admin {format_user_log(admin_id, getattr(admin_chat, 'first_name', None) if admin_chat else None, getattr(admin_chat, 'username', None) if admin_chat else None)} in private")
+            logger.debug(
+                f"Successfully notified admin {format_user_log(admin_id, getattr(admin_chat, 'first_name', None) if admin_chat else None, getattr(admin_chat, 'username', None) if admin_chat else None)} in private"
+            )
         except Exception as e:
             # When tenacity exhausts retries, it wraps the exception in RetryError.
             # Unwrap it so existing TelegramBadRequest handlers work correctly.
@@ -176,7 +178,10 @@ async def notify_admins_with_fallback_and_cleanup(
                     # Don't treat content parsing errors as "unreachable admin"
                     # These should be fixed in the message formatting, not trigger fallback
                     continue
-                elif "chat not found" in error_msg.lower() or is_message_not_found_error(e):
+                elif (
+                    "chat not found" in error_msg.lower()
+                    or is_message_not_found_error(e)
+                ):
                     # User has not started a conversation with the bot — expected for
                     # admins who never messaged the bot. Log at debug, not warning.
                     logger.debug(
@@ -214,7 +219,8 @@ async def notify_admins_with_fallback_and_cleanup(
                     unreachable.append(admin_id)
             else:
                 logger.info(
-                    f"Failed to notify admin {format_user_log(admin_id)} in private: {e}", exc_info=True
+                    f"Failed to notify admin {format_user_log(admin_id)} in private: {e}",
+                    exc_info=True,
                 )
                 unreachable.append(admin_id)
             with contextlib.suppress(Exception):

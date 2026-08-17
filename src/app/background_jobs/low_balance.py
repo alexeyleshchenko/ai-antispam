@@ -125,7 +125,9 @@ async def check_depletion_timeline() -> None:
             text = t(lang, "low_balance.depleted", deadline=deadline_str)
             if await send_admin_dm(admin_id, text, log_context="low balance"):
                 await mark_depletion_day_1_warned(admin_id)
-                logger.info(f"Sent day-1 depletion warning to admin {format_user_log(admin_id)}")
+                logger.info(
+                    f"Sent day-1 depletion warning to admin {format_user_log(admin_id)}"
+                )
 
         # Day 6: final warning (once per depletion cycle)
         elif (
@@ -137,7 +139,9 @@ async def check_depletion_timeline() -> None:
             text = t(lang, "low_balance.tomorrow")
             if await send_admin_dm(admin_id, text, log_context="low balance"):
                 await mark_depletion_day_6_warned(admin_id)
-                logger.info(f"Sent day-6 depletion warning to admin {format_user_log(admin_id)}")
+                logger.info(
+                    f"Sent day-6 depletion warning to admin {format_user_log(admin_id)}"
+                )
 
 
 async def leave_sole_payer_groups(admin_id: int) -> None:
@@ -175,7 +179,9 @@ async def leave_sole_payer_groups(admin_id: int) -> None:
                     f"Left sole-payer group {format_chat_log(group_id, title, username)} for dry admin {format_user_log(admin_id)}"
                 )
             else:
-                logger.warning(f"Failed to leave group {format_chat_log(group_id, title, username)} for admin {format_user_log(admin_id)}")
+                logger.warning(
+                    f"Failed to leave group {format_chat_log(group_id, title, username)} for admin {format_user_log(admin_id)}"
+                )
 
     if left_groups:
         groups_list = "\n• ".join(left_groups)

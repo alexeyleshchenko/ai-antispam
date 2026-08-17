@@ -63,15 +63,21 @@ class TestDeriveTopicSummary:
         or_agent = MagicMock()
         or_agent.run = AsyncMock(return_value=fake_result)
 
-        with patch(
-            "src.app.agents._get_openrouter_topic_agents",
-            return_value=[or_agent],
-        ), patch(
-            "src.app.agents.get_openrouter_topic_agent",
-            return_value=or_agent,
-        ), patch(
-            "src.app.agents.get_gateway_topic_agent",
-            side_effect=AssertionError("gateway must not be called when OpenRouter succeeds"),
+        with (
+            patch(
+                "src.app.agents._get_openrouter_topic_agents",
+                return_value=[or_agent],
+            ),
+            patch(
+                "src.app.agents.get_openrouter_topic_agent",
+                return_value=or_agent,
+            ),
+            patch(
+                "src.app.agents.get_gateway_topic_agent",
+                side_effect=AssertionError(
+                    "gateway must not be called when OpenRouter succeeds"
+                ),
+            ),
         ):
             result = await derive_topic_summary("sample text", timeout=1)
 
@@ -89,12 +95,15 @@ class TestDeriveTopicSummary:
         agent = MagicMock()
         agent.run = AsyncMock(return_value=fake_result)
 
-        with patch(
-            "src.app.agents._get_openrouter_topic_agents",
-            return_value=[],
-        ), patch(
-            "src.app.agents.get_gateway_topic_agent",
-            return_value=agent,
+        with (
+            patch(
+                "src.app.agents._get_openrouter_topic_agents",
+                return_value=[],
+            ),
+            patch(
+                "src.app.agents.get_gateway_topic_agent",
+                return_value=agent,
+            ),
         ):
             result = await derive_topic_summary("sample text", timeout=1)
 
@@ -112,12 +121,17 @@ class TestDeriveTopicSummary:
         gateway_agent = MagicMock()
         gateway_agent.run = AsyncMock(return_value=fake_result)
 
-        with patch(
-            "src.app.agents._get_openrouter_topic_agents",
-            side_effect=ValueError("OPENROUTER_API_KEY environment variable is required"),
-        ), patch(
-            "src.app.agents.get_gateway_topic_agent",
-            return_value=gateway_agent,
+        with (
+            patch(
+                "src.app.agents._get_openrouter_topic_agents",
+                side_effect=ValueError(
+                    "OPENROUTER_API_KEY environment variable is required"
+                ),
+            ),
+            patch(
+                "src.app.agents.get_gateway_topic_agent",
+                return_value=gateway_agent,
+            ),
         ):
             result = await derive_topic_summary("sample text", timeout=1)
 
@@ -137,18 +151,23 @@ class TestDeriveTopicSummary:
         gateway_agent = MagicMock()
         gateway_agent.run = AsyncMock(return_value=fake_result)
 
-        with patch(
-            "src.app.agents._get_openrouter_topic_agents",
-            return_value=[failing_agent],
-        ), patch(
-            "src.app.agents.get_openrouter_topic_agent",
-            return_value=failing_agent,
-        ), patch(
-            "src.app.agents._next_openrouter_topic_agent",
-            return_value=failing_agent,
-        ), patch(
-            "src.app.agents.get_gateway_topic_agent",
-            return_value=gateway_agent,
+        with (
+            patch(
+                "src.app.agents._get_openrouter_topic_agents",
+                return_value=[failing_agent],
+            ),
+            patch(
+                "src.app.agents.get_openrouter_topic_agent",
+                return_value=failing_agent,
+            ),
+            patch(
+                "src.app.agents._next_openrouter_topic_agent",
+                return_value=failing_agent,
+            ),
+            patch(
+                "src.app.agents.get_gateway_topic_agent",
+                return_value=gateway_agent,
+            ),
         ):
             result = await derive_topic_summary("sample text", timeout=1)
 
@@ -158,12 +177,15 @@ class TestDeriveTopicSummary:
     @pytest.mark.asyncio
     async def test_all_models_fail_returns_none(self):
         """OpenRouter pool empty AND gateway fails -> None (no exception escapes)."""
-        with patch(
-            "src.app.agents._get_openrouter_topic_agents",
-            return_value=[],
-        ), patch(
-            "src.app.agents.get_gateway_topic_agent",
-            side_effect=RuntimeError("gateway down"),
+        with (
+            patch(
+                "src.app.agents._get_openrouter_topic_agents",
+                return_value=[],
+            ),
+            patch(
+                "src.app.agents.get_gateway_topic_agent",
+                side_effect=RuntimeError("gateway down"),
+            ),
         ):
             result = await derive_topic_summary("sample text", timeout=1)
 
@@ -175,18 +197,23 @@ class TestDeriveTopicSummary:
         failing_agent = MagicMock()
         failing_agent.run = AsyncMock(side_effect=RuntimeError("model exploded"))
 
-        with patch(
-            "src.app.agents._get_openrouter_topic_agents",
-            return_value=[failing_agent],
-        ), patch(
-            "src.app.agents.get_openrouter_topic_agent",
-            return_value=failing_agent,
-        ), patch(
-            "src.app.agents._next_openrouter_topic_agent",
-            return_value=failing_agent,
-        ), patch(
-            "src.app.agents.get_gateway_topic_agent",
-            side_effect=RuntimeError("gateway down"),
+        with (
+            patch(
+                "src.app.agents._get_openrouter_topic_agents",
+                return_value=[failing_agent],
+            ),
+            patch(
+                "src.app.agents.get_openrouter_topic_agent",
+                return_value=failing_agent,
+            ),
+            patch(
+                "src.app.agents._next_openrouter_topic_agent",
+                return_value=failing_agent,
+            ),
+            patch(
+                "src.app.agents.get_gateway_topic_agent",
+                side_effect=RuntimeError("gateway down"),
+            ),
         ):
             result = await derive_topic_summary("sample text", timeout=1)
 

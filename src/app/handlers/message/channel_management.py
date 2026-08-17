@@ -346,7 +346,8 @@ async def notify_channel_admins(
         )
     except Exception as e:
         logger.warning(
-            f"Failed to get channel admins for {format_chat_log(chat.id, chat.title, getattr(chat, 'username', None))}: {e}", exc_info=True
+            f"Failed to get channel admins for {format_chat_log(chat.id, chat.title, getattr(chat, 'username', None))}: {e}",
+            exc_info=True,
         )
         return notified_admins
 
@@ -365,7 +366,8 @@ async def notify_channel_admins(
             notified_admins.append(admin_id)
         except Exception as e:
             logger.warning(
-                f"Failed to send instruction to admin {format_user_log(admin_id, admin.user.full_name, getattr(admin.user, 'username', None))}: {e}", exc_info=True
+                f"Failed to send instruction to admin {format_user_log(admin_id, admin.user.full_name, getattr(admin.user, 'username', None))}: {e}",
+                exc_info=True,
             )
 
     return notified_admins

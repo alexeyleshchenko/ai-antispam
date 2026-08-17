@@ -1,4 +1,3 @@
-
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -59,8 +58,11 @@ class TestNotifyAdminsWithCleanup:
 
             # Should call the complete cleanup function
             mock_cleanup.assert_called_once_with(
-                group_id, None, None,
-                status="left", reason="notification_delivery_failure",
+                group_id,
+                None,
+                None,
+                status="left",
+                reason="notification_delivery_failure",
             )
 
             # Should return cleanup result
@@ -260,7 +262,9 @@ class TestNotifyAdminsChatNotFound:
         return bot
 
     @pytest.mark.asyncio
-    async def test_send_message_chat_not_found_logs_debug_not_warning(self, mock_bot, caplog):
+    async def test_send_message_chat_not_found_logs_debug_not_warning(
+        self, mock_bot, caplog
+    ):
         """When send_message fails with 'chat not found', log at debug level."""
         admin_ids = [8553558763]
         group_id = -1001234567890
@@ -268,7 +272,8 @@ class TestNotifyAdminsChatNotFound:
         # get_chat succeeds (bot can read user info), but send_message fails
         mock_bot.get_chat.return_value = MagicMock(type="private", is_bot=False)
         mock_bot.send_message.side_effect = TelegramBadRequest(
-            method=MagicMock(), message="Telegram server says - Bad Request: chat not found"
+            method=MagicMock(),
+            message="Telegram server says - Bad Request: chat not found",
         )
 
         result = await notify_admins_with_fallback_and_cleanup(

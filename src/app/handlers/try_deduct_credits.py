@@ -54,7 +54,9 @@ async def try_deduct_credits(chat_id: int, amount: int, reason: str) -> bool:
             username = getattr(chat, "username", None)
         except Exception:  # noqa: BLE001
             title = username = None
-        logger.warning(f"No paying admins in chat {format_chat_log(chat_id, title, username)} for {reason}")
+        logger.warning(
+            f"No paying admins in chat {format_chat_log(chat_id, title, username)} for {reason}"
+        )
         await handle_deactivation(chat_id)
         return False
 
@@ -91,7 +93,9 @@ async def handle_deactivation(chat_id: int) -> None:
     # so admins are still notified about deactivation (PR review finding).
     display_title = title or str(chat_id)
 
-    logger.info(f"Moderation disabled for {format_chat_log(chat_id, display_title, username)}")
+    logger.info(
+        f"Moderation disabled for {format_chat_log(chat_id, display_title, username)}"
+    )
 
     try:
         admins = await bot.get_chat_administrators(chat_id)
@@ -127,9 +131,7 @@ async def handle_deactivation(chat_id: int) -> None:
 
         # Pre-resolve admin languages and group display names
         default_lang = "en"
-        admin_objs = await asyncio.gather(
-            *(get_admin(aid) for aid in human_admin_ids)
-        )
+        admin_objs = await asyncio.gather(*(get_admin(aid) for aid in human_admin_ids))
         admin_langs: dict[int, str] = {}
         for aid, admin_obj in zip(human_admin_ids, admin_objs):
             admin_langs[aid] = (
@@ -156,7 +158,8 @@ async def handle_deactivation(chat_id: int) -> None:
             human_admin_ids,
             chat_id,
             private_message=_deactivation_message,
-            group_message_template="{mention}, " + t(default_lang, "deactivate.group_fallback_message"),
+            group_message_template="{mention}, "
+            + t(default_lang, "deactivate.group_fallback_message"),
             cleanup_if_group_fails=False,
             assume_human_admins=True,
         )
@@ -262,6 +265,3 @@ async def send_group_deactivation_message(
             f"Failed to send group deactivation message to {format_chat_log(chat_id, title, username)}: {e}",
             exc_info=True,
         )
-
-
-

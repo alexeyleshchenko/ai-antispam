@@ -61,4 +61,3 @@ def test_no_literal_backslash_n_in_locales() -> None:
         "Literal '\\n' in locale values (use double-quoted YAML for real "
         "newlines):\n  " + "\n  ".join(offenders)
     )
-

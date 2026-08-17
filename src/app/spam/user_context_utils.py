@@ -155,7 +155,9 @@ DEFAULT_OFFSET = 0
 DEFAULT_HASH = 0
 
 
-def _build_get_replies_params(peer: Any, msg_id: int, limit: int = THREAD_MESSAGE_LIMIT) -> dict:
+def _build_get_replies_params(
+    peer: Any, msg_id: int, limit: int = THREAD_MESSAGE_LIMIT
+) -> dict:
     """Build standard MTProto params for messages.getReplies."""
     return {
         "peer": peer,
@@ -170,7 +172,9 @@ def _build_get_replies_params(peer: Any, msg_id: int, limit: int = THREAD_MESSAG
     }
 
 
-def _build_history_params(peer: Any, offset_id: int, limit: int = DEFAULT_MESSAGE_LIMIT) -> dict:
+def _build_history_params(
+    peer: Any, offset_id: int, limit: int = DEFAULT_MESSAGE_LIMIT
+) -> dict:
     """Build standard MTProto params for messages.getHistory."""
     return {
         "peer": peer,
@@ -484,7 +488,9 @@ async def establish_context_via_thread_reading(
 
         # Read recent messages in the thread to establish peer context
         # This includes messages from various users, helping with peer resolution
-        assert target_message_id is not None  # guaranteed by caller for thread-based path
+        assert (
+            target_message_id is not None
+        )  # guaranteed by caller for thread-based path
         thread_result = await client.call(
             "messages.getReplies",
             params=_build_get_replies_params(chat_identifier, target_message_id),
@@ -509,7 +515,10 @@ async def establish_context_via_thread_reading(
             anchor_id = None
             if target_message_id is not None:
                 anchor_id = await _resolve_grouped_album_anchor(
-                    channel_chat_id, target_chat_username, target_message_id, logging_context
+                    channel_chat_id,
+                    target_chat_username,
+                    target_message_id,
+                    logging_context,
                 )
             if anchor_id is not None:
                 try:
@@ -524,7 +533,10 @@ async def establish_context_via_thread_reading(
                     )
                     logger.debug(
                         "Grouped album anchor GetReplies succeeded",
-                        extra={**logging_context, "messages_found": len(thread_result.get("messages", []))},
+                        extra={
+                            **logging_context,
+                            "messages_found": len(thread_result.get("messages", [])),
+                        },
                     )
                     return True
                 except Exception as e:
@@ -588,7 +600,11 @@ async def _resolve_grouped_album_anchor(
         # so 20 is generous enough to always capture the full group.
         result = await client.call(
             "messages.getHistory",
-            params=_build_history_params(channel_identifier, msg_id + HISTORY_OFFSET_INCREMENT, GROUPED_ALBUM_SEARCH_LIMIT),
+            params=_build_history_params(
+                channel_identifier,
+                msg_id + HISTORY_OFFSET_INCREMENT,
+                GROUPED_ALBUM_SEARCH_LIMIT,
+            ),
             resolve=True,
         )
 
@@ -597,11 +613,7 @@ async def _resolve_grouped_album_anchor(
             return None
 
         target_grouped_id = next(
-            (
-                msg.get("grouped_id")
-                for msg in messages
-                if msg.get("id") == msg_id
-            ),
+            (msg.get("grouped_id") for msg in messages if msg.get("id") == msg_id),
             None,
         )
         if target_grouped_id is None:
@@ -609,7 +621,11 @@ async def _resolve_grouped_album_anchor(
 
         # Find the first message in the group (lowest ID with matching grouped_id)
         anchor_msg_id = min(
-            (msg.get("id", msg_id) for msg in messages if msg.get("grouped_id") == target_grouped_id),
+            (
+                msg.get("id", msg_id)
+                for msg in messages
+                if msg.get("grouped_id") == target_grouped_id
+            ),
             default=msg_id,
         )
 
@@ -654,7 +670,11 @@ async def _fallback_discussion_group_reading(
     try:
         result = await client.call(
             "messages.getHistory",
-            params=_build_history_params(group_identifier, context.message_id + HISTORY_OFFSET_INCREMENT, THREAD_MESSAGE_LIMIT),
+            params=_build_history_params(
+                group_identifier,
+                context.message_id + HISTORY_OFFSET_INCREMENT,
+                THREAD_MESSAGE_LIMIT,
+            ),
             resolve=True,
         )
 

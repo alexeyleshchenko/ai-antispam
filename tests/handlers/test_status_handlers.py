@@ -153,7 +153,9 @@ class TestIsAutoAddDiscussionUpdate:
     @pytest.mark.asyncio
     async def test_channel_add_not_detected(self):
         """A channel (not supergroup) add is never auto-add."""
-        assert await self._detect(_event(chat_type="channel", chat_id=CHANNEL_ID)) is False
+        assert (
+            await self._detect(_event(chat_type="channel", chat_id=CHANNEL_ID)) is False
+        )
 
     @pytest.mark.asyncio
     async def test_plain_supergroup_add_not_detected(self):
@@ -171,7 +173,9 @@ class TestIsAutoAddDiscussionUpdate:
     @pytest.mark.asyncio
     async def test_removal_not_detected(self):
         """member→left (bot removed) is not an auto-add."""
-        assert await self._detect(_event(old_status="member", new_status="left")) is False
+        assert (
+            await self._detect(_event(old_status="member", new_status="left")) is False
+        )
 
 
 class TestHandleAutoAddedDiscussion:
@@ -399,7 +403,9 @@ class TestChannelAddGatesGroupPath:
             patch(
                 "src.app.handlers.status_handlers._handle_bot_added",
                 AsyncMock(
-                    side_effect=AssertionError("group add path must not run for channel")
+                    side_effect=AssertionError(
+                        "group add path must not run for channel"
+                    )
                 ),
             ),
             patch(
@@ -464,7 +470,9 @@ class TestChannelAddGatesGroupPath:
             ),
             patch(
                 "src.app.handlers.status_handlers.clear_no_rights_detected_at",
-                AsyncMock(side_effect=AssertionError("no clear-rights flow for channel")),
+                AsyncMock(
+                    side_effect=AssertionError("no clear-rights flow for channel")
+                ),
             ),
             patch(
                 "src.app.handlers.status_handlers.bot.send_message",
@@ -562,7 +570,9 @@ class TestActivateDiscussionGroup:
         ):
             from src.app.handlers.status_handlers import _handle_bot_added
 
-            await _handle_bot_added(event, DISCUSSION_ID, HUMAN_ID, "Discussion", "member")
+            await _handle_bot_added(
+                event, DISCUSSION_ID, HUMAN_ID, "Discussion", "member"
+            )
 
         mock_activate.assert_not_awaited()
         mock_promo.assert_not_awaited()
@@ -742,7 +752,9 @@ class TestFullLifecycleAwaitingRightsActivation:
                     AsyncMock(),
                 ),
             ):
-                await _handle_bot_added(event, DISCUSSION_ID, HUMAN_ID, "Discussion", "member")
+                await _handle_bot_added(
+                    event, DISCUSSION_ID, HUMAN_ID, "Discussion", "member"
+                )
 
             # No admin rights → activation must NOT have happened
             assert await is_moderation_enabled(DISCUSSION_ID) is False
@@ -840,7 +852,9 @@ class TestNoRightsFlagClearOnAdminAdd:
         ):
             from src.app.handlers.status_handlers import _handle_bot_added
 
-            await _handle_bot_added(event, DISCUSSION_ID, HUMAN_ID, "Discussion", "member")
+            await _handle_bot_added(
+                event, DISCUSSION_ID, HUMAN_ID, "Discussion", "member"
+            )
 
         mock_clear.assert_not_awaited()
         mock_notify.assert_awaited_once()
@@ -1058,9 +1072,7 @@ class TestServiceMessageDeleteNoAdminSkip:
                     AsyncMock(
                         return_value=[
                             MagicMock(
-                                user=User(
-                                    id=HUMAN_ID, is_bot=False, first_name="Admin"
-                                )
+                                user=User(id=HUMAN_ID, is_bot=False, first_name="Admin")
                             )
                         ]
                     ),

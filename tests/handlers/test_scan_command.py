@@ -90,12 +90,15 @@ class TestScanCommand:
     @pytest.mark.asyncio
     async def test_no_groups(self):
         msg = _scan_message()
-        with patch(
-            "app.handlers.command_handlers.get_admin",
-            AsyncMock(return_value=MagicMock(language_code="en")),
-        ), patch(
-            "app.handlers.command_handlers.get_admin_groups",
-            AsyncMock(return_value=[]),
+        with (
+            patch(
+                "app.handlers.command_handlers.get_admin",
+                AsyncMock(return_value=MagicMock(language_code="en")),
+            ),
+            patch(
+                "app.handlers.command_handlers.get_admin_groups",
+                AsyncMock(return_value=[]),
+            ),
         ):
             result = await handle_scan_command(msg)
 
@@ -106,18 +109,20 @@ class TestScanCommand:
     async def test_single_group_direct_scan(self):
         msg = _scan_message()
         groups = [_group_dict(-100123, "PHP Jobs")]
-        with patch(
-            "app.handlers.command_handlers.get_admin",
-            AsyncMock(return_value=MagicMock(language_code="en")),
-        ), patch(
-            "app.handlers.command_handlers.get_admin_groups",
-            AsyncMock(return_value=groups),
-        ), patch(
-            "app.spam.chat_topics.scan_chat_topics",
-            AsyncMock(
-                return_value=MagicMock(status="ok", detail="PHP jobs")
+        with (
+            patch(
+                "app.handlers.command_handlers.get_admin",
+                AsyncMock(return_value=MagicMock(language_code="en")),
             ),
-        ) as mock_scan:
+            patch(
+                "app.handlers.command_handlers.get_admin_groups",
+                AsyncMock(return_value=groups),
+            ),
+            patch(
+                "app.spam.chat_topics.scan_chat_topics",
+                AsyncMock(return_value=MagicMock(status="ok", detail="PHP jobs")),
+            ) as mock_scan,
+        ):
             result = await handle_scan_command(msg)
 
         assert result == "command_scan_sent"
@@ -132,12 +137,15 @@ class TestScanCommand:
             _group_dict(-100123, "PHP Jobs"),
             _group_dict(-100456, "Freelance"),
         ]
-        with patch(
-            "app.handlers.command_handlers.get_admin",
-            AsyncMock(return_value=MagicMock(language_code="en")),
-        ), patch(
-            "app.handlers.command_handlers.get_admin_groups",
-            AsyncMock(return_value=groups),
+        with (
+            patch(
+                "app.handlers.command_handlers.get_admin",
+                AsyncMock(return_value=MagicMock(language_code="en")),
+            ),
+            patch(
+                "app.handlers.command_handlers.get_admin_groups",
+                AsyncMock(return_value=groups),
+            ),
         ):
             await handle_scan_command(msg)
 
@@ -155,12 +163,15 @@ class TestScanCallback:
     @pytest.mark.asyncio
     async def test_non_admin_refused(self):
         cb = _callback(-100123)
-        with patch(
-            "app.handlers.callback_handlers.get_admin",
-            AsyncMock(return_value=MagicMock(language_code="en")),
-        ), patch(
-            "app.handlers.callback_handlers.get_admin_groups",
-            AsyncMock(return_value=[]),  # caller not admin of the group
+        with (
+            patch(
+                "app.handlers.callback_handlers.get_admin",
+                AsyncMock(return_value=MagicMock(language_code="en")),
+            ),
+            patch(
+                "app.handlers.callback_handlers.get_admin_groups",
+                AsyncMock(return_value=[]),  # caller not admin of the group
+            ),
         ):
             result = await handle_scan_chat_callback(cb)
 
@@ -180,15 +191,19 @@ class TestScanCallback:
                 topic_updated=datetime.now(UTC) - timedelta(days=3),
             )
         ]
-        with patch(
-            "app.handlers.callback_handlers.get_admin",
-            AsyncMock(return_value=MagicMock(language_code="en")),
-        ), patch(
-            "app.handlers.callback_handlers.get_admin_groups",
-            AsyncMock(return_value=groups),
-        ), patch(
-            "app.spam.chat_topics.scan_chat_topics",
-            AsyncMock(return_value=MagicMock(status="ok", detail="PHP jobs")),
+        with (
+            patch(
+                "app.handlers.callback_handlers.get_admin",
+                AsyncMock(return_value=MagicMock(language_code="en")),
+            ),
+            patch(
+                "app.handlers.callback_handlers.get_admin_groups",
+                AsyncMock(return_value=groups),
+            ),
+            patch(
+                "app.spam.chat_topics.scan_chat_topics",
+                AsyncMock(return_value=MagicMock(status="ok", detail="PHP jobs")),
+            ),
         ):
             result = await handle_scan_chat_callback(cb)
 
@@ -204,16 +219,20 @@ class TestScanCallback:
     async def test_failed_scan_reports_reason(self):
         cb = _callback(-100123)
         groups = [_group_dict(-100123, "PHP Jobs")]
-        with patch(
-            "app.handlers.callback_handlers.get_admin",
-            AsyncMock(return_value=MagicMock(language_code="en")),
-        ), patch(
-            "app.handlers.callback_handlers.get_admin_groups",
-            AsyncMock(return_value=groups),
-        ), patch(
-            "app.spam.chat_topics.scan_chat_topics",
-            AsyncMock(
-                return_value=MagicMock(status="failed", detail="fetch_failed")
+        with (
+            patch(
+                "app.handlers.callback_handlers.get_admin",
+                AsyncMock(return_value=MagicMock(language_code="en")),
+            ),
+            patch(
+                "app.handlers.callback_handlers.get_admin_groups",
+                AsyncMock(return_value=groups),
+            ),
+            patch(
+                "app.spam.chat_topics.scan_chat_topics",
+                AsyncMock(
+                    return_value=MagicMock(status="failed", detail="fetch_failed")
+                ),
             ),
         ):
             result = await handle_scan_chat_callback(cb)
@@ -226,18 +245,20 @@ class TestScanCallback:
     async def test_title_fallback_reported(self):
         cb = _callback(-100123)
         groups = [_group_dict(-100123, "PHP Jobs")]
-        with patch(
-            "app.handlers.callback_handlers.get_admin",
-            AsyncMock(return_value=MagicMock(language_code="en")),
-        ), patch(
-            "app.handlers.callback_handlers.get_admin_groups",
-            AsyncMock(return_value=groups),
-        ), patch(
-            "app.spam.chat_topics.scan_chat_topics",
-            AsyncMock(
-                return_value=MagicMock(
-                    status="title_fallback", detail="PHP Jobs"
-                )
+        with (
+            patch(
+                "app.handlers.callback_handlers.get_admin",
+                AsyncMock(return_value=MagicMock(language_code="en")),
+            ),
+            patch(
+                "app.handlers.callback_handlers.get_admin_groups",
+                AsyncMock(return_value=groups),
+            ),
+            patch(
+                "app.spam.chat_topics.scan_chat_topics",
+                AsyncMock(
+                    return_value=MagicMock(status="title_fallback", detail="PHP Jobs")
+                ),
             ),
         ):
             result = await handle_scan_chat_callback(cb)
@@ -250,15 +271,19 @@ class TestScanCallback:
     async def test_scan_crash_reports_error(self):
         cb = _callback(-100123)
         groups = [_group_dict(-100123, "PHP Jobs")]
-        with patch(
-            "app.handlers.callback_handlers.get_admin",
-            AsyncMock(return_value=MagicMock(language_code="en")),
-        ), patch(
-            "app.handlers.callback_handlers.get_admin_groups",
-            AsyncMock(return_value=groups),
-        ), patch(
-            "app.spam.chat_topics.scan_chat_topics",
-            AsyncMock(side_effect=RuntimeError("boom")),
+        with (
+            patch(
+                "app.handlers.callback_handlers.get_admin",
+                AsyncMock(return_value=MagicMock(language_code="en")),
+            ),
+            patch(
+                "app.handlers.callback_handlers.get_admin_groups",
+                AsyncMock(return_value=groups),
+            ),
+            patch(
+                "app.spam.chat_topics.scan_chat_topics",
+                AsyncMock(side_effect=RuntimeError("boom")),
+            ),
         ):
             result = await handle_scan_chat_callback(cb)
 
@@ -278,6 +303,7 @@ class TestReplyScanResult:
             await _reply_scan_result(cb, "en", "scan.success", title="T")
 
         cb.message.edit_text.assert_awaited_once()
+
 
 class TestStatsTopicLine:
     """/stats HTML fallback: short topic shown; NULL topic leaves the card clean."""
@@ -302,32 +328,38 @@ class TestStatsTopicLine:
             topic_short="PHP jobs",
             topic_updated=datetime.now(UTC) - timedelta(days=3),
         )
-        with patch(
-            "app.handlers.command_handlers.get_admin",
-            AsyncMock(return_value=MagicMock(language_code="en")),
-        ), patch(
-            "app.handlers.command_handlers.get_admin_credits",
-            AsyncMock(return_value=100),
-        ), patch(
-            "app.handlers.command_handlers.get_spent_credits_last_week",
-            AsyncMock(return_value=0),
-        ), patch(
-            "app.handlers.command_handlers.get_spent_credits_all_time",
-            AsyncMock(return_value=0),
-        ), patch(
-            "app.handlers.command_handlers.get_admin_stats",
-            AsyncMock(
-                return_value={
-                    "global": {
-                        "processed": 10,
-                        "spam": 2,
-                        "approved": 5,
-                        "approved_7d": 0,
-                        "spam_examples": 3,
-                        "spam_examples_7d": 0,
-                    },
-                    "groups": groups,
-                }
+        with (
+            patch(
+                "app.handlers.command_handlers.get_admin",
+                AsyncMock(return_value=MagicMock(language_code="en")),
+            ),
+            patch(
+                "app.handlers.command_handlers.get_admin_credits",
+                AsyncMock(return_value=100),
+            ),
+            patch(
+                "app.handlers.command_handlers.get_spent_credits_last_week",
+                AsyncMock(return_value=0),
+            ),
+            patch(
+                "app.handlers.command_handlers.get_spent_credits_all_time",
+                AsyncMock(return_value=0),
+            ),
+            patch(
+                "app.handlers.command_handlers.get_admin_stats",
+                AsyncMock(
+                    return_value={
+                        "global": {
+                            "processed": 10,
+                            "spam": 2,
+                            "approved": 5,
+                            "approved_7d": 0,
+                            "spam_examples": 3,
+                            "spam_examples_7d": 0,
+                        },
+                        "groups": groups,
+                    }
+                ),
             ),
         ):
             result = await handle_stats_command(msg)
@@ -342,32 +374,38 @@ class TestStatsTopicLine:
     async def test_no_topic_leaves_line_unchanged(self):
         msg = _scan_message()
         groups = self._stats_groups()  # no topic fields
-        with patch(
-            "app.handlers.command_handlers.get_admin",
-            AsyncMock(return_value=MagicMock(language_code="en")),
-        ), patch(
-            "app.handlers.command_handlers.get_admin_credits",
-            AsyncMock(return_value=100),
-        ), patch(
-            "app.handlers.command_handlers.get_spent_credits_last_week",
-            AsyncMock(return_value=0),
-        ), patch(
-            "app.handlers.command_handlers.get_spent_credits_all_time",
-            AsyncMock(return_value=0),
-        ), patch(
-            "app.handlers.command_handlers.get_admin_stats",
-            AsyncMock(
-                return_value={
-                    "global": {
-                        "processed": 10,
-                        "spam": 2,
-                        "approved": 5,
-                        "approved_7d": 0,
-                        "spam_examples": 3,
-                        "spam_examples_7d": 0,
-                    },
-                    "groups": groups,
-                }
+        with (
+            patch(
+                "app.handlers.command_handlers.get_admin",
+                AsyncMock(return_value=MagicMock(language_code="en")),
+            ),
+            patch(
+                "app.handlers.command_handlers.get_admin_credits",
+                AsyncMock(return_value=100),
+            ),
+            patch(
+                "app.handlers.command_handlers.get_spent_credits_last_week",
+                AsyncMock(return_value=0),
+            ),
+            patch(
+                "app.handlers.command_handlers.get_spent_credits_all_time",
+                AsyncMock(return_value=0),
+            ),
+            patch(
+                "app.handlers.command_handlers.get_admin_stats",
+                AsyncMock(
+                    return_value={
+                        "global": {
+                            "processed": 10,
+                            "spam": 2,
+                            "approved": 5,
+                            "approved_7d": 0,
+                            "spam_examples": 3,
+                            "spam_examples_7d": 0,
+                        },
+                        "groups": groups,
+                    }
+                ),
             ),
         ):
             result = await handle_stats_command(msg)

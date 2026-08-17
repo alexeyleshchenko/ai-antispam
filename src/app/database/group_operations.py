@@ -764,7 +764,9 @@ async def get_protected_channel_ids() -> list[int]:
     return [row["linked_channel_id"] for row in rows]
 
 
-async def heal_bare_group_rows(concurrency: int = 5, limit: int = 500) -> dict[str, int]:
+async def heal_bare_group_rows(
+    concurrency: int = 5, limit: int = 500
+) -> dict[str, int]:
     """Resolve bare groups rows (title/username NULL) via the Telegram API.
 
     Closes the no-metadata gap going forward: any row created without chat

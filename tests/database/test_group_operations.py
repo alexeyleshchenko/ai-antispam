@@ -210,7 +210,9 @@ async def test_deduct_credits_sets_credits_depleted_at_when_zero(
 
 async def _seed_admin_group(clean_db, admin_id: int, group_id: int) -> None:
     async with clean_db.acquire() as conn:
-        await conn.execute("INSERT INTO groups (group_id, title) VALUES ($1, 'Stale')", group_id)
+        await conn.execute(
+            "INSERT INTO groups (group_id, title) VALUES ($1, 'Stale')", group_id
+        )
         await conn.execute(
             "INSERT INTO administrators (admin_id, username, credits) VALUES ($1, 'admin', 10)",
             admin_id,
@@ -226,9 +228,7 @@ async def _seed_admin_group(clean_db, admin_id: int, group_id: int) -> None:
 @pytest.mark.parametrize(
     "error",
     [
-        TelegramBadRequest(
-            method=MagicMock(), message="Bad Request: chat not found"
-        ),
+        TelegramBadRequest(method=MagicMock(), message="Bad Request: chat not found"),
         TelegramForbiddenError(
             method=MagicMock(), message="Forbidden: bot was kicked from the group chat"
         ),
@@ -277,9 +277,7 @@ async def test_get_admin_groups_unexpected_telegram_error_logs_error(
     admin_id = 9002
     group_id = -1009002
     await _seed_admin_group(clean_db, admin_id, group_id)
-    err = TelegramBadRequest(
-        method=MagicMock(), message="Bad Request: invalid chat id"
-    )
+    err = TelegramBadRequest(method=MagicMock(), message="Bad Request: invalid chat id")
 
     with patch("app.database.group_operations.bot") as mock_bot:
         mock_bot.get_chat = AsyncMock(side_effect=err)
@@ -288,7 +286,9 @@ async def test_get_admin_groups_unexpected_telegram_error_logs_error(
 
     assert groups == []
     assert any(r.levelno == logging.ERROR for r in caplog.records)
-    assert not any("inaccessible during admin stats" in r.message for r in caplog.records)
+    assert not any(
+        "inaccessible during admin stats" in r.message for r in caplog.records
+    )
 
     async with clean_db.acquire() as conn:
         row = await conn.fetchrow("SELECT 1 FROM groups WHERE group_id = $1", group_id)
@@ -463,7 +463,9 @@ async def test_remove_member_clears_probation_counter(patched_db_conn, clean_db)
 
 
 @pytest.mark.asyncio
-async def test_update_group_admins_excludes_group_anonymous_bot(patched_db_conn, clean_db):
+async def test_update_group_admins_excludes_group_anonymous_bot(
+    patched_db_conn, clean_db
+):
     """GROUP_ANONYMOUS_BOT_ID (1087968824) must not be inserted into group_administrators.
 
     The GroupAnonymousBot appears in admin lists when a group has anonymous admin enabled,
@@ -493,7 +495,9 @@ async def test_update_group_admins_excludes_group_anonymous_bot(patched_db_conn,
 
 
 @pytest.mark.asyncio
-async def test_activate_discussion_group_flips_awaiting_rights(patched_db_conn, clean_db):
+async def test_activate_discussion_group_flips_awaiting_rights(
+    patched_db_conn, clean_db
+):
     """Awaiting-rights row (linked_channel_id set, moderation off) flips active."""
     from app.database import upsert_awaiting_rights_group, activate_discussion_group
 
@@ -520,7 +524,9 @@ async def test_activate_discussion_group_flips_awaiting_rights(patched_db_conn, 
 
 
 @pytest.mark.asyncio
-async def test_activate_discussion_group_leaves_disabled_group_alone(patched_db_conn, clean_db):
+async def test_activate_discussion_group_leaves_disabled_group_alone(
+    patched_db_conn, clean_db
+):
     """A group without linked_channel_id (deliberately disabled) is untouched."""
     from app.database import set_group_moderation, activate_discussion_group
 
@@ -538,7 +544,9 @@ async def test_activate_discussion_group_leaves_disabled_group_alone(patched_db_
 
 
 @pytest.mark.asyncio
-async def test_activate_discussion_group_active_with_channel_stays_active(patched_db_conn, clean_db):
+async def test_activate_discussion_group_active_with_channel_stays_active(
+    patched_db_conn, clean_db
+):
     """Already-active linked group: no-op, still returns True."""
     from app.database import activate_discussion_group, upsert_awaiting_rights_group
 
@@ -567,8 +575,6 @@ async def test_activate_discussion_group_active_with_channel_stays_active(patche
 
 
 @pytest.mark.asyncio
-
-
 @pytest.mark.asyncio
 async def test_discussion_order_convergence_awaiting_rights(patched_db_conn, clean_db):
     """Composite-event random-order convergence (issue #34/#36).
@@ -629,7 +635,9 @@ async def test_discussion_order_convergence_awaiting_rights(patched_db_conn, cle
 
 
 @pytest.mark.asyncio
-async def test_set_group_moderation_fills_metadata_on_new_row(patched_db_conn, clean_db):
+async def test_set_group_moderation_fills_metadata_on_new_row(
+    patched_db_conn, clean_db
+):
     """Metadata passed to set_group_moderation lands on a fresh row (no-metadata gap)."""
     group_id = -10012345
     await set_group_moderation(group_id, True, "My Group", "mygroup")
@@ -680,7 +688,9 @@ async def test_set_group_moderation_keeps_existing_metadata(patched_db_conn, cle
 
 
 @pytest.mark.asyncio
-async def test_set_group_moderation_backward_compatible_bare_call(patched_db_conn, clean_db):
+async def test_set_group_moderation_backward_compatible_bare_call(
+    patched_db_conn, clean_db
+):
     """Old two-arg call still works (bare row creation remains allowed)."""
     group_id = -10012347
     await set_group_moderation(group_id, True)
@@ -701,8 +711,14 @@ async def test_heal_bare_group_rows_fills_metadata(patched_db_conn, clean_db):
     bare_b = -1002
     known = -1003
     async with clean_db.acquire() as conn:
-        await conn.execute("INSERT INTO groups (group_id, moderation_enabled) VALUES ($1, TRUE)", bare_a)
-        await conn.execute("INSERT INTO groups (group_id, moderation_enabled) VALUES ($1, TRUE)", bare_b)
+        await conn.execute(
+            "INSERT INTO groups (group_id, moderation_enabled) VALUES ($1, TRUE)",
+            bare_a,
+        )
+        await conn.execute(
+            "INSERT INTO groups (group_id, moderation_enabled) VALUES ($1, TRUE)",
+            bare_b,
+        )
         await conn.execute(
             "INSERT INTO groups (group_id, title, moderation_enabled) VALUES ($1, 'Known', TRUE)",
             known,
@@ -726,7 +742,9 @@ async def test_heal_bare_group_rows_fills_metadata(patched_db_conn, clean_db):
     async with clean_db.acquire() as conn:
         row_a = await conn.fetchrow("SELECT * FROM groups WHERE group_id = $1", bare_a)
         row_b = await conn.fetchrow("SELECT * FROM groups WHERE group_id = $1", bare_b)
-        row_k = await conn.fetchrow("SELECT title FROM groups WHERE group_id = $1", known)
+        row_k = await conn.fetchrow(
+            "SELECT title FROM groups WHERE group_id = $1", known
+        )
     assert row_a["title"] == "Chat -1001"
     assert row_a["username"] == "user-1001"
     assert row_a["linked_channel_id"] == -2001
@@ -742,10 +760,18 @@ async def test_heal_bare_group_rows_skips_unreachable_never_raises(
     bare_a = -1001
     bare_b = -1002
     async with clean_db.acquire() as conn:
-        await conn.execute("INSERT INTO groups (group_id, moderation_enabled) VALUES ($1, TRUE)", bare_a)
-        await conn.execute("INSERT INTO groups (group_id, moderation_enabled) VALUES ($1, TRUE)", bare_b)
+        await conn.execute(
+            "INSERT INTO groups (group_id, moderation_enabled) VALUES ($1, TRUE)",
+            bare_a,
+        )
+        await conn.execute(
+            "INSERT INTO groups (group_id, moderation_enabled) VALUES ($1, TRUE)",
+            bare_b,
+        )
 
-    forbidden = TelegramForbiddenError(method=MagicMock(), message="Forbidden: bot is not a member")
+    forbidden = TelegramForbiddenError(
+        method=MagicMock(), message="Forbidden: bot is not a member"
+    )
     bad = TelegramBadRequest(method=MagicMock(), message="Bad Request: chat not found")
 
     def fake_get_chat(gid):
@@ -772,7 +798,10 @@ async def test_heal_bare_group_rows_skips_no_title_chats(patched_db_conn, clean_
     """Private chats (no title) are skipped, not marked healed."""
     bare_a = 123456  # positive id = private chat
     async with clean_db.acquire() as conn:
-        await conn.execute("INSERT INTO groups (group_id, moderation_enabled) VALUES ($1, TRUE)", bare_a)
+        await conn.execute(
+            "INSERT INTO groups (group_id, moderation_enabled) VALUES ($1, TRUE)",
+            bare_a,
+        )
 
     chat = MagicMock(title=None, username=None, linked_chat_id=None)
     with patch("app.database.group_operations.bot") as mock_bot:

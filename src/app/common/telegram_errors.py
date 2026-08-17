@@ -39,9 +39,7 @@ _MESSAGE_NOT_FOUND_MARKERS = (
     "message not found",
 )
 
-_BOT_TO_BOT_DISABLED_MARKERS = (
-    "user_bot_to_bot_disabled",
-)
+_BOT_TO_BOT_DISABLED_MARKERS = ("user_bot_to_bot_disabled",)
 
 
 def _error_message_contains(error: Exception, markers: tuple[str, ...]) -> bool:
@@ -93,7 +91,10 @@ def is_user_blocked_error(error: Exception) -> bool:
     return _error_message_contains(error, _USER_BLOCKED_MARKERS)
 
 
-_BOT_KICKED_MARKERS = ("bot was kicked from the chat", "bot was kicked from the supergroup chat")
+_BOT_KICKED_MARKERS = (
+    "bot was kicked from the chat",
+    "bot was kicked from the supergroup chat",
+)
 
 
 def is_bot_kicked_error(error: Exception) -> bool:

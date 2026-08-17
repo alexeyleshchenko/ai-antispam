@@ -188,7 +188,9 @@ async def test_handle_spam_ignore_callback_genuine_missing_logs_warning(
         mock_bot.edit_message_text = AsyncMock()
         mock_bot.unban_chat_member = AsyncMock()
 
-        with caplog.at_level(logging.WARNING, logger="src.app.handlers.callback_handlers"):
+        with caplog.at_level(
+            logging.WARNING, logger="src.app.handlers.callback_handlers"
+        ):
             result = await handle_spam_ignore_callback(callback)
 
         assert result == "callback_marked_as_not_spam"

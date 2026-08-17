@@ -91,7 +91,9 @@ async def leave_no_rights_groups() -> None:
                 and getattr(member, "can_restrict_members", False)
             ):
                 await clear_no_rights_detected_at(group_id)
-                logger.info(f"Rights restored in group {format_chat_log(group_id, title, username)}, cleared flag")
+                logger.info(
+                    f"Rights restored in group {format_chat_log(group_id, title, username)}, cleared flag"
+                )
                 skip_leave = True
         except Exception as e:
             if is_group_inaccessible_error(e):
@@ -111,13 +113,17 @@ async def leave_no_rights_groups() -> None:
                     group_id, admin_to_left_groups
                 )
                 if success:
-                    logger.info(f"Left no-rights group {format_chat_log(group_id, title, username)}")
+                    logger.info(
+                        f"Left no-rights group {format_chat_log(group_id, title, username)}"
+                    )
                 else:
                     logger.warning(
                         f"Failed to leave group {format_chat_log(group_id, title, username)} (unexpected cleanup failure)"
                     )
             except Exception as cleanup_e:  # noqa: BLE001
-                logger.warning(f"Cleanup failed for {format_chat_log(group_id, title, username)}: {cleanup_e}")
+                logger.warning(
+                    f"Cleanup failed for {format_chat_log(group_id, title, username)}: {cleanup_e}"
+                )
 
     # Notify each admin about their left groups
     for admin_id, groups_list in admin_to_left_groups.items():

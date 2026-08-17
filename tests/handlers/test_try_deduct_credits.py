@@ -30,7 +30,9 @@ async def test_try_deduct_credits_warning_includes_title_and_username(caplog):
     ):
         mock_bot.get_chat = AsyncMock(return_value=chat)
 
-        with caplog.at_level(logging.WARNING, logger="src.app.handlers.try_deduct_credits"):
+        with caplog.at_level(
+            logging.WARNING, logger="src.app.handlers.try_deduct_credits"
+        ):
             result = await try_deduct_credits(-100123, 5, "approve user")
 
         assert result is False
@@ -64,7 +66,9 @@ async def test_try_deduct_credits_warning_falls_back_to_bare_id(caplog):
     ):
         mock_bot.get_chat = AsyncMock(side_effect=Exception("TelegramForbiddenError"))
 
-        with caplog.at_level(logging.WARNING, logger="src.app.handlers.try_deduct_credits"):
+        with caplog.at_level(
+            logging.WARNING, logger="src.app.handlers.try_deduct_credits"
+        ):
             result = await try_deduct_credits(-100123, 5, "approve user")
 
         assert result is False
@@ -103,9 +107,13 @@ async def test_send_group_deactivation_message_logs_success_with_message_id(capl
         patch("src.app.handlers.try_deduct_credits.bot") as mock_bot,
     ):
         mock_bot.get_chat = AsyncMock(return_value=chat)
-        mock_bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=12345))
+        mock_bot.send_message = AsyncMock(
+            return_value=SimpleNamespace(message_id=12345)
+        )
 
-        with caplog.at_level(logging.INFO, logger="src.app.handlers.try_deduct_credits"):
+        with caplog.at_level(
+            logging.INFO, logger="src.app.handlers.try_deduct_credits"
+        ):
             await send_group_deactivation_message(
                 -100123, "https://t.me/bot?start=42", min_admin, 0.0
             )
@@ -149,7 +157,9 @@ async def test_send_group_deactivation_message_failure_logs_chat_context(caplog)
             side_effect=Exception("TelegramForbiddenError: bot is not a member")
         )
 
-        with caplog.at_level(logging.WARNING, logger="src.app.handlers.try_deduct_credits"):
+        with caplog.at_level(
+            logging.WARNING, logger="src.app.handlers.try_deduct_credits"
+        ):
             await send_group_deactivation_message(
                 -100123, "https://t.me/bot?start=42", min_admin, 0.0
             )
@@ -185,7 +195,9 @@ async def test_handle_deactivation_passes_metadata_to_set_group_moderation():
 
         await handle_deactivation(-100123)
 
-    mock_set_moderation.assert_awaited_once_with(-100123, False, "Test Group", "testgroup")
+    mock_set_moderation.assert_awaited_once_with(
+        -100123, False, "Test Group", "testgroup"
+    )
 
 
 @pytest.mark.asyncio
