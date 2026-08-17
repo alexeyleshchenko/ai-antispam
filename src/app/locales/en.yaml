@@ -224,6 +224,10 @@ stats:
   current_mode: "Current mode: <b>{mode}</b>"
   error: "An error occurred while fetching statistics."
 
+topic_age:
+  today: "today"
+  days: "{days}d ago"
+
 mode:
   delete_enabled: "🗑 <b>Auto-delete</b> enabled\n\nI will delete high-confidence spam and send you a private message after each removal (with a <b>Not spam</b> button to fix false positives)."
   delete_silent_enabled: "🔇 <b>Silent auto-delete</b> enabled\n\nI will delete high-confidence spam without sending you any notifications."

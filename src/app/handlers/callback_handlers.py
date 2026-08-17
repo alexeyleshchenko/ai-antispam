@@ -446,7 +446,7 @@ async def handle_scan_chat_callback(callback: CallbackQuery) -> str:
     if result.status == "ok":
         # The scan just wrote topic_updated_at = NOW(), so the age is always
         # "today" — the pre-scan group dict would show a stale value instead.
-        age = _format_topic_age(datetime.now(UTC))
+        age = _format_topic_age(datetime.now(UTC), lang)
         age_note = f" ({age})" if age else ""
         await _reply_scan_result(
             callback,
