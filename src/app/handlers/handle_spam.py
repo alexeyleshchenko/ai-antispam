@@ -1,5 +1,6 @@
 """Spam message handling: notifications, deletion, banning."""
 
+import asyncio
 import html
 import logging
 from collections.abc import Awaitable, Callable, Sequence
@@ -186,19 +187,20 @@ async def handle_spam(
         if effective_user_id is None:
             logger.warning("Message without effective user info, skipping ban")
             return "spam_no_user_info"
-        try:
-            await handle_spam_message_deletion(message, admin_ids)
-            await ban_user_for_spam(
+        results = await asyncio.gather(
+            handle_spam_message_deletion(message, admin_ids),
+            ban_user_for_spam(
                 message.chat.id,
                 effective_user_id,
                 admin_ids,
                 message.chat.title,
                 group_username=getattr(message.chat, "username", None),
-            )
-        except Exception:
-            logger.exception(
-                "auto-delete+ban failed for message %s", message.message_id
-            )
+            ),
+            return_exceptions=True,
+        )
+        for r in results:
+            if isinstance(r, Exception):
+                logger.warning("auto-delete+ban partial failure: %s", r)
         return "spam_auto_deleted"
 
     return "spam_admins_notified" if notification_sent else "spam_notification_failed"
