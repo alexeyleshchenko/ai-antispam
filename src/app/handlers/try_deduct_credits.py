@@ -21,7 +21,6 @@ from ..common.utils import (
     format_chat_log,
     format_chat_or_channel_display,
     get_add_to_group_url,
-    retry_on_network_error,
 )
 from ..database import deduct_credits_from_admins, get_admin, set_group_moderation
 from ..i18n import normalize_lang, t
@@ -246,7 +245,6 @@ async def send_group_deactivation_message(
 
     try:
 
-        @retry_on_network_error
         async def send_deactivation_message():
             return await bot.send_message(
                 chat_id,

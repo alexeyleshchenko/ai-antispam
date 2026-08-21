@@ -95,6 +95,17 @@ retry_on_network_error = retry(
 )
 
 
+def _compute_retry_delay(exc: BaseException, attempt: int) -> float:
+    """Delay for session-middleware sleep.
+
+    - TelegramRetryAfter → honour flood control (cap 15s for webhook budget)
+    - Other retryable   → exponential: min(0.5 × 2^(n-1), 10)
+    """
+    if isinstance(exc, TelegramRetryAfter):
+        return min(exc.retry_after, 15)
+    return min(0.5 * (2 ** (attempt - 1)), 10)
+
+
 async def send_admin_dm(admin_id: int, text: str, log_context: str = "message") -> bool:
     """Send HTML message to admin with retry. Returns True if sent, False on failure."""
     from .bot import bot

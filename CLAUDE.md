@@ -83,6 +83,56 @@ At start of dialog, read relevant memory-bank files:
 - Billing via Telegram Stars
 - Personal spam examples per admin for fine-tuning
 
+## Error handling (Telegram API)
+
+Every `bot.*` call (deleteMessage, banChatMember, sendMessage, …) flows
+through **two layers** — never add retry or try/except directly at the call
+site:
+
+```mermaid
+flowchart LR
+    A["bot.delete_message(...)"] --> B["Session middleware<br/>(retry ×4, all bot.* calls)"]
+    B --> C["@telegram_action decorator<br/>(classify + log, NEVER crashes)"]
+```
+
+**1. Session middleware** (`src/app/common/bot.py` → `setup_session_retry(bot)`)
+
+Applied once on the session, covers **all** `bot.*` API calls automatically.
+Handles `TelegramNetworkError`, `asyncio.TimeoutError`, `aiohttp.ClientError`.
+Uses `_compute_retry_delay` (cap 15 s/sleep, 45 s total budget).
+
+**2. `@telegram_action` decorator** (`src/app/handlers/handle_spam.py`)
+
+```python
+from .handle_spam import telegram_action
+
+@telegram_action("ban user", extra_checks=(is_message_not_found_error,))
+async def _ban() -> None:
+    await bot.ban_chat_member(chat_id, user_id)
+    ban_applied = True
+```
+
+Catches `(TelegramBadRequest, TelegramForbiddenError)` → classify
+(group_inaccessible, message-not-found, permission-error) + structured log.
+Catches `Exception` → warning log. **Never crashes.**
+
+Rules for future edits:
+
+- **Do NOT add `@retry_on_network_error` on `bot.*` calls.** The middleware
+  already retries. Adding a second decorator duplicates retries and complicates
+  debugging.
+- **Any new Telegram-moderator action (delete, ban, unban, restrict) MUST go
+  through `@telegram_action`.** The MG incident (2026-08-21) was caused by a
+  bare try/except block that lacked `except Exception` — a `TimeoutError`
+  escaping from `bot.delete_message` skipped the subsequent ban call.
+- **`@retry_on_network_error` still applies to non-`bot.*` HTTP calls:**
+  `mcp_client.py` (aiohttp POST), `mtproto_client.py` (aiohttp POST),
+  `broadcast_updates.py` (standalone `Bot()` session). Do NOT remove it from
+  those files.
+- **When `check_admin_delete_preferences` returns `False` unexpectedly, check
+  the diagnostic `logger.warning()` first.** It logs WHY (admin not found, opted
+  out, empty admin_ids), saving a round-trip to the database.
+
 ## Chat-topic signal (`/scan`)
 
 Every monitored chat can carry a **topic profile** (`groups.topic_description` /

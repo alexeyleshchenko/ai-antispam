@@ -9,12 +9,10 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from ..common.bot import bot
-from ..common.telegram_errors import is_message_not_found_error, is_permission_error
+from ..common.telegram_errors import is_message_not_found_error
 from ..common.utils import (
-    format_chat_log,
     get_add_to_group_url,
     load_config,
-    retry_on_network_error,
 )
 from ..database import (
     get_admin,
@@ -307,44 +305,26 @@ async def handle_spam_confirm_callback(callback: CallbackQuery) -> str:
         # conveyed via the notification-message edit below.
         await _answer_safe(callback)
 
+        from .handle_spam import telegram_action
+
         delete_succeeded = False
-        try:
 
-            @retry_on_network_error
-            async def delete_original_message():
-                return await bot.delete_message(chat_id, message_id)
-
-            await delete_original_message()
-            delete_succeeded = True
-        except TelegramBadRequest as e:
-            if is_message_not_found_error(e):
-                logger.info(
-                    f"Message to delete not found (likely already deleted): {format_chat_log(chat_id, getattr(callback.message.chat, 'title', None), getattr(callback.message.chat, 'username', None))}:{message_id}"
-                )
-                delete_succeeded = True
-            elif is_permission_error(e):
-                logger.info(
-                    f"Cannot delete message (no permission or too old): {format_chat_log(chat_id, getattr(callback.message.chat, 'title', None), getattr(callback.message.chat, 'username', None))}:{message_id}: {e}"
-                )
-                await _answer_safe(
-                    callback, t(lang, "callback.delete_no_permission"), show_alert=True
-                )
-            else:
-                logger.warning(
-                    f"Failed to delete original spam message: {e}", exc_info=True
-                )
-                await _answer_safe(
-                    callback, t(lang, "callback.delete_failed"), show_alert=True
-                )
-                return "callback_error_deleting_original"
-        except Exception as e:
-            logger.warning(
-                f"Failed to delete original spam message: {e}", exc_info=True
-            )
+        async def _notify_perm_error_cb(_e):
             await _answer_safe(
-                callback, t(lang, "callback.delete_failed"), show_alert=True
+                callback, t(lang, "callback.delete_no_permission"), show_alert=True
             )
-            return "callback_error_deleting_original"
+
+        @telegram_action(
+            "delete spam message",
+            extra_checks=(is_message_not_found_error,),
+            on_permission_error=_notify_perm_error_cb,
+        )
+        async def _delete_cb():
+            nonlocal delete_succeeded
+            await bot.delete_message(chat_id, message_id)
+            delete_succeeded = True
+
+        await _delete_cb()
 
         if delete_succeeded:
             await _answer_safe(callback, f"✅ {t(lang, 'callback.spam_deleted')}")

@@ -18,7 +18,7 @@ from .telegram_errors import (
     is_message_not_found_error,
     is_user_blocked_error,
 )
-from .utils import format_chat_log, format_user_log, retry_on_network_error
+from .utils import format_chat_log, format_user_log
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,6 @@ async def notify_admins_with_fallback_and_cleanup(
                 admin_chat = None
             else:
                 # Get admin chat info with retry (expensive API call)
-                @retry_on_network_error
                 async def get_chat_info(admin_id=admin_id):
                     return await bot.get_chat(admin_id)
 
@@ -135,7 +134,6 @@ async def notify_admins_with_fallback_and_cleanup(
                 msg_text = private_message
 
             # Send message with retry
-            @retry_on_network_error
             async def send_private_message(admin_id=admin_id, msg_text=msg_text):
                 return await bot.send_message(
                     admin_id,
@@ -225,7 +223,6 @@ async def notify_admins_with_fallback_and_cleanup(
                 unreachable.append(admin_id)
             with contextlib.suppress(Exception):
 
-                @retry_on_network_error
                 async def get_chat_info_fallback(admin_id=admin_id):
                     return await bot.get_chat(admin_id)
 
@@ -271,7 +268,6 @@ async def notify_admins_with_fallback_and_cleanup(
 
         try:
 
-            @retry_on_network_error
             async def send_group_message():
                 return await bot.send_message(
                     group_id,

@@ -5,7 +5,6 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from ..common.bot import bot
-from ..common.utils import retry_on_network_error
 from ..database import get_admin, record_successful_payment
 from ..i18n import resolve_lang, t
 from .dp import dp
@@ -131,7 +130,6 @@ async def process_successful_payment(message: types.Message) -> str:
 
         success_text = t(lang, "payment.success_full", amount=stars_amount)
 
-        @retry_on_network_error
         async def send_payment_confirmation():
             return await bot.send_message(
                 admin_id,
