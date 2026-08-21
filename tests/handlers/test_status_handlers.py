@@ -526,10 +526,6 @@ class TestActivateDiscussionGroup:
                 return_value="Discussion",
             ),
             patch(
-                "src.app.handlers.status_handlers.retry_on_network_error",
-                side_effect=lambda f: f,
-            ),
-            patch(
                 "src.app.handlers.status_handlers.bot.send_message",
                 AsyncMock(),
             ),
@@ -615,10 +611,6 @@ class TestActivateDiscussionGroup:
                 return_value="Discussion",
             ),
             patch(
-                "src.app.handlers.status_handlers.retry_on_network_error",
-                side_effect=lambda f: f,
-            ),
-            patch(
                 "src.app.handlers.status_handlers.bot.send_message",
                 AsyncMock(),
             ),
@@ -688,10 +680,6 @@ class TestFullLifecycleAwaitingRightsActivation:
                 patch(
                     "src.app.handlers.status_handlers.format_chat_or_channel_display",
                     return_value="Discussion",
-                ),
-                patch(
-                    "src.app.handlers.status_handlers.retry_on_network_error",
-                    side_effect=lambda f: f,
                 ),
                 patch(
                     "src.app.handlers.status_handlers.bot.send_message",
@@ -802,10 +790,6 @@ class TestNoRightsFlagClearOnAdminAdd:
             patch(
                 "src.app.handlers.status_handlers.format_chat_or_channel_display",
                 return_value="Discussion",
-            ),
-            patch(
-                "src.app.handlers.status_handlers.retry_on_network_error",
-                side_effect=lambda f: f,
             ),
             patch(
                 "src.app.handlers.status_handlers.bot.send_message",

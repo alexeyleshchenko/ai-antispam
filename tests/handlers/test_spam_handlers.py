@@ -581,3 +581,117 @@ class TestSilentAutoDeleteNotifications:
             return_value=admins,
         ):
             assert await check_admin_delete_preferences([1, 2]) is True
+
+
+# =========================================================================
+# TDD tests — DRY spam-handler error handling (Steps 1a–1c)
+# =========================================================================
+
+from src.app.handlers.handle_spam import ban_user_for_spam
+
+
+class TestNonTelegramExceptionSwallowed:
+    """Regression tests — non-Telegram exceptions must NOT crash handlers."""
+
+    # -- 1a: handle_spam_message_deletion + RuntimeError -----------------
+    @pytest.mark.asyncio
+    async def test_delete_swallows_non_telegram_exception(
+        self, mock_message, caplog
+    ):
+        """MG bug regression: RuntimeError in bot.delete_message is swallowed."""
+        with (
+            patch("src.app.handlers.handle_spam.bot") as mock_bot,
+        ):
+            mock_bot.delete_message = AsyncMock(
+                side_effect=RuntimeError("network timeout")
+            )
+
+            # Must NOT raise
+            await handle_spam_message_deletion(mock_message, [123456789])
+
+            mock_bot.delete_message.assert_called_once_with(
+                mock_message.chat.id, mock_message.message_id
+            )
+            # Warning should be logged
+            assert any(
+                "delete spam message" in rec.message
+                for rec in caplog.records
+            )
+
+    # -- 1b: ban_user_for_spam + RuntimeError (safety net) --------------
+    @pytest.mark.asyncio
+    async def test_ban_swallows_non_telegram_exception(self, caplog):
+        """Safety net: RuntimeError in ban is swallowed (already works)."""
+        with (
+            patch("src.app.handlers.handle_spam.bot") as mock_bot,
+            patch(
+                "src.app.handlers.handle_spam.remove_member_from_group",
+                new_callable=AsyncMock,
+            ),
+        ):
+            mock_bot.ban_chat_member = AsyncMock(
+                side_effect=RuntimeError("network timeout")
+            )
+
+            # Must NOT raise
+            await ban_user_for_spam(
+                chat_id=-1001234567890,
+                user_id=67890,
+                admin_ids=[123456789],
+            )
+
+            mock_bot.ban_chat_member.assert_called_once_with(
+                -1001234567890, 67890
+            )
+            assert any(
+                "ban user" in rec.message
+                for rec in caplog.records
+            )
+
+
+class TestCheckAdminDeletePreferencesLogging:
+    """Diagnostic logging when check_admin_delete_preferences returns False."""
+
+    @pytest.mark.asyncio
+    async def test_logs_when_admin_ids_empty(self, caplog):
+        """Empty admin_ids → warning logged."""
+        result = await check_admin_delete_preferences([])
+        assert result is False
+        assert any(
+            "no admin_ids" in rec.message.lower()
+            for rec in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_logs_when_admin_not_found(self, caplog):
+        """Admin not in DB → warning logged."""
+        with patch(
+            "src.app.handlers.handle_spam.get_admins_map",
+            new_callable=AsyncMock,
+            return_value={},
+        ):
+            result = await check_admin_delete_preferences([999999])
+            assert result is False
+            assert any(
+                "admin" in rec.message.lower() and "not found" in rec.message.lower()
+                for rec in caplog.records
+            )
+
+    @pytest.mark.asyncio
+    async def test_logs_when_admin_opted_out(self, caplog):
+        """auto_deletes_spam=False → warning logged with mode."""
+        admin = Administrator(
+            admin_id=111,
+            moderation_mode=ModerationMode.NOTIFY,
+        )
+        with patch(
+            "src.app.handlers.handle_spam.get_admins_map",
+            new_callable=AsyncMock,
+            return_value={111: admin},
+        ):
+            result = await check_admin_delete_preferences([111])
+            assert result is False
+            assert any(
+                "opted out" in rec.message.lower() or "auto" in rec.message.lower()
+                for rec in caplog.records
+            )

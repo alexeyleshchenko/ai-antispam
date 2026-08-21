@@ -27,7 +27,6 @@ from ..common.trace_context import get_root_span
 from ..common.utils import (
     format_chat_or_channel_display,
     get_add_to_group_url,
-    retry_on_network_error,
 )
 from ..database import (
     activate_discussion_group,
@@ -300,7 +299,6 @@ async def _handle_permission_update(
                     chat_title, event.chat.username, t(lang, "common.group")
                 )
 
-                @retry_on_network_error
                 async def send_setup_confirmation():
                     return await bot.send_message(
                         admin_id,
@@ -390,7 +388,6 @@ async def _handle_bot_added(
                 chat_title, event.chat.username, t(lang, "common.group")
             )
 
-            @retry_on_network_error
             async def send_setup_confirmation():
                 return await bot.send_message(
                     admin_id,
@@ -564,7 +561,6 @@ async def _send_promo_message(
             + t(lang, "status.setup_click")
         )
 
-        @retry_on_network_error
         async def send_promo_message():
             return await bot.send_message(
                 chat_id,

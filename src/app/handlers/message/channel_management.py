@@ -24,7 +24,6 @@ from ...common.utils import (
     format_chat_log,
     format_chat_or_channel_display,
     format_user_log,
-    retry_on_network_error,
 )
 from ...i18n import normalize_lang, t
 
@@ -358,7 +357,6 @@ async def notify_channel_admins(
         admin_id = admin.user.id
         try:
 
-            @retry_on_network_error
             async def send_instruction(admin_id=admin_id) -> None:
                 await bot.send_message(admin_id, instruction, parse_mode="HTML")
 

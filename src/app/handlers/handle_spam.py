@@ -2,6 +2,8 @@
 
 import html
 import logging
+from collections.abc import Awaitable, Callable, Sequence
+from functools import wraps
 
 from aiogram import types
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
@@ -23,7 +25,6 @@ from ..common.utils import (
     get_project_channel_url,
     get_setup_guide_url,
     get_spam_guide_url,
-    retry_on_network_error,
     spam_notify_spammers_via_mcp_enabled,
 )
 from ..database import get_admin, get_admins_map
@@ -38,6 +39,99 @@ from ..spam.account_signals import build_account_signals_body
 from ..types import MessageContextResult, MessageNotificationContext
 
 logger = logging.getLogger(__name__)
+
+
+def telegram_action(
+    action_name: str,
+    *,
+    extra_checks: Sequence[Callable[[Exception], bool]] = (),
+    on_permission_error: Callable[[Exception], Awaitable[None]] | None = None,
+) -> Callable:
+    """Decorator: standardizes exception handling for Telegram moderator API calls.
+
+    Catches:
+    - (TelegramBadRequest, TelegramForbiddenError):
+        * group_inaccessible → no-op (group is gone)
+        * extra_checks match → no-op (e.g. message already deleted)
+        * on_permission_error → call async callback (for UI feedback)
+        * else → log warning
+    - Exception → log warning (NEVER crashes)
+
+    Note: retry is NOT here — handled by session middleware (bot.py:setup_session_retry).
+    """
+
+    def decorator(
+        fn: Callable[..., Awaitable[object]],
+    ) -> Callable[..., Awaitable[None]]:
+        @wraps(fn)
+        async def wrapper(*args: object, **kwargs: object) -> None:
+            try:
+                await fn(*args, **kwargs)
+                logger.info(
+                    "%s succeeded for %s",
+                    action_name,
+                    _caller_context(args),
+                )
+            except (TelegramBadRequest, TelegramForbiddenError) as e:
+                if is_group_inaccessible_error(e):
+                    logger.info(
+                        "%s skipped (group inaccessible): %s",
+                        action_name,
+                        e,
+                    )
+                    return
+                for check in extra_checks:
+                    if check(e):
+                        logger.info(
+                            "%s already resolved: %s",
+                            action_name,
+                            e,
+                        )
+                        return
+                if is_permission_error(e):
+                    if on_permission_error is not None:
+                        await on_permission_error(e)
+                    else:
+                        logger.warning(
+                            "%s failed (permission error): %s",
+                            action_name,
+                            e,
+                            exc_info=True,
+                        )
+                    return
+                logger.warning(
+                    "%s failed (Telegram error): %s",
+                    action_name,
+                    e,
+                    exc_info=True,
+                )
+            except Exception as e:
+                logger.warning(
+                    "%s failed (unexpected): %s",
+                    action_name,
+                    e,
+                    exc_info=True,
+                )
+
+        return wrapper
+
+    return decorator
+
+
+def _caller_context(args: tuple[object, ...]) -> str:
+    """Extract minimal context from decorator args for success logging."""
+    if not args:
+        return ""
+    first = args[0]
+    # message object
+    if hasattr(first, "chat") and hasattr(first, "message_id"):
+        chat_id = getattr(first.chat, "id", "?")
+        msg_id = first.message_id  # type: ignore[attr-defined]
+        return f"chat={chat_id} msg={msg_id}"
+    # raw chat_id + user_id
+    if isinstance(first, int) and len(args) >= 2 and isinstance(args[1], int):
+        return f"chat={first} user={args[1]}"
+    return str(first)[:80]
 
 
 async def _get_notification_lang(
@@ -92,14 +186,19 @@ async def handle_spam(
         if effective_user_id is None:
             logger.warning("Message without effective user info, skipping ban")
             return "spam_no_user_info"
-        await handle_spam_message_deletion(message, admin_ids)
-        await ban_user_for_spam(
-            message.chat.id,
-            effective_user_id,
-            admin_ids,
-            message.chat.title,
-            group_username=getattr(message.chat, "username", None),
-        )
+        try:
+            await handle_spam_message_deletion(message, admin_ids)
+            await ban_user_for_spam(
+                message.chat.id,
+                effective_user_id,
+                admin_ids,
+                message.chat.title,
+                group_username=getattr(message.chat, "username", None),
+            )
+        except Exception:
+            logger.exception(
+                "auto-delete+ban failed for message %s", message.message_id
+            )
         return "spam_auto_deleted"
 
     return "spam_admins_notified" if notification_sent else "spam_notification_failed"
@@ -108,12 +207,23 @@ async def handle_spam(
 async def check_admin_delete_preferences(admin_ids: list[int]) -> bool:
     """Return True if all admins have auto-delete enabled (delete or delete_silent)."""
     if not admin_ids:
+        logger.warning("check_admin_delete_preferences: no admin_ids provided")
         return False
 
     admins_map = await get_admins_map(admin_ids)
     for admin_id in admin_ids:
         admin_user = admins_map.get(admin_id)
-        if not admin_user or not admin_user.auto_deletes_spam:
+        if not admin_user:
+            logger.warning(
+                "check_admin_delete_preferences: admin %s not found in DB", admin_id
+            )
+            return False
+        if not admin_user.auto_deletes_spam:
+            logger.warning(
+                "check_admin_delete_preferences: admin %s opted out of auto-delete (mode=%s)",
+                admin_id,
+                admin_user.moderation_mode.value,
+            )
             return False
     return True
 
@@ -428,45 +538,11 @@ async def handle_spam_message_deletion(
     if not message.from_user:
         return
 
-    try:
-
-        @retry_on_network_error
-        async def delete_spam_message():
-            return await bot.delete_message(message.chat.id, message.message_id)
-
-        await delete_spam_message()
-        logger.info(
-            f"Deleted spam message {message.message_id} in chat {format_chat_log(message.chat.id, message.chat.title, getattr(message.chat, 'username', None))}"
-        )
-    except (TelegramBadRequest, TelegramForbiddenError) as e:
-        if is_group_inaccessible_error(e):
-            logger.info(
-                "Cannot delete spam message %s in chat %s (group inaccessible): %s",
-                message.message_id,
-                format_chat_log(
-                    message.chat.id,
-                    message.chat.title,
-                    getattr(message.chat, "username", None),
-                ),
-                e,
-            )
-            return
-        if is_message_not_found_error(e):
-            logger.debug(
-                "Spam message %s already deleted in chat %s: %s",
-                message.message_id,
-                format_chat_log(
-                    message.chat.id,
-                    message.chat.title,
-                    getattr(message.chat, "username", None),
-                ),
-                e,
-            )
-            return
+    async def _notify_permission_error(_e: Exception) -> None:
         lang = await _get_notification_lang(admin_ids)
         perm_name = t(lang, "spam.permission_delete")
-        if not await handle_permission_error(
-            e,
+        await handle_permission_error(
+            _e,
             message.chat.id,
             admin_ids,
             message.chat.title,
@@ -474,11 +550,17 @@ async def handle_spam_message_deletion(
             "delete spam message",
             getattr(message.chat, "username", None),
             lang=lang,
-        ):
-            logger.warning(
-                f"Could not delete spam message {message.message_id} in chat {format_chat_log(message.chat.id, message.chat.title, getattr(message.chat, 'username', None))}: {e}",
-                exc_info=True,
-            )
+        )
+
+    @telegram_action(
+        "delete spam message",
+        extra_checks=(is_message_not_found_error,),
+        on_permission_error=_notify_permission_error,
+    )
+    async def _delete() -> None:
+        await bot.delete_message(message.chat.id, message.message_id)
+
+    await _delete()
 
 
 async def ban_user_for_spam(
@@ -489,32 +571,12 @@ async def ban_user_for_spam(
     group_username: str | None = None,
 ) -> None:
     """Ban user/channel in chat and remove from approved_members."""
-    try:
 
-        @retry_on_network_error
-        async def ban_spam_user():
-            if user_id < 0:
-                # It's a channel, use ban_chat_sender_chat
-                return await bot.ban_chat_sender_chat(chat_id, sender_chat_id=user_id)
-            return await bot.ban_chat_member(chat_id, user_id)
-
-        await ban_spam_user()
-        logger.info(
-            f"Banned user {format_user_log(user_id)} in chat {format_chat_log(chat_id, group_title, group_username)} for spam"
-        )
-    except (TelegramBadRequest, TelegramForbiddenError) as e:
-        if is_group_inaccessible_error(e):
-            logger.info(
-                "Cannot ban user %s in chat %s (group inaccessible): %s",
-                format_user_log(user_id),
-                format_chat_log(chat_id, group_title, group_username),
-                e,
-            )
-            return
+    async def _notify_ban_permission_error(_e: Exception) -> None:
         lang = await _get_notification_lang(admin_ids or [])
         perm_name = t(lang, "spam.permission_ban")
-        if not await handle_permission_error(
-            e,
+        await handle_permission_error(
+            _e,
             chat_id,
             admin_ids,
             group_title,
@@ -522,16 +584,20 @@ async def ban_user_for_spam(
             "ban user",
             group_username,
             lang=lang,
-        ):
-            logger.warning(
-                f"Failed to ban user {format_user_log(user_id)} in chat {format_chat_log(chat_id, group_title, group_username)}: {e}",
-                exc_info=True,
-            )
-    except Exception as e:
-        logger.warning(
-            f"Failed to ban user {format_user_log(user_id)} in chat {format_chat_log(chat_id, group_title, group_username)}: {e}",
-            exc_info=True,
         )
+
+    @telegram_action(
+        "ban user",
+        on_permission_error=_notify_ban_permission_error,
+    )
+    async def _ban() -> None:
+        if user_id < 0:
+            await bot.ban_chat_sender_chat(chat_id, sender_chat_id=user_id)
+        else:
+            await bot.ban_chat_member(chat_id, user_id)
+
+    await _ban()
+
     try:
         await remove_member_from_group(user_id, chat_id)
     except Exception as e:

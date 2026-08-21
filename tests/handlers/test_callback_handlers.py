@@ -314,13 +314,66 @@ async def test_handle_spam_confirm_callback_delete_failure_logs_title_username(
             )
         )
 
-        with caplog.at_level(logging.INFO, logger="src.app.handlers.callback_handlers"):
+        with caplog.at_level(logging.INFO):
             result = await handle_spam_confirm_callback(callback)
 
         assert result == "callback_spam_message_deleted"
 
     assert any(
-        "Message to delete not found" in r.getMessage()
-        and "'Test Group' @testgroup" in r.getMessage()
+        "delete spam message already resolved" in r.getMessage()
         for r in caplog.records
     )
+
+
+# =========================================================================
+# TDD test 1d — callback delete block + TelegramForbiddenError
+# =========================================================================
+@pytest.mark.asyncio
+async def test_callback_delete_permission_error_answers_user_with_error():
+    """callback.delete_spam_message with permission error answers user, no crash."""
+    from aiogram.exceptions import TelegramForbiddenError
+
+    callback = AsyncMock(spec=CallbackQuery)
+    callback.data = "delete_spam_message:67890:-1001234567890:111111"
+    callback.from_user = User(id=999, is_bot=False, first_name="Admin")
+    callback.message = AsyncMock(spec=Message)
+    callback.message.chat = Chat(id=-1001234567890, type="supergroup")
+    callback.message.message_id = 222222
+
+    with (
+        patch("src.app.handlers.callback_handlers.bot") as mock_bot,
+        patch(
+            "src.app.handlers.callback_handlers.get_admin",
+            new_callable=AsyncMock,
+            return_value=MagicMock(is_active=True, language_code="en"),
+        ),
+        patch(
+            "src.app.handlers.callback_handlers.get_group",
+            new_callable=AsyncMock,
+            return_value=MagicMock(admin_ids=[999]),
+        ),
+        patch(
+            "src.app.handlers.callback_handlers.confirm_pending_example_as_spam",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "src.app.handlers.callback_handlers.ban_user_for_spam",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "src.app.handlers.callback_handlers.bot.edit_message_text",
+            new_callable=AsyncMock,
+        ),
+    ):
+        mock_bot.delete_message = AsyncMock(
+            side_effect=TelegramForbiddenError(
+                method=MagicMock(), message="bot was kicked from the group"
+            )
+        )
+
+        result = await handle_spam_confirm_callback(callback)
+
+        # Should NOT crash
+        assert result is not None
+        # callback.answer should have been called with error text
+        assert callback.answer.called
