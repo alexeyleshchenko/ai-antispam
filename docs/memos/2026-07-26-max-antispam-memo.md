@@ -445,3 +445,95 @@ The complete API surface is: `/me`, `/chats`, `/messages`, `/updates`, `/videos`
 **Test channel:** "Тест антиспам" (chat_id: -77345848199175)
 **Bot:** "Антиспам" (user_id: 385916094, username: id773671678516_1_bot)
 **Owner whitelist:** user_id 190126855 — never moderate
+
+---
+
+## Re-test #2 result — 2026-08-25 (comments REST API LIVE, webhook unproven)
+
+**Verdict: SHOWSTOPPER LIFTED at REST level. Comments API is live and functional as of 2026-08-25 ~06:10 UTC. Live-verified against production `platform-api2.max.ru` with bot token (id773671678516_1_bot).**
+
+### What changed since 11 Aug re-test
+
+| Surface | Status 25 Aug | Evidence |
+|---|---|---|
+| Changelog | ✅ New «Сomments» section, **Август 2026**: 5 methods | dev.max.ru/docs-api/changelog-api (RSC:1 fetch) |
+| REST CRUD | ✅ **LIVE** | GET/POST/DELETE `/messages/{mid}/comments` all HTTP 200 in live probe |
+| Comment object | `{recipient:{chat_id,chat_type,post_id}, timestamp, body:{mid,seq,text}}`; POST response includes full **`sender`** (user_id, name, username, is_bot, last_activity_time) | live probe responses |
+| Webhook events | ⚠️ Documented (`message_created`/`message_edited`/`message_removed` on comments; text in `body.text`, post id in `message.recipient.post_id`) but **NOT yet observed live** — see below | docs page «Как настроить модерацию комментариев к постам в каналах» |
+| Go SDK (official) | ✅ `const.go`: `formatPathComments`, `paramCommentIDs`; `model/comment.go` — commits **2026-08-24** («add get comments by message id», «fix get comments» ×6) | github.com/max-messenger/max-bot-api-client-go |
+| TS SDK (official) | ✅ `src/core/network/api/modules/comments/` full CRUD module — commit 2026-08-19 «feat: Add comments API»; new official `max-io@0.1.7` npm package exposes getComments/sendComment/editComment/deleteComment | repo tree + jsdelivr max-io typings |
+| Rust maxoxide v3.0.0 | ✅ 5 typed experimental comment methods — release **2026-08-21**; notes «MAX still marks the comments API temporarily unavailable» (STALE — live probe disproves) | CHANGELOG.md, API_SUPPORT.md |
+| Python love-apples/maxapi | ❌ No comment methods yet (latest 2026-08-19 upload fix; only a gist reference doc mentions comments) | repo commits/tree |
+| Java wilidon/max-bot-api-java | ❌ Nothing since 2026-07-09 | repo commits |
+| **Stories** | ❌ **NO CHANGES.** Zero hits across all 5 SDKs, no changelog entries, no endpoints, no story update types. Channel stories («end of summer 2026») not shipped to API | code search sweep all repos |
+
+### Live probe log (2026-08-25)
+
+- Token valid (`GET /me` → bot info OK).
+- Test channel −77345848199175 has 2 posts; newest mid `mid.ffffb9a7843177f9019fa83f1d383ad4`.
+- `GET /messages/{mid}/comments` → 200, returned both July human comments («Коммент 2», «Коммент 2-2»).
+- `POST .../comments {"text":...}` → 200, created comment, **sender object populated**.
+- `DELETE .../comments?comment_id=...` → 200 `{"success":true}`; GET confirms removal. Both probe comments cleaned up.
+- Docs pages still carry «Функциональность временно недоступна» banner + that response code — **stale**, contradicted by live behavior.
+
+### Webhook gap (remaining risk)
+
+Listener :9876 + fresh tunnel + subscription registered → bot-created comment POST and DELETE produced **zero** webhook deliveries and empty `/updates` queue over ~2 min. Possible causes: (a) events fire only for *subscriber* (human) comments as docs phrase it («Когда кто-нибудь из подписчиков канала прокомментирует пост…»), not bot's own; (b) event pipeline for comments not fully enabled. **Pending: one human comment on «Тест комментов 2» while listener is up.**
+
+### Housekeeping noted
+
+- Stale July subscription `https://treasure-oxygen-messaging-researcher.trycloudflare.com/webhook` (dead tunnel) still registered — remove during implementation.
+- Bot channel permissions include read_all_messages/write/edit/delete — sufficient for moderation per docs.
+- Comment `mid` values are strings; DB schema needs TEXT message_id columns (already known).
+
+### Next steps (supersedes «postpone 2 weeks» branch of protocol step 6)
+
+1. **Alexey: comment once on «Тест комментов 2»** in Тест антиспам (listener left running). If `message_created` arrives → showstopper fully dead → start MVP implementation per plan steps 1–6.
+2. If no event → wait 3–4 days, re-probe (SDK activity suggests MAX is actively shipping this surface right now).
+3. Stories: keep deferred; re-check at next scheduled probe or when channel stories ship client-side.
+
+---
+
+## Re-test 3 — 2026-08-25 (scheduled cron): **COMMENTS API HAS LANDED** 🎉
+
+**Method:** all 5 SDK repos + dev.max.ru changelog (RSC:1) + live read-only probe against test channel `-77345848199175`.
+
+### Comments — MAJOR CHANGE
+
+| Source | Status |
+|---|---|
+| dev.max.ru changelog | ✅ **«Август 2026 → Добавлено»**: all 5 comment CRUD methods listed |
+| Official TS SDK (`max-bot-api-client-ts`) | ✅ New `CommentsApi` module (pushed 24 Aug): get/getById/send/edit/delete |
+| Rust `maxoxide` 3.0 | ✅ Typed comment support, marked experimental (repo moved to mammothcoding/maxoxide) |
+| Go SDK (`max-bot-api-client-go`) | ❌ Not yet (const.go unchanged; repo pushed 24 Aug but no comment paths) |
+| Python `love-apples/maxapi` | ❌ ApiPath unchanged (only new path: `/commands`); UpdateType unchanged |
+| Java SDK (`wilidon/max-bot-api-java`) | ❌ Untouched since 9 Jul |
+
+**Documented routes:**
+`GET/POST /messages/{messageId}/comments`, `GET .../comments/{commentId}`, `PUT/DELETE .../comments?comment_id=` — require bot scopes `read_all_messages` + `write`, channel comments enabled.
+
+**Live probe (read-only GET, token from `.secrets/max-bot-token`):**
+- `GET /messages/{mid}/comments?count=50` → **HTTP 200 with real data** on both test posts
+- Returns ALL FOUR historical comments from the 28 Jul spike («Спам», «Спам - 2», «Коммент 2», «Коммент 2-2») — retroactive visibility works
+- Comment shape: `{recipient:{chat_id, chat_type:"channel", post_id}, timestamp, body:{mid, seq, text}}`
+- ⚠️ **NO `sender` field** — author attribution still impossible (can read text, cannot identify/ban author)
+- ⚠️ Docs pages carry bold banner **«Функциональность временно недоступна»** even though GET works live
+- ⚠️ Single-comment GET `/messages/{cid}/comments/{cid}` → HTTP 500 internal.error (partially shipped)
+
+### Stories — NO CHANGES
+
+No endpoints, no update types, no SDK methods anywhere (all 5 SDKs + changelog). Channel stories rolling out client-side "in waves" per 14 Aug press (sostav.ru) → the blind spot is growing as adoption spreads.
+
+### Still missing for the antispam port
+
+1. **Webhook event for new comments** — no comment-related update type in any SDK (`message_created` did NOT fire for comments on 28 Jul). Polling-only moderation is possible NOW; push-based is unverified.
+2. **`sender` field on comments** — without it: no ban, no author signals, no repeat-offender tracking. Delete-only moderation.
+3. Whether DELETE comment route actually works (not probed — destructive).
+
+### Recommendation
+
+The showstopper is **half-lifted**: text-level moderation pipeline is buildable today (poll comments → LLM classify → delete spam comment), but sender attribution is still absent. Next step is NOT another blind SDK re-poll:
+
+1. **Live spike 1+2 re-run** (~30 min, needs Alexey): restart webhook listener + tunnel, post fresh comment in test channel → verify whether any webhook fires now; probe if new-comment shape includes `sender`.
+2. If webhook fires with sender → proceed to MVP implementation per plan.
+3. If REST-only/no sender → decide: poll-based delete-only MVP vs wait.
