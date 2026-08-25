@@ -30,7 +30,7 @@ llm:
   openrouter_models:
     - nvidia/nemotron-3-super-120b-a12b:free
     - nvidia/nemotron-3-ultra-550b-a55b:free
-    - inclusionai/ling-3.0-flash:free
+    - nvidia/nemotron-3.5-lightning:free
 
 spam:
   high_confidence_threshold: 90
