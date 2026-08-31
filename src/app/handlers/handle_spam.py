@@ -27,6 +27,7 @@ from ..common.utils import (
     get_setup_guide_url,
     get_spam_guide_url,
     spam_notify_spammers_via_mcp_enabled,
+    user_display_label,
 )
 from ..database import get_admin, get_admins_map
 from ..database.group_operations import (
@@ -217,13 +218,18 @@ async def check_admin_delete_preferences(admin_ids: list[int]) -> bool:
         admin_user = admins_map.get(admin_id)
         if not admin_user:
             logger.warning(
-                "check_admin_delete_preferences: admin %s not found in DB", admin_id
+                "check_admin_delete_preferences: admin id=%s not found in DB "
+                "(no username/name available)",
+                admin_id,
             )
             return False
         if not admin_user.auto_deletes_spam:
             logger.warning(
                 "check_admin_delete_preferences: admin %s opted out of auto-delete (mode=%s)",
-                admin_id,
+                user_display_label(
+                    username=admin_user.username,
+                    user_id=admin_id,
+                ),
                 admin_user.moderation_mode.value,
             )
             return False

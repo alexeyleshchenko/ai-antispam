@@ -11,6 +11,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from ..common.bot import bot
 from ..common.telegram_errors import is_message_not_found_error
 from ..common.utils import (
+    user_display_label,
     get_add_to_group_url,
     load_config,
 )
@@ -250,11 +251,19 @@ async def handle_spam_ignore_callback(callback: CallbackQuery) -> str:
                     extra={"pending_id": pending_id},
                 )
             elif row.get("already_confirmed"):
+                prior_admin_id = row.get("admin_id")
+                prior_admin = await get_admin(prior_admin_id) if prior_admin_id else None
                 logger.info(
-                    "mark_as_not_spam: pending %s already confirmed (by admin %s) — duplicate callback, skipping",
+                    "mark_as_not_spam: pending %s already confirmed (by %s) — duplicate callback, skipping",
                     pending_id,
-                    row.get("admin_id"),
-                    extra={"pending_id": pending_id, "admin_id": row.get("admin_id")},
+                    user_display_label(
+                        username=prior_admin.username if prior_admin else None,
+                        user_id=prior_admin_id,
+                    ),
+                    extra={
+                        "pending_id": pending_id,
+                        "admin_id": prior_admin_id,
+                    },
                 )
             with contextlib.suppress(Exception):
                 await bot.edit_message_text(
@@ -360,11 +369,16 @@ async def handle_spam_confirm_callback(callback: CallbackQuery) -> str:
                 )
             except TelegramBadRequest as e:
                 if not is_message_not_found_error(e):
+                    actor = callback.from_user
                     logger.warning(
-                        "Failed to edit notification message %s:%s (admin=%s): %s",
+                        "Failed to edit notification message %s:%s (%s): %s",
                         msg.chat.id,
                         msg.message_id,
-                        callback.from_user.id if callback.from_user else None,
+                        user_display_label(
+                            full_name=actor.full_name if actor else None,
+                            username=actor.username if actor else None,
+                            user_id=actor.id if actor else None,
+                        ),
                         e,
                     )
 

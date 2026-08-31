@@ -27,6 +27,7 @@ from ..common.trace_context import get_root_span
 from ..common.utils import (
     format_chat_or_channel_display,
     get_add_to_group_url,
+    user_display_label,
 )
 from ..database import (
     activate_discussion_group,
@@ -735,23 +736,31 @@ async def handle_member_service_message(message: types.Message) -> str:
 async def _deactivate_admin_after_block(admin_id: int) -> None:
     """Mark the administrator inactive after they block the bot."""
     try:
+        admin = await get_admin(admin_id)
+        admin_label = user_display_label(
+            username=admin.username if admin else None,
+            user_id=admin_id,
+        )
         if await deactivate_admin(admin_id):
-            logger.info("Admin %s marked inactive after blocking the bot", admin_id)
+            logger.info("Admin %s marked inactive after blocking the bot", admin_label)
 
             # Calculate total time user was with bot in days
-            admin = await get_admin(admin_id)
             if admin:
                 total_days = (datetime.now(UTC) - admin.created_at).days
 
                 # Set the total time on the root span for trace-level visibility
                 get_root_span().set_attribute("total_user_days", total_days)
-                logger.info("Set total_user_days=%d for admin %s", total_days, admin_id)
+                logger.info(
+                    "Set total_user_days=%d for admin %s", total_days, admin_label
+                )
         else:
-            logger.info("Admin %s was already inactive when blocking the bot", admin_id)
+            logger.info(
+                "Admin %s was already inactive when blocking the bot", admin_label
+            )
     except Exception as exc:
         logger.warning(
             "Failed to deactivate admin %s after blocking the bot: %s",
-            admin_id,
+            user_display_label(user_id=admin_id),
             exc,
             exc_info=True,
         )

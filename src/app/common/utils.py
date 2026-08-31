@@ -554,3 +554,28 @@ def get_dotted_path(json: dict, path: str, raise_on_missing: bool = False):
             raise KeyError(f"Key {next_step} not found in {json}")
         else:
             return None
+
+
+def user_display_label(
+    *,
+    username: str | None = None,
+    full_name: str | None = None,
+    user_id: int | None = None,
+) -> str:
+    """Build a log label that never reduces a human to a bare id.
+
+    Owner rule (2026-08-31): log messages must not contain only user ids —
+    usernames and names are compulsory. Whatever pieces are known are joined;
+    an explicit "(no username on record)" marker replaces an absent name so
+    the absence itself is visible in logs.
+    """
+    parts: list[str] = []
+    if full_name:
+        parts.append(full_name)
+    if username:
+        parts.append(f"@{username}")
+    if not parts:
+        parts.append("(no username/name on record)")
+    if user_id is not None:
+        parts.append(f"id={user_id}")
+    return " ".join(parts)
