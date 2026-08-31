@@ -11,9 +11,9 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from ..common.bot import bot
 from ..common.telegram_errors import is_message_not_found_error
 from ..common.utils import (
-    user_display_label,
     get_add_to_group_url,
     load_config,
+    user_display_label,
 )
 from ..database import (
     get_admin,
