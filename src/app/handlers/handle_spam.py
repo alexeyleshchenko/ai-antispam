@@ -224,7 +224,7 @@ async def check_admin_delete_preferences(admin_ids: list[int]) -> bool:
             )
             return False
         if not admin_user.auto_deletes_spam:
-            logger.warning(
+            logger.info(
                 "check_admin_delete_preferences: admin %s opted out of auto-delete (mode=%s)",
                 user_display_label(
                     username=admin_user.username,
