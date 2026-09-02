@@ -112,6 +112,14 @@ jobs:
               echo "${GHCR_PULL_TOKEN:-}" | docker login ghcr.io -u "${GHCR_PULL_USER:-}" --password-stdin
             fi
             docker compose pull && docker compose up -d
+            # deploy guard: fail loud instead of a green no-op (stale-tag incident 2026-08-23..09-01)
+            WANT=$(docker compose images -q ai-antispam)
+            HAVE=$(docker inspect -f '{{.Image}}' ai-antispam | cut -c8-)
+            RUNNING=$(docker inspect -f '{{.Config.Image}}' ai-antispam)
+            EXPECT="ghcr.io/alexeyleshchenko/ai-antispam:main"
+            [ "$RUNNING" = "$EXPECT" ] || { echo "FATAL: container runs $RUNNING, expected $EXPECT"; exit 1; }
+            [ "$WANT" = "$HAVE" ] || { echo "FATAL: container image stale (compose pulled $WANT, container runs $HAVE)"; exit 1; }
+            echo "deploy guard: OK ($RUNNING)"
 
       - name: Prune old images
         uses: appleboy/ssh-action@v1.2.0
