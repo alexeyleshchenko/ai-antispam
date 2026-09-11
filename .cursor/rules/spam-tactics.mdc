@@ -1,19 +1,19 @@
 ---
-description: Spam tactics in the memory bank
-globs: memory-bank/spamTactics.md
+description: Spam tactics documentation
+globs: docs/spamTactics.md
 alwaysApply: false
 ---
 
 # Spam Tactics Management
 
-This rule ensures that `memory-bank/spamTactics.md` is kept up-to-date with the latest spam examples and tactics.
+This rule ensures that `docs/spamTactics.md` is kept up-to-date with the latest spam examples and tactics.
 
 ## When to Update
 - When a new spam example is provided by the user.
 - When new spam patterns are discovered in the project's Telegram channel.
 - When significant changes are made to how the system classifies or handles spam.
 
-## Structure of memory-bank/spamTactics.md
+## Structure of docs/spamTactics.md
 The file should contain:
 - **Common Tactics**: Categorized list of known spam methods (e.g., crypto scams, porn bots, malicious links).
 - **Recent Examples**: A list of recent spam messages with descriptions and classification scores.

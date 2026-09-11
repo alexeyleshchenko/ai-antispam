@@ -4,7 +4,6 @@
 
 **Format:** HTML (`--parse-mode HTML`)
 **Audience:** active admins (~262), via `scripts/run_broadcast_on_vds.sh --new-campaign`
-**Runbook:** `memory-bank/opsPlaybook.md` (resume pitfalls, `--new-campaign`, export IDs)
 
 ---
 
@@ -36,4 +35,3 @@
 3. ~~Export admin IDs~~ → `scripts/admin_ids.txt` (262 active)
 4. ~~Dry-run~~ — 262 recipients
 5. ~~Live broadcast (2026-05-16)~~ — **252 sent**, 10 unreachable (deactivated Telegram accounts)
-6. ~~Log in memory-bank~~ — see `progress.md`

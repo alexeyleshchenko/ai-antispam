@@ -58,15 +58,6 @@ src/app/
 - **MiniMax**: Coding plan MCP
 - **telegram**: Telegram bot integration
 
-## Memory Bank
-
-At start of dialog, read relevant memory-bank files:
-- `memory-bank/activeContext.md` — current system state
-- `memory-bank/confirmedSpamExamples.md` — labeled spam examples
-- `memory-bank/progress.md` — recent work log
-- `memory-bank/techContext.md` — technical details
-- `memory-bank/opsPlaybook.md` — deploy/broadcast/migration pitfalls for agents
-
 ## Docker
 
 **Image:** `ghcr.io/alexeyleshchenko/ai-antispam` — **184MB**. Legacy pulls from `ghcr.io/leshchenko1979/ai-antispam` until the apps compose switchover.
