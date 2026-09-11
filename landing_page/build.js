@@ -32,6 +32,12 @@ function buildHtml(cssFilename = 'output.css') {
   if (fs.existsSync(path.join(__dirname, 'src', 'assets'))) {
     fs.copySync(path.join(__dirname, 'src', 'assets'), path.join(__dirname, 'dist', 'assets'));
   }
+  if (fs.existsSync(path.join(__dirname, 'src', 'CNAME'))) {
+    fs.copyFileSync(
+      path.join(__dirname, 'src', 'CNAME'),
+      path.join(__dirname, 'dist', 'CNAME')
+    );
+  }
   fs.copyFileSync(
     path.join(__dirname, 'src', 'sitemap.xml'),
     path.join(__dirname, 'dist', 'sitemap.xml')
