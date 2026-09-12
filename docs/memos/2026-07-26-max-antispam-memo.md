@@ -680,3 +680,89 @@ This exercises `ssl.get_default_verify_paths()` → `cafile=/etc/ssl/cert.pem` �
 ### Consequence
 
 The `-k` workaround is **retired for production**. The MAX surface can now verify TLS normally, which removes the failure mode §4.1 called out: shipping behind a `-k` flag that silently disables verification for the bot's whole API surface. Any future MAX client code must use default verification — a `verify=False` / `-k` in new code is a regression against this section.
+
+---
+
+## Stable webhook ingress — 2026-09-12 (issue #30): **ROUTE LIVE, FAIL-CLOSED**
+
+The production ingress for MAX updates now exists and is verified end-to-end from outside the
+host. The 28 Jul tunnel spike is fully retired: nothing ephemeral remains registered.
+
+### The route
+
+| Item | Value |
+|---|---|
+| Public URL | `https://ai-antispam.l1979.ru/process-max-updates` |
+| Router | Traefik `ai-antispam` router on **apps** (file provider, `--providers.file.watch=true`) |
+| Auth | `X-Max-Bot-Api-Secret` header, constant-time compare (`hmac.compare_digest`), **fail-closed** |
+| Secret | `MAX_WEBHOOK_SECRET` in `/data/projects/ai-antispam/.env` (gitignored, never logged) |
+| Scope | **INGRESS + OBSERVABILITY ONLY — nothing moderates** |
+| Commit | `e39ca89` — `src/app/max_webhook.py`, `src/app/main.py`, `tests/test_max_webhook.py` |
+
+The router matches on **host AND path**, so the new path had to be named explicitly. Rule,
+before → after:
+
+```
+- Host(`ai-antispam.l1979.ru`) && (Path(`/process-tg-updates`) || Path(`/health`))
++ Host(`ai-antispam.l1979.ru`) && (Path(`/process-tg-updates`) || Path(`/process-max-updates`) || Path(`/health`))
+```
+
+It was **404** before this change and is **200** after. The rule is path-scoped, not a
+catch-all: a bogus path still returns 404.
+
+Deployed by copying that **one** router file to `/data/projects/traefik/config/ai-antispam.yml`
+on apps. **`deploy-traefik.sh` was NOT run** — it does `docker compose down && up` and would
+bounce every service on apps; the file provider hot-reloads instead. In `/root/vds-servers`
+(source of truth) this file is **modified but uncommitted**: other lanes hold uncommitted edits
+there, so only this path was touched in the working tree.
+
+### Auth contract — fail-closed
+
+`MAX_WEBHOOK_SECRET` unset on the host → **503**. The route refuses to accept unauthenticated
+traffic on a public path that will later carry a moderation hook, rather than silently allowing
+it. With the secret set, the `X-Max-Bot-Api-Secret` header must match.
+
+### Verification — end-to-end, from outside the host
+
+Probed from the agents box through public DNS → Traefik on apps → container
+(image `ghcr.io/alexeyleshchenko/ai-antispam:main`, `StartedAt=2026-09-12T12:06:26Z`):
+
+| Case | Status |
+|---|---|
+| correct `X-Max-Bot-Api-Secret` | **200** `{"ok": true}` |
+| wrong secret | **403** `{"error": "Unauthorized"}` |
+| no secret header | **403** `{"error": "Unauthorized"}` |
+| bogus path (`/no-such-route-30`) | **404** |
+
+The accepted payload as it appears in the bot log — body-free by construction:
+
+```
+12:08:37.163 MAX update received: update_type=probe30e2e chat_id=-77345848199175 mid=mid.probe30e2e sender_id=42 sender_name=probe text_len=13
+```
+
+`summarise()` never emits the message body or the secret; only fixed field names and a text
+length, so the line stays greppable without leaking content.
+
+### Subscription state
+
+`GET /subscriptions` → **exactly 1**, and it is the stable route:
+
+```json
+{"url": "https://ai-antispam.l1979.ru/process-max-updates",
+ "update_types": ["comment_removed", "comment_created", "comment_edited"]}
+```
+
+**Zero `trycloudflare.com` hosts.** The two stale tunnel subscriptions §4.2 flagged
+(`treasure-oxygen-messaging-researcher…`, `numerous-courtesy-perhaps-replied…`) were already
+deleted during the #31 window work, before this cycle — the table was empty (`count=0`) when
+this registration ran, so this cycle's DELETE leg was a **no-op**. Issue #30's title ("two
+stale") is itself stale on that point; the issue's remaining substance was the stable
+replacement, which is what shipped.
+
+### Scope boundary — what this does NOT do
+
+**No MAX moderation is implemented.** The route authenticates, validates the envelope, logs a
+one-line body-free summary and returns 200. It deletes no comment, bans no user and classifies
+nothing. MAX moderation is the MAX port's own workstream — buildable *on* this ingress, not
+built *by* it. The `comment_*` update types are subscribed so the #31 delivery question can be
+settled against a stable URL instead of a tunnel.
