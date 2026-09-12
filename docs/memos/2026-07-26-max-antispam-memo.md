@@ -587,7 +587,7 @@ Moderation is therefore **buildable today on REST polling**; push-based ingestio
 
 ### 4. Operational findings (carry-forward)
 
-1. **TLS / Минцифры CA is still a production blocker.** `platform-api2.max.ru` presents a chain the standard Linux trust store cannot verify (`curl: (60) unable to get local issuer certificate`). Every probe above used `-k`. Production deployment must ship the Минцифры root CA in the container trust store or set a custom CA bundle — this is a deploy prerequisite, not a spike detail.
+1. ~~**TLS / Минцифры CA is still a production blocker.**~~ **CLOSED 2026-09-12 (issue #29).** `platform-api2.max.ru` presented a chain the standard Linux trust store could not verify (`curl: (60) unable to get local issuer certificate`), so every probe above used `-k`. The Минцифры root CA now ships in the image trust store (`certs/russian_trusted_root_ca.crt` + `update-ca-certificates`) and the deployed container verifies the chain with `tls=0`. Full receipts in the addendum at the end of this memo.
 2. **Two stale subscriptions are registered and point at dead tunnels** — `treasure-oxygen-messaging-researcher.trycloudflare.com/webhook` and `numerous-courtesy-perhaps-replied.trycloudflare.com/webhook`, both left over from the 28 Jul spike. They must be replaced (not supplemented) before any production webhook, otherwise MAX will spend its retry window on dead hosts.
 3. **The `max-api-retest` cron job is gone** from the scheduler (it was disabled; it is no longer present at all). The recurring re-test loop is retired — this memo is the standing record, and further MAX checks should be triggered as needed rather than on a blind schedule.
 
@@ -599,3 +599,84 @@ The original showstopper — *comments invisible to the Bot API* — is **perman
 `poll or receive comments → classify → delete spam comment → block spammer`, plus the two carry-forward items above (CA bundle, subscription hygiene).
 
 Stories / profile-photo-age / Premium signals / MTProto userbot / native payments remain unavailable and should stay **deferred**, exactly as the port matrix concluded.
+
+---
+
+## Carry-forward 1 CLOSED — 2026-09-12: Минцифры root CA shipped in the container trust store (issue #29)
+
+**Close condition:** the deployed container verifies `platform-api2.max.ru` with **no `-k` / no TLS bypass**, proven by an in-container call whose receipt (exit code + issuer chain) is recorded here.
+
+### The chain, as presented by the server
+
+```
+0 s:CN = *.max.ru, O = MAX LLC, C = RU, ST = 77 Moscow, L = Moscow,
+    street = Leningradskiy pr. 39 b.79, 1.2.643.100.4 = 9714058267, OGRN = 1247700595230
+  i:C = RU, O = The Ministry of Digital Development and Communications, CN = Russian Trusted Sub CA
+1 s:C = RU, O = The Ministry of Digital Development and Communications, CN = Russian Trusted Sub CA
+  i:C = RU, O = The Ministry of Digital Development and Communications, CN = Russian Trusted Root CA
+```
+
+Before the fix, from inside the running container, the same call returned
+`curl: (60) unable to get local issuer certificate` — every probe in §1 above ran behind `-k`.
+
+### What shipped (commit `78c197d`, 3 files, +46/-1)
+
+| File | Change |
+|---|---|
+| `certs/russian_trusted_root_ca.crt` | The Минцифры **root** CA (2088 B), vendored into the repo |
+| `Dockerfile` | `COPY certs/… /usr/local/share/ca-certificates/` + `RUN update-ca-certificates`, placed **before** `USER appuser` (the tool needs root) |
+| `.github/workflows/deploy.yml` | `- 'certs/**'` added to the push trigger paths, so a future cert rotation rebuilds the image |
+
+Source: `https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt` (HTTP 200).
+`subject == issuer == C = RU, O = The Ministry of Digital Development and Communications, CN = Russian Trusted Root CA` → self-signed root.
+Validity `Mar 1 21:04:15 2022 GMT` → `Feb 27 21:04:15 2032 GMT`.
+`sha256 Fingerprint = D2:6D:2D:02:31:B7:C3:9F:92:CC:73:85:12:BA:54:10:35:19:E4:40:5D:68:B5:BD:70:3E:97:88:CA:8E:CF:31`
+(md5 `a867ca37a72362c5318716f682f8c7e4`, byte-identical to the copy functionally verified in recon).
+
+> **The root alone is sufficient — the Sub CA is NOT required.** Shipping only the root still yields `tls=0`, because the server sends the intermediate and the trust store only has to anchor the chain. This memo therefore does not vendor `russiantrustedca.pem`.
+>
+> **Trap for the next reader:** `https://gu-st.ru/content/Other/doc/russiantrustedca.pem` serves the **SUB** CA, not the root. Trusting that URL's name costs a round-trip — check `subject == issuer` to confirm you hold a root.
+
+### Deploy path (this was an open question — now answered)
+
+`.github/workflows/deploy.yml` does **not** stop at pushing an image. The workflow's `deploy` job runs a **`Deploy to server`** step, which is what refreshes the running container on `apps` — no watchtower, no cron, no manual `compose pull` needed.
+
+Receipt: run `34687105478`, sha `78c197d8`, event `push`, `completed/success` at `2026-09-12T09:55:40Z`; container `ai-antispam` restarted at `2026-09-12T09:57:45Z` (`Up 4 minutes (healthy)`, `restarts=0`) on image `sha256:f38f9a54b584…71a54`.
+
+### Receipts — in-container, no `-k`
+
+**curl (exit code + verify result):**
+```
+$ ssh apps 'docker exec ai-antispam curl -sS -o /dev/null \
+    -w "http=%{http_code} tls=%{ssl_verify_result}\n" https://platform-api2.max.ru/'
+http=404 tls=0            # rc=0 — tls=0 == X509_V_OK. The 404 is just "no route at /".
+```
+```
+* SSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384 / x25519 / RSASSA-PSS
+*   subject: CN=*.max.ru; O=MAX LLC; C=RU; ST=77 Moscow; L=Moscow;
+             street=Leningradskiy pr. 39 b.79; 1.2.643.100.4=9714058267; OGRN=1247700595230
+*   issuer: C=RU; O=The Ministry of Digital Development and Communications; CN=Russian Trusted Sub CA
+*   subjectAltName: "platform-api2.max.ru" matches cert's "*.max.ru"
+```
+
+**Python — the receipt that actually matters, because the bot is Python and never calls `curl`:**
+```
+$ ssh apps 'docker exec ai-antispam python3 -c "import ssl,socket; \
+    ctx=ssl.create_default_context(); \
+    s=ctx.wrap_socket(socket.create_connection((\"platform-api2.max.ru\",443),timeout=15), \
+                      server_hostname=\"platform-api2.max.ru\"); print(\"PYTHON TLS OK\", s.version())"'
+PYTHON TLS OK TLSv1.3
+issuer: Russian Trusted Sub CA
+```
+This exercises `ssl.get_default_verify_paths()` → `cafile=/etc/ssl/cert.pem` → `/etc/ssl/certs/ca-certificates.crt`, so **every** Python HTTP library in the image (`httpx`, `aiohttp`, `requests`, `urllib3`) inherits the trust with no per-client configuration and no `verify=False`.
+
+**Trust-store state, before → after:**
+
+| | Before | After |
+|---|---|---|
+| `/usr/local/share/ca-certificates/` | empty | `russian_trusted_root_ca.crt` (2088 B) |
+| `/etc/ssl/certs/ca-certificates.crt` | 179359 B | 181448 B (+2089 = the root, re-emitted) |
+
+### Consequence
+
+The `-k` workaround is **retired for production**. The MAX surface can now verify TLS normally, which removes the failure mode §4.1 called out: shipping behind a `-k` flag that silently disables verification for the bot's whole API surface. Any future MAX client code must use default verification — a `verify=False` / `-k` in new code is a regression against this section.
