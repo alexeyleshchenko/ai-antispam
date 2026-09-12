@@ -537,3 +537,65 @@ The showstopper is **half-lifted**: text-level moderation pipeline is buildable 
 1. **Live spike 1+2 re-run** (~30 min, needs Alexey): restart webhook listener + tunnel, post fresh comment in test channel → verify whether any webhook fires now; probe if new-comment shape includes `sender`.
 2. If webhook fires with sender → proceed to MVP implementation per plan.
 3. If REST-only/no sender → decide: poll-based delete-only MVP vs wait.
+
+---
+
+## Re-test 4 — 2026-09-12 (bot lane, live end-to-end): **COMMENTS FULL CRUD + SENDER CONFIRMED** 🚀
+
+**Method:** authenticated live probes against production `platform-api2.max.ru` with the registered test bot, plus SDK cross-checks via the GitHub API. Every line below is a receipt from this cycle — no SDK-reading inference where a live probe was possible.
+
+Bot identity (live `GET /me` → HTTP 200): `Антиспам`, username `id773671678516_1_bot`, user_id `385916094`.
+Test channel: `-77345848199175` («Тест антиспам»), post `mid.ffffb9a7843177f9019fa83f1d383ad4`.
+
+### 1. Live API probe results (2026-09-12)
+
+| Probe | Result | Note |
+|---|---|---|
+| `GET /me` | ✅ HTTP 200 | Bot identity above |
+| `GET /chats` | ✅ HTTP 200 | 1 channel, `type: channel`, `status: active`, `participants_count: 2` |
+| `GET /messages?chat_id=` | ✅ HTTP 200 | 2 channel posts listed |
+| `GET /messages/{post}/comments` | ✅ HTTP 200 | Lists all comments with `recipient`, `timestamp`, `body{mid,seq,text}` |
+| `GET /messages/{post}/comments/{comment}` | ✅ HTTP 200 | **Fixed** — re-test 3 saw HTTP 500 `internal.error` on this route |
+| `POST /messages/{post}/comments` | ✅ HTTP 200 | Returns the created comment **with a populated `sender` object** |
+| `PUT /messages/{post}/comments?comment_id=` | ✅ HTTP 200 | `{"success":true}`; follow-up GET confirmed the edited text |
+| `DELETE /messages/{post}/comments?comment_id=` | ✅ HTTP 200 | `{"success":true}`; follow-up GET confirmed the comment is gone |
+| `GET /subscriptions` | ✅ HTTP 200 | Update types **include `comment_created`, `comment_edited`, `comment_removed`** |
+| `GET /stories` | ❌ HTTP 404 | `method.not.found` — still zero Bot API surface |
+| `GET /payments`, `/invoices`, `/stars`, `/subscription/plans` | ❌ HTTP 404 | Still no native payment primitive |
+
+**The `sender` object** returned on `POST` (and the field re-test 3 reported missing) carries:
+`user_id`, `first_name`, `last_name`, `is_bot`, `username`, `name`, `last_activity_time`.
+
+> Re-test 3's two blockers — *"NO `sender` field"* and *"single-comment GET → 500"* — are both **resolved**. Author attribution works, which is what the ban / repeat-offender / account-signal layers need.
+
+### 2. SDK / ecosystem state (2026-09-12)
+
+| Surface | Status | Evidence |
+|---|---|---|
+| Official Go SDK (`max-messenger/max-bot-api-client-go`) | ✅ Comments landed | commit `c832c5b9360bd18914861923a614c1207055fbfe`, 2026-09-08, message «add comments» |
+| Official TS SDK (`max-messenger/max-bot-api-client-ts`) | ✅ Comments module | `src/core/network/api/modules/comments/{api.ts,types.ts}`; repo pushed 2026-09-10 |
+| Rust `mammothcoding/maxoxide` | ✅ Typed comments CRUD | release `v3.0.0` (2026-08-21); `API_SUPPORT.md` lists all 5 comment routes, `examples/comments_moderation.rs` ships |
+| Stories | ❌ | No endpoints, no update types, no SDK methods in any ecosystem |
+
+### 3. The one open question — webhook delivery for comments
+
+The subscription API **offers** `comment_created` / `comment_edited` / `comment_removed`, and both official SDKs now wire handlers for them. What is still **not** proven is that a comment actually *produces* a delivery.
+
+Test run this cycle: live listener + cloudflared tunnel on a public 443 URL, subscription created with the comment update types, then a comment posted — **no event arrived**. The comment was authored by the bot itself, and MAX (like Telegram) does not deliver a bot's own actions back to it, so this is inconclusive rather than negative. Closing it needs a **non-bot actor** to post one comment — the same 30-second test re-test 3 asked for and that has now slipped three cycles.
+
+Moderation is therefore **buildable today on REST polling**; push-based ingestion is the only unverified leg.
+
+### 4. Operational findings (carry-forward)
+
+1. **TLS / Минцифры CA is still a production blocker.** `platform-api2.max.ru` presents a chain the standard Linux trust store cannot verify (`curl: (60) unable to get local issuer certificate`). Every probe above used `-k`. Production deployment must ship the Минцифры root CA in the container trust store or set a custom CA bundle — this is a deploy prerequisite, not a spike detail.
+2. **Two stale subscriptions are registered and point at dead tunnels** — `treasure-oxygen-messaging-researcher.trycloudflare.com/webhook` and `numerous-courtesy-perhaps-replied.trycloudflare.com/webhook`, both left over from the 28 Jul spike. They must be replaced (not supplemented) before any production webhook, otherwise MAX will spend its retry window on dead hosts.
+3. **The `max-api-retest` cron job is gone** from the scheduler (it was disabled; it is no longer present at all). The recurring re-test loop is retired — this memo is the standing record, and further MAX checks should be triggered as needed rather than on a blind schedule.
+
+### 5. Verdict
+
+The original showstopper — *comments invisible to the Bot API* — is **permanently resolved**, not just "half-lifted". Read, write, edit, delete, and **author attribution** all work live.
+
+**Port viability: the MVP moderation bot is fully buildable today.** The remaining work is engineering, not API discovery:
+`poll or receive comments → classify → delete spam comment → block spammer`, plus the two carry-forward items above (CA bundle, subscription hygiene).
+
+Stories / profile-photo-age / Premium signals / MTProto userbot / native payments remain unavailable and should stay **deferred**, exactly as the port matrix concluded.
