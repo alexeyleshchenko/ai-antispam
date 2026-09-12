@@ -252,7 +252,9 @@ async def handle_spam_ignore_callback(callback: CallbackQuery) -> str:
                 )
             elif row.get("already_confirmed"):
                 prior_admin_id = row.get("admin_id")
-                prior_admin = await get_admin(prior_admin_id) if prior_admin_id else None
+                prior_admin = (
+                    await get_admin(prior_admin_id) if prior_admin_id else None
+                )
                 logger.info(
                     "mark_as_not_spam: pending %s already confirmed (by %s) — duplicate callback, skipping",
                     pending_id,
