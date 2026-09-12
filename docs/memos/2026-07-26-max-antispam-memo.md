@@ -794,6 +794,62 @@ subscribed, a post delivery is a positive control that separates the two.
   no webhook event. Self-events appear suppressed, so a bot self-post is **not** a usable
   control; the probe was deleted.
 
+### Subscription revert — 2026-09-12 15:05Z: back to comment-only
+
+`message_created` was a **diagnostic control only**. With the delivery question settled (below)
+it is removed, restoring the documented design. `GET /subscriptions` → exactly 1, replaced in
+place:
+
+```json
+{"url": "https://ai-antispam.l1979.ru/process-max-updates",
+ "update_types": ["comment_removed", "comment_created", "comment_edited"]}
+```
+
+Re-addable in one call if channel-post ingestion is ever wanted — the route already handles it
+safely (authenticate → validate → log → ack). Ingress re-probed after the revert: correct
+secret → **200**, wrong secret → **403**, no header → **403**.
+
+## #31 CLOSED — MAX comment webhook delivery PROVEN, non-bot actor (2026-09-12 14:56:52Z)
+
+**The close condition, met in full:** *"a comment posted from a non-bot account produces a
+`comment_created` delivery on a registered webhook, with the received payload recorded in the
+memo."*
+
+### The action
+
+The owner posted the comment **«3-1»** on the channel POST «Текст комментов 3», from his own
+account — a non-bot actor, the one input no lane could supply.
+
+### The receipts (all first-hand)
+
+| Leg | Receipt |
+|---|---|
+| **Comment exists** | `GET /messages/{post}/comments` → `mid.ffffb9a7843177f901a0961f0b404461`, text `«3-1»`, 3 chars |
+| **MAX pushed** | traefik access log: `89.221.230.112 - - [12/Sep/2026:14:56:52 +0000] "POST /process-max-updates HTTP/1.1" 200 12 … 450ms` |
+| **Origin is MAX, not us** | `89.221.230.112` → **VK Services**, netname `RU-NETBRIDGE-20061011`, route `89.221.228.0/22`, origin `AS47764`, Moscow region |
+| **Secret accepted** | HTTP **200** — a bad secret returns 403, so the registered `secret` matched the host's `MAX_WEBHOOK_SECRET` |
+| **Container received it** | `14:56:52.702 MAX update received: update_type=comment_created chat_id=-77345848199175 mid=mid.ffffb9a7843177f901a0961f0b404461 sender_id=None sender_name=None text_len=3` |
+| **Latency** | ingress POST 14:56:52, log line 14:56:52.702 — same second |
+
+### The received payload, recorded (the close condition's memo requirement)
+
+```
+MAX update received: update_type=comment_created chat_id=-77345848199175 mid=mid.ffffb9a7843177f901a0961f0b404461 sender_id=None sender_name=None text_len=3
+```
+
+### What this settles — and what it does not
+
+**SETTLED — the push path works.** MAX emits `comment_created` and delivers it to a registered
+webhook on a public HTTPS URL, carrying the secret. This closes the open question carried since
+the July memo and re-tested four times. The earlier inconclusive runs were **not** a MAX
+limitation: re-test 4 posted as the **bot** (self-events suppressed), and the 13:02:59Z action
+was a **post** under a comment-only filter. Both were structurally incapable of a positive.
+
+**STILL OPEN — attribution.** `sender_id=None sender_name=None` on a **real third-party**
+comment: second independent confirmation (after the #33 delete test) that MAX does **not**
+attribute third-party comment authors, in the payload or the REST API. Consequence unchanged —
+**delete-only moderation**: no ban, no repeat-offender tracking, no author-based rules.
+
 ### Scope boundary — what this does NOT do
 
 **No MAX moderation is implemented.** The route authenticates, validates the envelope, logs a
