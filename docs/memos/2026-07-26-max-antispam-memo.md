@@ -722,7 +722,7 @@ there, so only this path was touched in the working tree.
 traffic on a public path that will later carry a moderation hook, rather than silently allowing
 it. With the secret set, the `X-Max-Bot-Api-Secret` header must match.
 
-### Verification — end-to-end, from outside the host
+### Verification — the ROUTE, from outside the host (NOT a MAX delivery proof)
 
 Probed from the agents box through public DNS → Traefik on apps → container
 (image `ghcr.io/alexeyleshchenko/ai-antispam:main`, `StartedAt=2026-09-12T12:06:26Z`):
@@ -766,3 +766,34 @@ one-line body-free summary and returns 200. It deletes no comment, bans no user 
 nothing. MAX moderation is the MAX port's own workstream — buildable *on* this ingress, not
 built *by* it. The `comment_*` update types are subscribed so the #31 delivery question can be
 settled against a stable URL instead of a tunnel.
+
+### Correction — 2026-09-12 12:5xZ: what T8 and T9 actually proved
+
+Recorded after Triage re-read the card against the MAX subscription docs. Two amendments:
+
+**T8's acceptance criteria were incomplete.** The card's criteria covered `url`,
+`update_types` and `count` — **not the `secret` field**. `POST /subscriptions` takes an optional
+`secret`; omitting it is a valid call that returns `{"success":true}`, so T8's green did not
+establish that the subscription was authenticated. The subscription has since been
+re-registered **with** the secret (count still 1, replaced in place, zero trycloudflare hosts).
+The correct acceptance set for this task is: exactly 1 subscription · url is the stable route ·
+zero `trycloudflare.com` hosts · **registered with a `secret` whose value matches the host's
+`MAX_WEBHOOK_SECRET`**.
+
+**T9's 200/403/403 matrix is a ROUTE proof, not a DELIVERY proof.** Every case was a synthetic
+curl from the agents box: it shows the route authenticates correctly and fails closed. It does
+**not** show that MAX ever sends an update to this URL, nor that MAX carries the secret in
+`X-Max-Bot-Api-Secret`. The API cannot settle the second question either — `GET /subscriptions`
+returns only `time`, `update_types` and `url`; it **never echoes `secret`**. So "is the
+subscription secret set?" is unverifiable from the API by construction, and the only real
+delivery proof remains **issue #31**: one comment posted by a human actor in the test channel,
+then the container log read for the delivery line.
+
+Had the secret been absent, the owner's #31 comment would have been rejected **403** at
+`src/app/main.py:129` — and read as a MAX limitation rather than a config error. That is the
+failure mode this correction exists to prevent.
+
+Re-probed live 2026-09-12 12:51Z against the running container
+(`ghcr.io/alexeyleshchenko/ai-antispam:main`, healthy, secret present on apps, 43 chars,
+value never printed): correct secret → **200** `{"ok": true}`; wrong secret → **403**; no secret
+header → **403**; log line `MAX update received: update_type=probe_pc6 … text_len=9`.
