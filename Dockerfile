@@ -22,7 +22,18 @@ RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
 # Stage 2: runner
 FROM python:3.14-alpine
 
-RUN apk add --no-cache curl
+RUN apk add --no-cache curl ca-certificates
+
+# Russian Trusted Root CA (Минцифры) — the chain presented by platform-api2.max.ru
+# roots here (leaf *.max.ru -> Russian Trusted Sub CA -> Russian Trusted Root CA).
+# This CA is not in the public Mozilla bundle, so every MAX API call fails with
+# "unable to get local issuer certificate" unless it is shipped here. Having it
+# in the image is what lets the MAX surface verify TLS normally instead of
+# silently running behind a `-k` bypass.
+# Source: https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt
+# SHA-256: D2:6D:2D:02:31:B7:C3:9F:92:CC:73:85:12:BA:54:10:35:19:E4:40:5D:68:B5:BD:70:3E:97:88:CA:8E:CF:31
+COPY certs/russian_trusted_root_ca.crt /usr/local/share/ca-certificates/
+RUN update-ca-certificates
 
 WORKDIR /app
 
