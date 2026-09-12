@@ -33,6 +33,12 @@ from .database.postgres_connection import close_pool
 from .handlers import *
 from .handlers.dp import dp
 from .logging_setup import get_telegram_handler, register_telegram_logging_loop
+from .max_webhook import (
+    MAX_SECRET_HEADER,
+    is_valid_envelope,
+    summarise,
+    verify_secret,
+)
 
 routes = web.RouteTableDef()
 app = web.Application()
@@ -107,6 +113,50 @@ async def handle_update(request: web.Request) -> web.Response:
                 serve_time = max(0.0, time.time() - update_time)
                 span.set_attribute("serve_time", serve_time)
                 serve_time_histogram.record(serve_time)
+
+
+@routes.post("/process-max-updates")
+async def handle_max_update(request: web.Request) -> web.Response:
+    """Handle an inbound MAX Bot API update.
+
+    INGRESS + OBSERVABILITY ONLY — authenticate, validate, log, acknowledge.
+    No moderation runs here; MAX moderation is the MAX port's own workstream.
+
+    Fails CLOSED: with MAX_WEBHOOK_SECRET unset this ingress refuses to run at
+    all (503) rather than accepting unauthenticated traffic on a public route
+    that will later carry a moderation hook.
+    """
+    expected = os.environ.get("MAX_WEBHOOK_SECRET")
+    if not expected:
+        logger.error(
+            "MAX webhook rejected: MAX_WEBHOOK_SECRET is not set — refusing "
+            "unauthenticated MAX traffic (fail closed)"
+        )
+        return web.json_response(
+            {"error": "MAX webhook secret not configured"}, status=503
+        )
+
+    if not verify_secret(request.headers.get(MAX_SECRET_HEADER), expected):
+        logger.warning(
+            "MAX webhook rejected: missing or invalid %s header", MAX_SECRET_HEADER
+        )
+        return web.json_response({"error": "Unauthorized"}, status=403)
+
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        logger.warning("MAX webhook rejected: body is not valid JSON")
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    if not is_valid_envelope(payload):
+        logger.warning("MAX webhook rejected: invalid update envelope")
+        return web.json_response(
+            {"error": "Invalid update format", "required_field": "update_type"},
+            status=400,
+        )
+
+    logger.info("MAX update received: %s", summarise(payload))
+    return web.json_response({"ok": True})
 
 
 def _update_type(json: dict) -> str:
