@@ -759,6 +759,41 @@ this registration ran, so this cycle's DELETE leg was a **no-op**. Issue #30's t
 stale") is itself stale on that point; the issue's remaining substance was the stable
 replacement, which is what shipped.
 
+### Subscription amendment — 2026-09-12 13:10Z: `message_created` added
+
+The filter now also carries **`message_created`**, so a channel POST reaches the route
+alongside comment events. `GET /subscriptions` → exactly 1, replaced in place:
+
+```json
+{"url": "https://ai-antispam.l1979.ru/process-max-updates",
+ "update_types": ["comment_removed", "comment_created", "comment_edited", "message_created"]}
+```
+
+**Why.** The owner's 13:02:59Z test action created a new channel POST («Текст комментов 3»)
+rather than a comment. A comment-only filter cannot fire on a post, so that action was
+structurally incapable of producing a delivery — and worse, any *silent* comment result would
+have been ambiguous between "MAX emits no comment events" and "the chain is broken". With both
+subscribed, a post delivery is a positive control that separates the two.
+
+**What the 13:0xZ read established** (all first-hand):
+
+- **No delivery occurred.** The container log carried no `MAX update received` line; the last
+  ingress POST was 12:51:54Z (my own probe).
+- **MAX has never contacted the endpoint.** Every `POST /process-max-updates` in the traefik
+  access log originated from `132.243.213.9` — this ops box (my probes and Triage's). The
+  non-ours entries are internet scanners issuing `GET`/`HEAD` → 405.
+- **MAX *can* push.** The July payload log holds genuine deliveries — `bot_started` (28 Jul
+  09:54Z), `bot_added` (09:57Z) and a real `message_created` for a channel POST (10:22Z). So
+  the platform delivers; the question is only which event types it emits.
+- **Comments emitted nothing in July**, when the subscription carried *no* filter at all — two
+  comments (28 Jul 09:58:47Z, 12:29:21Z) produced zero events, while a post produced one. That
+  is the prior #31 is re-testing against a stable URL.
+- **Bot-authored posts emit no event.** The bot can post to the channel
+  (`POST /messages?chat_id=…` with a `{text}` body — the `{chat_id,text}` and `{recipient,body}`
+  shapes both return `400 proto.payload "Unknown recipient"`), but a post it created itself drew
+  no webhook event. Self-events appear suppressed, so a bot self-post is **not** a usable
+  control; the probe was deleted.
+
 ### Scope boundary — what this does NOT do
 
 **No MAX moderation is implemented.** The route authenticates, validates the envelope, logs a
