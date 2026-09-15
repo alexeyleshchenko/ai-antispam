@@ -18,6 +18,8 @@ from aiohttp.test_utils import TestClient, TestServer
 from src.app.main import handle_max_update
 from src.app.max_webhook import (
     MAX_SECRET_HEADER,
+    MaxCommentItem,
+    extract_comment,
     is_valid_envelope,
     summarise,
     verify_secret,
@@ -244,3 +246,95 @@ async def test_route_authenticates_before_parsing(max_client):
         URL, data="{not-json", headers={MAX_SECRET_HEADER: "wrong"}
     )
     assert resp.status == 403
+
+
+# ── extract_comment ────────────────────────────────────────��─────────────────
+
+
+REAL_COMMENT_ENVELOPE = {
+    "update_type": "comment_created",
+    "timestamp": 1789225012032,
+    "message": {
+        "recipient": {
+            "chat_type": "channel",
+            "chat_id": -77345848199175,
+            "post_id": "mid.ffffb9a7843177f901a095b6ca9f7bfa",
+        },
+        "timestamp": 1789225012032,
+        "body": {
+            "mid": "mid.ffffb9a7843177f901a0961f0b404461",
+            "seq": 117258650388546657,
+            "text": "3-1",
+        },
+    },
+}
+
+
+def test_extract_comment_from_real_comment_envelope():
+    item = extract_comment(REAL_COMMENT_ENVELOPE)
+    assert isinstance(item, MaxCommentItem)
+    assert item.update_type == "comment_created"
+    assert item.chat_id == -77345848199175
+    assert item.post_mid == "mid.ffffb9a7843177f901a095b6ca9f7bfa"
+    assert item.comment_mid == "mid.ffffb9a7843177f901a0961f0b404461"
+    assert item.text == "3-1"
+    assert item.sender_id is None
+    assert item.sender_name is None
+    assert item.timestamp == 1789225012032
+    assert item.is_actionable is True
+
+
+def test_extract_comment_handles_comment_edited():
+    payload = {
+        **REAL_COMMENT_ENVELOPE,
+        "update_type": "comment_edited",
+        "message": {
+            **REAL_COMMENT_ENVELOPE["message"],
+            "body": {
+                "mid": "mid.123",
+                "text": "edited spam",
+            },
+        },
+    }
+    item = extract_comment(payload)
+    assert item is not None
+    assert item.update_type == "comment_edited"
+    assert item.text == "edited spam"
+    assert item.is_actionable is True
+
+
+def test_extract_comment_returns_none_for_non_comment_updates():
+    assert extract_comment(REAL_ENVELOPE) is None  # message_created
+    assert extract_comment({"update_type": "comment_removed"}) is None
+    assert extract_comment({"update_type": "probe"}) is None
+    assert extract_comment({}) is None
+    assert extract_comment("not a dict") is None
+
+
+def test_extract_comment_actionable_flag():
+    # Missing post_mid
+    item = MaxCommentItem(
+        update_type="comment_created",
+        chat_id=-1,
+        post_mid=None,
+        comment_mid="mid.1",
+        text="spam",
+        sender_id=None,
+        sender_name=None,
+        timestamp=1,
+    )
+    assert item.is_actionable is False
+
+    # Empty text
+    item2 = MaxCommentItem(
+        update_type="comment_created",
+        chat_id=-1,
+        post_mid="post.1",
+        comment_mid="mid.1",
+        text="   ",
+        sender_id=None,
+        sender_name=None,
+        timestamp=1,
+    )
+    assert item2.is_actionable is False
+
