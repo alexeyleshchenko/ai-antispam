@@ -10,9 +10,9 @@ Everything here is pure and importable without the aiohttp application, so the
 auth / envelope / summary logic is unit-testable in isolation.
 """
 
-from dataclasses import dataclass
 import hmac
 import logging
+from dataclasses import dataclass
 from typing import Any, cast
 
 logger = logging.getLogger(__name__)

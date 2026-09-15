@@ -159,21 +159,20 @@ async def handle_max_update(request: web.Request) -> web.Response:
     logger.info("MAX update received: %s", summarise(payload))
 
     # Dispatch actionable comments to background moderation task so webhook returns HTTP 200 immediately
-    if comment := extract_comment(payload):
-        if comment.is_actionable:
-            from .max_client import MaxClient
-            from .max_moderator import process_max_comment
+    if (comment := extract_comment(payload)) and comment.is_actionable:
+        from .max_client import MaxClient
+        from .max_moderator import process_max_comment
 
-            max_client = getattr(request.app, "max_client", None)
-            if max_client is None:
-                max_client = MaxClient()
+        max_client = getattr(request.app, "max_client", None)
+        if max_client is None:
+            max_client = MaxClient()
 
-            asyncio.create_task(
-                process_max_comment(
-                    comment=comment,
-                    max_client=max_client,
-                )
+        asyncio.create_task(
+            process_max_comment(
+                comment=comment,
+                max_client=max_client,
             )
+        )
 
     return web.json_response({"ok": True})
 
