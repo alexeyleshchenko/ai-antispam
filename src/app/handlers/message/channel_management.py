@@ -630,6 +630,29 @@ async def _notify_wrong_place_and_leave(
         channel_title, discussion_link, channel_username, lang=lang
     )
 
+    # If bot has permissions to post, send wrong-place notice into the channel
+    # so administrators visiting the channel immediately see why the bot is leaving.
+    channel_display = format_chat_or_channel_display(
+        channel_title, channel_username, t(lang, "common.channel")
+    )
+    from ...common.utils import get_add_to_group_url
+
+    post_text = t(
+        lang,
+        "channel.channel_post_wrong_place",
+        channel=channel_display,
+        add_to_group_url=get_add_to_group_url(),
+    )
+    try:
+        await bot.send_message(chat.id, post_text, parse_mode="HTML")
+        logger.info(
+            f"Posted wrong-place notice into channel {format_chat_log(chat.id, channel_title, channel_username)}"
+        )
+    except Exception as e:
+        logger.debug(
+            f"Could not post wrong-place notice to channel {chat.id} (not enough rights or forbidden): {e}"
+        )
+
     try:
         notified_admins = await notify_channel_admins(chat, instruction, bot)
         try:
@@ -657,6 +680,21 @@ async def _notify_wrong_place_and_leave(
         logger.info(
             f"Bot left channel {format_chat_log(chat.id, channel_title, channel_username)} after notifying {len(notified_admins)} admins."
         )
+        if not notified_admins and adding_user:
+            logger.info(
+                f"0 admins notified via Bot API for channel {chat.id}; attempting userbot fallback for adding user"
+            )
+            adding_username = getattr(adding_user, "username", None)
+            if adding_username and not getattr(adding_user, "is_bot", False):
+                fallback_lang = normalize_lang(getattr(adding_user, "language_code", None))
+                userbot_message = build_channel_instruction_userbot_message(
+                    channel_title, discussion_link, channel_username, lang=fallback_lang
+                )
+                await send_userbot_dm(
+                    username=adding_username,
+                    user_id=adding_user.id,
+                    message=userbot_message,
+                )
     except TelegramForbiddenError as e:
         logger.warning(
             f"Bot API failed for channel {format_chat_log(chat.id, channel_title, channel_username)} (e.g. bot not a member): {e}"
