@@ -3,8 +3,9 @@
 Message lookup functions have been removed; context is now stored in PostgreSQL.
 """
 
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from src.app.common.logfire_lookup import get_weekly_stats
 

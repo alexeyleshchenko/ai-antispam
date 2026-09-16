@@ -54,11 +54,12 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     mute_logging_for_tests()
 
 
+import re
 from datetime import datetime
 from unittest.mock import MagicMock
-import asyncpg
+
 import aiosqlite
-import re
+import asyncpg
 
 from app.database import (
     Administrator,
@@ -108,7 +109,7 @@ class SQLiteConnectionAdapter:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit"""
-        pass  # Connection is managed by the pool
+        # Connection is managed by the pool
 
     def _transform_query_and_params(self, query, args):
         """Transform PostgreSQL query syntax to SQLite-compatible syntax and adjust parameters"""
@@ -307,7 +308,6 @@ class SQLitePoolAdapter:
 
     async def release(self, conn):
         """No-op for single connection"""
-        pass
 
     async def close(self):
         """Close the underlying connection"""

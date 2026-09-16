@@ -1,7 +1,8 @@
 """Unit tests for the unified scheduled jobs runner (metadata heal wiring)."""
 
-import pytest
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from app.background_jobs.scheduled_tasks import run_scheduled_jobs
 

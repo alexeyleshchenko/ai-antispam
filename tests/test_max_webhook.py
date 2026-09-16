@@ -25,7 +25,7 @@ from src.app.max_webhook import (
     verify_secret,
 )
 
-SECRET = "test-secret-9f3a1c"  # noqa: S105 — fixture value, never a real secret
+SECRET = "test-secret-9f3a1c"
 
 # The live envelope shape observed in the 2026-07-28 delivery.
 REAL_ENVELOPE = {

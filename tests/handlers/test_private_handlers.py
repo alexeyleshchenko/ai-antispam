@@ -1,8 +1,8 @@
-import pytest
 import logging
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
-from datetime import datetime, timezone
 
+import pytest
 from aiogram import types
 
 from src.app.handlers.private_handlers import (
@@ -21,8 +21,8 @@ class TestExtractOriginalMessageInfo:
         forwarded_message = MagicMock(spec=types.Message)
         forwarded_message.text = "Test spam message"
         forwarded_message.caption = None
-        forwarded_message.forward_date = datetime.now(timezone.utc)
-        forwarded_message.date = datetime.now(timezone.utc)
+        forwarded_message.forward_date = datetime.now(UTC)
+        forwarded_message.date = datetime.now(UTC)
 
         # Mock forward origin (user type)
         origin = MagicMock(spec=types.MessageOriginUser)
@@ -162,7 +162,7 @@ class TestExtractOriginalMessageInfo:
         callback_message = MagicMock(spec=types.Message)
         forwarded_message = MagicMock(spec=types.Message)
         forwarded_message.text = "Channel message"
-        forwarded_message.forward_date = datetime.now(timezone.utc)
+        forwarded_message.forward_date = datetime.now(UTC)
 
         # Mock channel origin
         origin = MagicMock(spec=types.MessageOriginChannel)
@@ -180,21 +180,20 @@ class TestExtractOriginalMessageInfo:
         # Message lookup should not be called since we have metadata
         with patch(
             "src.app.handlers.private_handlers.get_admin_groups", new_callable=AsyncMock
-        ) as mock_get_groups:
-            with patch(
-                "src.app.handlers.private_handlers.find_message_by_text_and_user",
-                new_callable=AsyncMock,
-            ) as mock_lookup:
-                result = await extract_original_message_info(callback_message, admin_id)
+        ) as mock_get_groups, patch(
+            "src.app.handlers.private_handlers.find_message_by_text_and_user",
+            new_callable=AsyncMock,
+        ) as mock_lookup:
+            result = await extract_original_message_info(callback_message, admin_id)
 
-                # Verify we got the info from forward metadata
-                assert result["group_chat_id"] == 2001
-                assert result["group_message_id"] == 777
-                assert result["name"] == "Spam Channel"
+            # Verify we got the info from forward metadata
+            assert result["group_chat_id"] == 2001
+            assert result["group_message_id"] == 777
+            assert result["name"] == "Spam Channel"
 
-                # Verify message lookup was not called
-                mock_lookup.assert_not_called()
-                mock_get_groups.assert_not_called()
+            # Verify message lookup was not called
+            mock_lookup.assert_not_called()
+            mock_get_groups.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_message_lookup_hidden_user(self, mock_bot_get_chat):
@@ -205,7 +204,7 @@ class TestExtractOriginalMessageInfo:
         callback_message = MagicMock(spec=types.Message)
         forwarded_message = MagicMock(spec=types.Message)
         forwarded_message.text = "Hidden user message"
-        forwarded_message.forward_date = datetime.now(timezone.utc)
+        forwarded_message.forward_date = datetime.now(UTC)
         forwarded_message.forward_from = None
 
         # Mock hidden user origin

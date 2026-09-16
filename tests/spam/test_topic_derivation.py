@@ -1,8 +1,9 @@
 """Tests for chat-topic derivation: TopicSummary schema, fallback builder, and
 the derive_topic_summary routing (OpenRouter free-first -> gateway fallback -> None)."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from src.app.agents import (
     TOPIC_SUMMARY_INSTRUCTIONS,

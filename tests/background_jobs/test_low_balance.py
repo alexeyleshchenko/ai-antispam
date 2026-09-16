@@ -1,6 +1,6 @@
 """Unit tests for low balance warning jobs."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -85,7 +85,7 @@ async def test_check_week_ahead_skips_inactive_admin():
 @pytest.mark.asyncio
 async def test_check_depletion_timeline_day7_leaves_groups():
     """Day 7: leave_sole_payer_groups and clear_depletion_flags called."""
-    depleted_at = datetime.now(timezone.utc) - timedelta(days=8)
+    depleted_at = datetime.now(UTC) - timedelta(days=8)
     with (
         patch("app.background_jobs.low_balance.load_config") as mock_load,
         patch(

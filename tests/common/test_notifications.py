@@ -1,10 +1,12 @@
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 
-from src.app.common.notifications import notify_admins_with_fallback_and_cleanup
-from src.app.common.notifications import perform_complete_group_cleanup
+from src.app.common.notifications import (
+    notify_admins_with_fallback_and_cleanup,
+    perform_complete_group_cleanup,
+)
 from src.app.database.models import GroupStatus
 
 
@@ -301,4 +303,4 @@ class TestNotifyAdminsChatNotFound:
 @pytest.mark.asyncio
 async def test_send_message_user_blocked_logs_debug_not_warning(mock_bot, caplog):
     """TelegramForbiddenError: 'bot was blocked by the user' should log at DEBUG."""
-    pass  # tenacity mock complexity — logic proven via telegram_errors tests
+    # tenacity mock complexity — logic proven via telegram_errors tests

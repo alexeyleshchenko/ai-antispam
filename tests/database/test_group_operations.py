@@ -12,19 +12,19 @@ from app.database import (
     deduct_credits_from_admins,
     get_admin_group_ids,
     get_admin_groups,
-    heal_bare_group_rows,
     get_groups_with_no_rights_past_grace,
     get_moderation_event_count,
     get_paying_admins,
+    heal_bare_group_rows,
     increment_moderation_events,
     is_member_in_group,
     is_moderation_enabled,
     is_trusted_member,
     remove_member_from_group,
     set_group_moderation,
-    update_group_admins,
     set_moderation_events,
     set_no_rights_detected_at,
+    update_group_admins,
 )
 
 
@@ -499,7 +499,7 @@ async def test_activate_discussion_group_flips_awaiting_rights(
     patched_db_conn, clean_db
 ):
     """Awaiting-rights row (linked_channel_id set, moderation off) flips active."""
-    from app.database import upsert_awaiting_rights_group, activate_discussion_group
+    from app.database import activate_discussion_group, upsert_awaiting_rights_group
 
     group_id = -1003001
     channel_id = -1004352022427
@@ -528,7 +528,7 @@ async def test_activate_discussion_group_leaves_disabled_group_alone(
     patched_db_conn, clean_db
 ):
     """A group without linked_channel_id (deliberately disabled) is untouched."""
-    from app.database import set_group_moderation, activate_discussion_group
+    from app.database import activate_discussion_group, set_group_moderation
 
     group_id = -1003002
     await set_group_moderation(group_id, False)

@@ -1,6 +1,6 @@
 """Unit tests for no-rights grace period jobs."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -94,8 +94,8 @@ async def test_leave_no_rights_groups_leaves_when_no_rights():
             admin_ids=[111],
             moderation_enabled=True,
             member_ids=[],
-            created_at=datetime.now(timezone.utc),
-            last_updated=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
+            last_updated=datetime.now(UTC),
         )
 
         mock_cleanup.return_value = True
@@ -184,8 +184,8 @@ async def test_leave_no_rights_groups_cleans_stale_group_chat_not_found():
             admin_ids=[111],
             moderation_enabled=True,
             member_ids=[],
-            created_at=datetime.now(timezone.utc),
-            last_updated=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
+            last_updated=datetime.now(UTC),
         )
 
         await leave_no_rights_groups()
@@ -247,8 +247,8 @@ async def test_leave_no_rights_groups_cleans_stale_group_bot_kicked():
             admin_ids=[222],
             moderation_enabled=True,
             member_ids=[],
-            created_at=datetime.now(timezone.utc),
-            last_updated=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
+            last_updated=datetime.now(UTC),
         )
 
         await leave_no_rights_groups()

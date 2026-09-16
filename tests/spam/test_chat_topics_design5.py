@@ -6,8 +6,9 @@ Covers the gaps not already in the per-module test files:
 3. End-to-end flow against the real (test) DB: scan -> stored -> stats line.
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from app.database import get_group
 from app.spam.chat_topics import _max_message_chars, _max_total_chars, _trim_sample

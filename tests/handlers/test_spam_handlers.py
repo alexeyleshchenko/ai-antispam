@@ -1,5 +1,6 @@
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from src.app.database.models import Administrator, ModerationMode
 from src.app.handlers.handle_spam import (

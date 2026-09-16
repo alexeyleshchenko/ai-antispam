@@ -1,7 +1,8 @@
 """Tests for probation counter increments in the moderation pipeline."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from src.app.handlers.message.pipeline import (
     _maybe_increment_probation_events,

@@ -11,6 +11,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
 from aiogram.methods import SendMessage
 
+
 def _make_bot():
     bot = Bot(token="123:abc", session=AsyncMock())
     # Replace the mock middleware manager with a real one so the

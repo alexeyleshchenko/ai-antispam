@@ -1,7 +1,8 @@
 """Tests for message processing pipeline."""
 
-import pytest
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from src.app.handlers.message.pipeline import process_spam_or_approve
 from tests.conftest import DEFAULT_SPAM_CONFIG

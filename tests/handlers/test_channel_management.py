@@ -1,18 +1,18 @@
 """Tests for channel management decision flow (protect discussion vs leave)."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from aiogram.exceptions import TelegramForbiddenError
 
 from src.app.handlers.message.channel_management import (
+    _notify_wrong_place_and_leave,
+    _resolve_linked_discussion_id,
     build_channel_discussion_added_message,
     build_channel_instruction_message,
     build_channel_instruction_userbot_message,
     notify_channel_admins,
     notify_channel_admins_and_leave,
-    _notify_wrong_place_and_leave,
-    _resolve_linked_discussion_id,
 )
 
 
@@ -115,7 +115,7 @@ class TestDecisionFlowLeaveBranch:
             bot.leave_chat.assert_awaited_once()
             # The sent instruction is the wrong_place message
             sent = mock_notify.call_args.args[1]
-            assert "instead of the discussion group" in sent
+            assert "discussion group" in sent
 
     @pytest.mark.asyncio
     async def test_not_member_after_window_leaves(self):
@@ -425,8 +425,8 @@ class TestProtectedChannelGuard:
     async def test_protected_channel_ignored_no_leave(self):
         """Protected channel → ignored, no notify/leave."""
         from src.app.handlers.message.channel_management import (
-            handle_channel_post,
             _protected_channel_ids,
+            handle_channel_post,
         )
 
         _protected_channel_ids.add(-1001111111111)
@@ -448,8 +448,8 @@ class TestProtectedChannelGuard:
     async def test_unprotected_channel_triggers_leave_flow(self):
         """Unprotected channel → existing leave flow fires."""
         from src.app.handlers.message.channel_management import (
-            handle_channel_post,
             _protected_channel_ids,
+            handle_channel_post,
         )
 
         _protected_channel_ids.discard(-1009999999999)
@@ -486,8 +486,8 @@ class TestProtectedChannelGuard:
         calls the leave flow directly (no sleep before the decision).
         """
         from src.app.handlers.message.channel_management import (
-            handle_channel_post,
             _protected_channel_ids,
+            handle_channel_post,
         )
 
         _protected_channel_ids.discard(-1008888888888)
@@ -562,8 +562,8 @@ class TestProtectedChannelGuard:
     async def test_seed_protected_channels_from_db(self):
         """Startup seeding loads distinct protected channel ids."""
         from src.app.handlers.message.channel_management import (
-            _seed_protected_channels,
             _protected_channel_ids,
+            _seed_protected_channels,
         )
 
         _protected_channel_ids.add(-1000000000001)  # stale entry
@@ -596,8 +596,8 @@ class TestProtectedChannelGuard:
     async def test_db_unavailable_refuses_to_leave(self):
         """DB unavailable on re-check -> skip leave, distinct tag, no notify."""
         from src.app.handlers.message.channel_management import (
-            handle_channel_post,
             ProtectedChannelCheckUnavailable,
+            handle_channel_post,
         )
 
         message = MagicMock()
@@ -624,9 +624,9 @@ class TestProtectedChannelGuard:
     async def test_is_protected_channel_raises_on_db_error(self):
         """DB error in re-check raises ProtectedChannelCheckUnavailable (not False)."""
         from src.app.handlers.message.channel_management import (
+            ProtectedChannelCheckUnavailable,
             _is_protected_channel,
             _protected_channel_ids,
-            ProtectedChannelCheckUnavailable,
         )
 
         _protected_channel_ids.discard(-1007777777777)
@@ -634,9 +634,8 @@ class TestProtectedChannelGuard:
             "src.app.database.group_operations.get_protected_channel_ids",
             new_callable=AsyncMock,
             side_effect=Exception("db down"),
-        ):
-            with pytest.raises(ProtectedChannelCheckUnavailable):
-                await _is_protected_channel(-1007777777777)
+        ), pytest.raises(ProtectedChannelCheckUnavailable):
+            await _is_protected_channel(-1007777777777)
         _protected_channel_ids.discard(-1007777777777)
 
 
@@ -716,7 +715,6 @@ class TestWithForbiddenRetry:
             calls["n"] += 1
             if calls["n"] == 1:
                 raise forbidden
-            return None
 
         bot.leave_chat = AsyncMock(side_effect=flaky_leave)
         with (

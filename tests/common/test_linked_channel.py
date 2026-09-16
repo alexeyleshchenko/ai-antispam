@@ -1,14 +1,15 @@
 """Test linked channel extraction after refactoring to direct MTProto approach."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from src.app.types import ContextStatus, LinkedChannelSummary, SpamClassificationContext
+import pytest
+
 from src.app.spam.user_profile import (
     _resolve_username_to_channel_id,
-    collect_user_context,
     collect_channel_summary_by_id,
+    collect_user_context,
 )
+from src.app.types import ContextStatus, LinkedChannelSummary, SpamClassificationContext
 
 
 class TestLinkedChannelExtraction:

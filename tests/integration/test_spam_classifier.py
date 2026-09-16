@@ -4,13 +4,14 @@ Test spam classifier with the @kotnikova_yana channel content
 """
 
 import asyncio
-import pytest
-import sys
 import os
-from dotenv import load_dotenv
+import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from datetime import UTC, datetime
+from typing import Any
+
+import pytest
+from dotenv import load_dotenv
 
 # Load environment variables first
 load_dotenv()
@@ -28,19 +29,19 @@ from app.common.mtproto_client import (
 )
 from app.spam.spam_classifier import is_spam
 from app.types import (
-    SpamClassificationContext,
     ContextResult,
     ContextStatus,
+    SpamClassificationContext,
 )
 
 
 # Copy the necessary classes and functions directly
 @dataclass(slots=True)
 class LinkedChannelSummary:
-    subscribers: Optional[int]
-    total_posts: Optional[int]
-    post_age_delta: Optional[int]
-    recent_posts_content: Optional[list[str]] = None
+    subscribers: int | None
+    total_posts: int | None
+    post_age_delta: int | None
+    recent_posts_content: list[str] | None = None
 
     def to_prompt_fragment(self) -> str:
         if self.post_age_delta is None or self.post_age_delta < 0:
@@ -71,11 +72,11 @@ class LinkedChannelSummary:
         return "; ".join(parts)
 
 
-def _extract_date(timestamp: Any) -> Optional[datetime]:
+def _extract_date(timestamp: Any) -> datetime | None:
     if not timestamp:
         return None
     if isinstance(timestamp, int):
-        return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        return datetime.fromtimestamp(timestamp, tz=UTC)
     if isinstance(timestamp, str):
         try:
             # Strings returned by the bridge are ISO8601 with timezone
@@ -86,13 +87,13 @@ def _extract_date(timestamp: Any) -> Optional[datetime]:
     return None
 
 
-def _extract_message_date(message: Optional[Dict[str, Any]]) -> Optional[datetime]:
+def _extract_message_date(message: dict[str, Any] | None) -> datetime | None:
     if not message:
         return None
     return _extract_date(message.get("date"))
 
 
-def _extract_message_text(message: Dict[str, Any]) -> str:
+def _extract_message_text(message: dict[str, Any]) -> str:
     """Extract text content from a Telegram message."""
     if not message:
         return ""
@@ -113,9 +114,9 @@ async def _fetch_channel_edge_message(
     client: MtprotoHttpClient,
     peer_reference: int | str,
     *,
-    limit_offset: Optional[int],
-) -> tuple[Optional[Dict[str, Any]], Optional[int]]:
-    params: Dict[str, Any] = {
+    limit_offset: int | None,
+) -> tuple[dict[str, Any] | None, int | None]:
+    params: dict[str, Any] = {
         "peer": peer_reference,
         "offset_id": 0,
         "offset_date": 0,
@@ -149,7 +150,7 @@ async def _fetch_recent_posts_content(
     Fetch content from recent posts in a channel to analyze for spam indicators.
     Returns list of text content from recent posts (excluding media-only posts).
     """
-    params: Dict[str, Any] = {
+    params: dict[str, Any] = {
         "peer": peer_reference,
         "offset_id": 0,
         "offset_date": 0,
@@ -181,8 +182,8 @@ async def _fetch_recent_posts_content(
 async def collect_channel_summary_by_id(
     channel_id: int,
     user_reference: str | int = "unknown",
-    username: Optional[str] = None,
-) -> Optional[LinkedChannelSummary]:
+    username: str | None = None,
+) -> LinkedChannelSummary | None:
     """
     Collects summary stats for a specific channel ID.
     """
@@ -332,7 +333,7 @@ async def test_spam_classifier():
 async def test_spam_classifier_direct():
     """Test spam classifier directly without channel extraction."""
     from app.spam.spam_classifier import is_spam
-    from app.types import SpamClassificationContext, ContextResult, ContextStatus
+    from app.types import ContextResult, ContextStatus, SpamClassificationContext
 
     print("Testing Spam Classifier Directly (no channel fetch)")
     print("=" * 70)

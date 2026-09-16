@@ -1,8 +1,7 @@
 import logging
-
-import pytest
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from aiogram.types import Chat
 
 from src.app.handlers.try_deduct_credits import try_deduct_credits

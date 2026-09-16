@@ -1,9 +1,9 @@
 """Tests for trusted-member early exit in message validation."""
 
 import logging
+from unittest.mock import AsyncMock, patch
 
 import pytest
-from unittest.mock import AsyncMock, patch
 
 from src.app.handlers.message.validation import (
     fetch_linked_chat_id,

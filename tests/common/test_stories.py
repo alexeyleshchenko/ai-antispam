@@ -1,6 +1,8 @@
-import pytest
 from unittest.mock import AsyncMock, patch
-from src.app.spam.stories import collect_user_stories, StorySummary
+
+import pytest
+
+from src.app.spam.stories import StorySummary, collect_user_stories
 
 
 @pytest.fixture

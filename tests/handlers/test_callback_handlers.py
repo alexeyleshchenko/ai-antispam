@@ -1,6 +1,7 @@
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from aiogram.types import CallbackQuery, User, Message, Chat
+
+import pytest
+from aiogram.types import CallbackQuery, Chat, Message, User
 
 from src.app.handlers.callback_handlers import (
     handle_spam_confirm_callback,

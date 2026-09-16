@@ -7,9 +7,9 @@ is set (no regression on existing prompts).
 """
 
 import json
+from unittest.mock import AsyncMock, patch
 
 import pytest
-from unittest.mock import AsyncMock, patch
 
 from app.spam.prompt_builder import (
     SpamPromptBuilder,
