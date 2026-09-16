@@ -13,6 +13,7 @@ import logfire
 from aiogram import types
 from aiogram.client.bot import Bot
 from aiogram.exceptions import (
+    TelegramAPIError,
     TelegramForbiddenError,
     TelegramNetworkError,
     TelegramRetryAfter,
@@ -648,7 +649,7 @@ async def _notify_wrong_place_and_leave(
         logger.info(
             f"Posted wrong-place notice into channel {format_chat_log(chat.id, channel_title, channel_username)}"
         )
-    except Exception as e:
+    except TelegramAPIError as e:
         logger.debug(
             f"Could not post wrong-place notice to channel {chat.id} (not enough rights or forbidden): {e}"
         )
