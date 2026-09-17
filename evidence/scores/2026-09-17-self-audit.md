@@ -1,6 +1,6 @@
 # Operational Process Self-Audit — 2026-09-17
 
-> **Verdict:** `FAILED` · Process 3 (Internal Self-Audit)
+> **Verdict:** `PASSED` · Process 3 (Internal Self-Audit)
 
 ---
 
@@ -8,9 +8,9 @@
 
 | Metric | Value | Reference / Derivation |
 |---|---|---|
-| **Total Ledger Events** | `5` | Continuous ledger sequence |
+| **Total Ledger Events** | `6` | Continuous ledger sequence |
 | **Closed Tasks** | `1` | Tasks reaching verified close |
-| **First-Pass Yield** | `50.0%` | Accepted runs ÷ total runs |
+| **First-Pass Yield** | `33.3%` | Accepted runs ÷ total runs |
 | **Rework Entries** | `2` | Defect count recorded in rework.md |
 | **Rework Rate** | `200.0%` | Rework entries ÷ closed tasks |
 | **Avg Task Lead Time** | `216.0s` | Average duration from intake to close |
@@ -25,12 +25,12 @@
 
 | Gate / Command | Outcome | Duration | Notes |
 |---|---|---|---|
-| `/usr/bin/python3 tools/ledger.py verify` | `PASS` | `0.26s` | ledger clean: 5 row(s), monotonic, all event types known, se |
-| `/usr/bin/python3 tests/test_ontology.py` | `PASS` | `0.22s` | vocabulary clean: 13 canonical term(s), 2 banned term(s), 23 |
-| `/usr/bin/python3 tests/test_rework.py` | `PASS` | `0.14s` | rework gate passed |
-| `/usr/bin/python3 tests/test_single_writer.py` | `PASS` | `0.13s` | single-writer state clean: 7 declared surface(s) audited, lo |
-| `/usr/bin/python3 tests/test_ledger_schema.py` | `PASS` | `0.12s` | ledger schema clean: 5 row(s) audited, all domain invariants |
-| `/usr/bin/python3 tools/hygiene.py --audit` | `FAIL` | `0.39s` |   - modified tracked file: [ M] evidence/scores/2026-09-17-s |
+| `/usr/bin/python3 tools/ledger.py verify` | `PASS` | `0.18s` | ledger clean: 6 row(s), monotonic, all event types known, se |
+| `/usr/bin/python3 tests/test_ontology.py` | `PASS` | `0.18s` | vocabulary clean: 13 canonical term(s), 2 banned term(s), 23 |
+| `/usr/bin/python3 tests/test_rework.py` | `PASS` | `0.09s` | rework gate passed |
+| `/usr/bin/python3 tests/test_single_writer.py` | `PASS` | `0.11s` | single-writer state clean: 7 declared surface(s) audited, lo |
+| `/usr/bin/python3 tests/test_ledger_schema.py` | `PASS` | `0.21s` | ledger schema clean: 6 row(s) audited, all domain invariants |
+| `/usr/bin/python3 tools/hygiene.py --audit` | `PASS` | `0.51s` | hygiene audit clean: 0 stale scratch items, 0 untracked clut |
 
 ---
 
