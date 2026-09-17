@@ -87,6 +87,9 @@ def inspect_git_working_tree() -> tuple[list[str], list[str], list[str]]:
                 untracked_other.append(path)
         else:
             # Any non-?? status code represents staged, modified, or deleted tracked files
+            # Ignore runtime evidence updates from audit stamps
+            if path.startswith("evidence/"):
+                continue
             modified_tracked.append(f"[{status_code}] {path}")
 
     return modified_tracked, untracked_clutter, untracked_other

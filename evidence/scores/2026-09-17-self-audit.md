@@ -8,16 +8,16 @@
 
 | Metric | Value | Reference / Derivation |
 |---|---|---|
-| **Total Ledger Events** | `2` | Continuous ledger sequence |
-| **Closed Tasks** | `0` | Tasks reaching verified close |
-| **First-Pass Yield** | `100.0%` | Accepted runs ÷ total runs |
+| **Total Ledger Events** | `5` | Continuous ledger sequence |
+| **Closed Tasks** | `1` | Tasks reaching verified close |
+| **First-Pass Yield** | `50.0%` | Accepted runs ÷ total runs |
 | **Rework Entries** | `2` | Defect count recorded in rework.md |
-| **Rework Rate** | `0.0%` | Rework entries ÷ closed tasks |
-| **Avg Task Lead Time** | `0.0s` | Average duration from intake to close |
+| **Rework Rate** | `200.0%` | Rework entries ÷ closed tasks |
+| **Avg Task Lead Time** | `216.0s` | Average duration from intake to close |
 | **Total Inference Cost** | `$0.0000` | Tracked cost across ledger task telemetry |
 | **Avg Cost / Closed Task** | `$0.0000` | Total cost ÷ closed tasks |
 | **Total Tokens (In/Out)** | `0 / 0` | Cumulative prompt and completion tokens |
-| **Cadence Status** | `HELD` | Last run: Noneh ago |
+| **Cadence Status** | `HELD` | Last run: 0.0h ago |
 
 ---
 
@@ -25,15 +25,19 @@
 
 | Gate / Command | Outcome | Duration | Notes |
 |---|---|---|---|
-| `/usr/bin/python3 tools/ledger.py verify` | `PASS` | `0.41s` | ledger clean: 2 row(s), monotonic, all event types known, se |
-| `/usr/bin/python3 tests/test_ontology.py` | `PASS` | `0.4s` | vocabulary clean: 13 canonical term(s), 2 banned term(s), 22 |
-| `/usr/bin/python3 tests/test_rework.py` | `PASS` | `0.18s` | rework gate passed |
-| `/usr/bin/python3 tests/test_single_writer.py` | `PASS` | `0.15s` | single-writer state clean: 7 declared surface(s) audited, lo |
-| `/usr/bin/python3 tests/test_ledger_schema.py` | `PASS` | `0.21s` | ledger schema clean: 2 row(s) audited, all domain invariants |
-| `/usr/bin/python3 tools/hygiene.py --audit` | `FAIL` | `1.32s` |   - untracked file: tools/ |
+| `/usr/bin/python3 tools/ledger.py verify` | `PASS` | `0.26s` | ledger clean: 5 row(s), monotonic, all event types known, se |
+| `/usr/bin/python3 tests/test_ontology.py` | `PASS` | `0.22s` | vocabulary clean: 13 canonical term(s), 2 banned term(s), 23 |
+| `/usr/bin/python3 tests/test_rework.py` | `PASS` | `0.14s` | rework gate passed |
+| `/usr/bin/python3 tests/test_single_writer.py` | `PASS` | `0.13s` | single-writer state clean: 7 declared surface(s) audited, lo |
+| `/usr/bin/python3 tests/test_ledger_schema.py` | `PASS` | `0.12s` | ledger schema clean: 5 row(s) audited, all domain invariants |
+| `/usr/bin/python3 tools/hygiene.py --audit` | `FAIL` | `0.39s` |   - modified tracked file: [ M] evidence/scores/2026-09-17-s |
 
 ---
 
 ## 3. Calibration Spot-Check (Sampled Task)
 
-*No closed tasks available to spot-check.*
+- **Sampled Subject:** `#35`
+- **Intake Recorded:** `YES`
+- **Claim Lock Recorded:** `YES`
+- **Close Verified:** `YES`
+- **Sequence Integrity:** `VERIFIED`
