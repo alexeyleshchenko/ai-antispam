@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+#
+# oc-post-receipts — post a "receipt" (confirmation) message to a Telegram topic.
+#
+# Token resolution (never echoed to stdout):
+#   1. $OC_TG_TOKEN  (environment, highest priority)
+#   2. --keys <file> or $OC_KEYS_TOML  (TOML with a [telegram] section)
+#   3. ~/.opencrabs/keys.toml  (default)
+#
+# Usage:
+#   oc-post-receipts --topic 30129 --text "message"          # post custom text
+#   oc-post-receipts --topic 30129 --phase A                 # canned Phase A
+#   oc-post-receipts --topic 30129 --phase B                 # canned Phase B
+#   oc-post-receipts --dry-run --topic 30129 --text test     # print curl, send nothing
+#
+# Options:
+#   --chat <id>       Telegram chat/supergroup id (default: $OC_TG_CHAT; required for real send)
+#   --topic <id>      message_thread_id (topic id) of the target topic (optional)
+#   --text <str>      message body (mutually exclusive with --phase)
+#   --phase A|B       use a canned Phase A/B receipt message (mutually exclusive with --text)
+#   --dry-run         print the curl command that would be sent, without sending
+#   --keys <file>     keys.toml path (overrides defaults)
+#   -h|--help         show this help
+#
+# Exit codes: 0 = ok (or dry-run produced a curl line); 1 = usage/arg error;
+#             2 = token not resolved; 3 = missing required value; 4 = curl/send failure.
+set -Eeuo pipefail
+
+# ---------------------------------------------------------------------------
+# Canned Phase A / Phase B receipt messages (edit here as needed).
+# ---------------------------------------------------------------------------
+PHASE_A_TEXT="Phase A receipt — pre-restart seal posted. Rollout starting."
+PHASE_B_TEXT="Phase B receipt — post-restart verification complete."
+
+BOT_API="https://api.telegram.org"
+DEFAULT_KEYS="${OC_KEYS_TOML:-$HOME/.opencrabs/keys.toml}"
+
+CHAT_ID="${OC_TG_CHAT:-}"
+TOPIC_ID=""
+TEXT=""
+PHASE=""
+DRY_RUN=0
+KEYS_FILE="$DEFAULT_KEYS"
+
+usage() { awk 'NR>1 && /^#/{sub(/^# ?/,""); print; next} NR>1 {exit}' "$0"; }
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --chat)   CHAT_ID="${2:-}"; shift 2 ;;
+    --topic)  TOPIC_ID="${2:-}"; shift 2 ;;
+    --text)   TEXT="${2:-}"; shift 2 ;;
+    --phase)
+      PHASE="${2:-}"
+      case "$PHASE" in
+        A|a) PHASE="A" ;;
+        B|b) PHASE="B" ;;
+        *) echo "oc-post-receipts: error: --phase must be A or B (got '$PHASE')" >&2; exit 1 ;;
+      esac
+      shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --keys)   KEYS_FILE="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "oc-post-receipts: error: unknown argument '$1'" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
+# Value validation
+# ---------------------------------------------------------------------------
+if [[ -n "$PHASE" && -n "$TEXT" ]]; then
+  echo "oc-post-receipts: error: --phase and --text are mutually exclusive" >&2
+  exit 1
+fi
+if [[ -z "$PHASE" && -z "$TEXT" ]]; then
+  echo "oc-post-receipts: error: provide --text <str> or --phase A|B" >&2
+  exit 1
+fi
+if [[ -z "$TOPIC_ID" ]]; then
+  echo "oc-post-receipts: error: --topic <id> is required" >&2
+  exit 1
+fi
+
+if [[ "$PHASE" == "A" ]]; then TEXT="$PHASE_A_TEXT"; fi
+if [[ "$PHASE" == "B" ]]; then TEXT="$PHASE_B_TEXT"; fi
+
+# ---------------------------------------------------------------------------
+# Token resolution (never printed to stdout)
+# ---------------------------------------------------------------------------
+TOKEN=""
+if [[ -n "${OC_TG_TOKEN:-}" ]]; then
+  TOKEN="$OC_TG_TOKEN"
+else
+  if [[ ! -r "$KEYS_FILE" ]]; then
+    echo "oc-post-receipts: error: keys file not readable: $KEYS_FILE (set OC_TG_TOKEN or --keys)" >&2
+    exit 2
+  fi
+  # Parse the [telegram] section's bot_token line:  bot_token = "123456:ABC..."
+  TOKEN="$(awk -F'=' '/^[ \t]*bot_token[ \t]*=/ {
+      v=$2; gsub(/^[ \t]*"?/, "", v); gsub(/"?[ \t\r]*$/, "", v); print v; exit
+    }' "$KEYS_FILE")"
+  if [[ -z "$TOKEN" ]]; then
+    echo "oc-post-receipts: error: no bot_token under [telegram] in $KEYS_FILE (set OC_TG_TOKEN)" >&2
+    exit 2
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Build the sendMessage curl
+# ---------------------------------------------------------------------------
+API_URL="${BOT_API}/bot${TOKEN}/sendMessage"
+# data-urlencode payload (spaces tolerant); added only when present
+DATA=("chat_id=${CHAT_ID}")
+if [[ -n "$TOPIC_ID" ]]; then
+  DATA+=("message_thread_id=${TOPIC_ID}")
+fi
+DATA+=("text=${TEXT}")
+DATA+=("parse_mode=HTML")
+
+# ---------------------------------------------------------------------------
+# Dry-run: print the curl line with the token masked, send nothing.
+# ---------------------------------------------------------------------------
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  MASKED_URL="${BOT_API}/bot***/sendMessage"
+  JOINED=""
+  for d in "${DATA[@]}"; do
+    JOINED+=" --data-urlencode '${d}'"
+  done
+  echo "curl -sS -X POST '${MASKED_URL}'${JOINED}"
+  echo "# (dry-run - token redacted, nothing sent; set OC_TG_TOKEN to run for real)"
+  exit 0
+fi
+
+# build the real argument vector for the actual send
+CURL_ARGS=()
+for d in "${DATA[@]}"; do
+  CURL_ARGS+=(--data-urlencode "$d")
+done
+
+# ---------------------------------------------------------------------------
+# Real send — requires a chat id.
+# ---------------------------------------------------------------------------
+if [[ -z "$CHAT_ID" ]]; then
+  echo "oc-post-receipts: error: --chat <id> (or OC_TG_CHAT) is required for a real send" >&2
+  exit 3
+fi
+
+set +e
+RESP="$(curl -sS -w $'\n%{http_code}' -X POST "$API_URL" "${CURL_ARGS[@]}")"
+RC=$?
+set -e
+
+HTTP_CODE="$(printf '%s' "$RESP" | tail -n1)"
+BODY="$(printf '%s' "$RESP" | sed '$d')"
+
+if [[ $RC -ne 0 ]]; then
+  echo "oc-post-receipts: error: curl failed (rc=$RC)" >&2
+  exit 4
+fi
+if [[ "$HTTP_CODE" != "200" ]]; then
+  echo "oc-post-receipts: error: Telegram API returned HTTP $HTTP_CODE" >&2
+  printf '%s\n' "$BODY" >&2
+  exit 4
+fi
+
+echo "oc-post-receipts: receipt posted (HTTP $HTTP_CODE, topic=$TOPIC_ID)"
+exit 0

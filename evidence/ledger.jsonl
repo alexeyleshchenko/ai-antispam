@@ -1,0 +1,3 @@
+{"n": 1, "ts": "2026-09-17T09:29:30Z", "event": "intake", "actor": "hq", "subject": "#35", "detail": "port self-audit kit to ai-antispam"}
+{"n": 2, "ts": "2026-09-17T09:29:30Z", "event": "claim", "actor": "hq", "subject": "#35", "detail": "hq took self-audit kit adoption"}
+{"n": 3, "ts": "2026-09-17T09:31:46Z", "event": "run", "actor": "hq", "subject": "internal-self-audit", "detail": "duration=4s turns=0 outcome=failed gate=gate-failure yield=100%"}
