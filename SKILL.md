@@ -1,6 +1,11 @@
+---
+name: ai-antispam
+description: Operational governance and process laws for the ai-antispam factory.
+version: 0.1.0
+---
+
 # ai-antispam — skill
 
-**Version:** 0.1.0  
 **Owns:** operational governance and process laws for the ai-antispam factory.
 
 ---
