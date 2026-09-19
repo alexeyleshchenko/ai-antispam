@@ -30,5 +30,6 @@ Every recurring activity in the factory maps to a defined process with an explic
 - **Process Client:** Factory Owner & Fleet Meta-Auditor
 - **Process Implementer:** `tools/audit.py`, `tools/ledger.py`, pytest test suites
 - **Cadence:** Daily and on release
+- **Pacemaker (upholding mechanism):** cron `ai-antispam-self-audit-daily` (`50 8 * * *`, Europe/Moscow) — fires the runner, stamps `evidence/ledger.jsonl`, commits the dated scorecard. A cadence law with no pacemaker is unenforced (P29); this line is the mechanism, keep the two in step.
 - **Product:** Event ledger (`evidence/ledger.jsonl`), dated scorecards (`evidence/scores/<date>.md`), clean invariant checks
 - **Quality Criteria:** 100% single-writer ledger integrity, zero unexempted vocabulary drift, complete rework root-cause accounting
