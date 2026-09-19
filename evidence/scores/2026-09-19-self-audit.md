@@ -2,6 +2,8 @@
 
 > **Verdict:** `FAILED` · Process 3 (Internal Self-Audit)
 
+> **Bootstrap note — read before acting on this verdict** (added by HQ, 2026-09-19T07:00Z). This is the daily pacemaker's FIRST run, and its FAILED verdict has exactly one cause: `Cadence: MISSED`, a 45.2h gap measured back to the 2026-09-17 ad-hoc baseline — the pacemaker did not exist before today. All six mechanical gates PASS, and the yield *improved* (33.3% → 50.0%, rework unchanged at 200%). The 2026-09-17 run PASSED at the worse yield, which proves yield and rework cannot drive the verdict: the predicate is gates AND cadence only (`tools/audit.py:339`). The same-day re-run reads `HELD`. No work is owed on this reading.
+
 ---
 
 ## 1. Process Health & Delivery Telemetry
