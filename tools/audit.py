@@ -278,8 +278,22 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     if (repo_root / "tests/test_template_sync.py").is_file():
         gates_to_run.append([sys.executable, "tests/test_template_sync.py"])
 
-    # 7. Workspace hygiene audit
+    # 7. Workspace hygiene — reap first, then audit.
+    #
+    # The order is the whole point. This factory's OWN thin-trigger crons write
+    # their redirect logs into /tmp/<namespace>-* on every fire, so an
+    # audit-only cadence is guaranteed to go RED within a day of any clean run:
+    # the gate would be reporting the very cadence that produces the litter.
+    # Reaping first makes the audit a verdict on what SURVIVED the GC rather
+    # than on what arrived since the last one, while a genuinely stranded
+    # artifact — working-tree litter, or a leaked file the GC cannot remove —
+    # still fails the audit that follows.
+    #
+    # The reap is itself a gate, and that is deliberate: if the GC cannot
+    # complete, the run is RED. A reap that fails silently would let a namespace
+    # nobody cleaned read exactly like a namespace that is clean.
     if (repo_root / "tools/hygiene.py").is_file():
+        gates_to_run.append([sys.executable, "tools/hygiene.py", "--clean"])
         gates_to_run.append([sys.executable, "tools/hygiene.py", "--audit"])
 
     # 8. Visual roadmap and process-to-product matrix audit
