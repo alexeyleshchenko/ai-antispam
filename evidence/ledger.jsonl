@@ -9,3 +9,4 @@
 {"n": 9, "ts": "2026-09-20T05:52:58Z", "event": "run", "actor": "hq", "subject": "internal-self-audit", "detail": "duration=4s turns=0 outcome=failed gate=gate-failure yield=40%"}
 {"n": 10, "ts": "2026-09-21T05:53:06Z", "event": "run", "actor": "hq", "subject": "internal-self-audit", "detail": "duration=4s turns=0 outcome=failed gate=gate-failure yield=33%"}
 {"n": 11, "ts": "2026-09-22T08:58:17Z", "event": "run", "actor": "hq", "subject": "internal-self-audit", "detail": "duration=4s turns=0 outcome=accepted gate=all-pass yield=28%"}
+{"n": 12, "ts": "2026-09-22T09:39:41Z", "event": "run", "actor": "hq", "subject": "internal-self-audit", "detail": "duration=4s turns=0 outcome=accepted gate=all-pass yield=44.4%"}
