@@ -29,6 +29,17 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+def first_pass_yield_pct(accepted: int, total: int) -> float:
+    """The ONE site where a yield becomes a percentage (#38).
+
+    Both artifacts of a run read this function: the ledger row's `yield=` field
+    and the scorecard's First-Pass Yield. Rounding in two places is how they came
+    to state two different numbers for one run, so there is exactly one expression
+    here and every display site calls it.
+    """
+    return round(accepted / total * 100, 1) if total else 0.0
+
+
 def parse_ledger(ledger_path: Path) -> dict[str, Any]:
     """Parse ledger.jsonl and calculate operational delivery metrics, including token/cost economics."""
     if not ledger_path.is_file():
@@ -174,12 +185,16 @@ def parse_ledger(ledger_path: Path) -> dict[str, Any]:
         "intake_tasks": len(subjects_intake),
         "run_events": total_runs,
         "runs_by_outcome": runs_by_outcome,
-        # The RAW ratio, deliberately NOT pre-rounded (#38). Every display site rounds it
-        # ONCE, as round(ratio * 100, 1), and the run row's own `yield=` field computes the
-        # same expression from the same population — one rounding, one value. Pre-rounding
-        # to 4 dp here made the report round an already-rounded number a SECOND time, so the
-        # row and the scorecard could state two different yields for ONE run (14/17 -> row
-        # 82.4% vs report 82.3%); the divergence was reachable at 3,611 of ~80,000 ratios.
+        # The RAW ratio, deliberately NOT pre-rounded (#38). Percentages are produced at
+        # ONE site -- first_pass_yield_pct() -- which both the run row and the scorecard
+        # read, so one run cannot state two yields.
+        #
+        # Measured against the code this replaced (parser pre-rounded to 4 dp; the row did
+        # int(v * 100); the report did round(v * 100, 1)) over all a/d for denominators
+        # 1-399, 80,199 pairs. The two counts answer DIFFERENT questions -- keep them apart:
+        #   row-vs-report divergence in VALUE ... 74,451 pairs, first at 1/3 (row 33 vs report 33.3)
+        #   report value changed by the fix ..... 3,611 pairs, first at 14/17 (82.3 -> 82.4)
+        #   divergence as RENDERED strings ....... 80,199 pairs (row "50%" vs report "50.0%")
         "first_pass_yield": yield_val,
         "lead_times_sec": lead_times_sec,
         "avg_lead_time_sec": round(avg_lead_time, 1),
@@ -308,6 +323,13 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     if (repo_root / "tools/roadmap.py").is_file():
         gates_to_run.append([sys.executable, "tools/roadmap.py", "--audit"])
 
+    # 9. Yield-artifact consistency (#38) -- the run row and the scorecard must state
+    # ONE yield for one run. It runs as a GATE, not merely as a test: CI is paths-filtered
+    # to src/**, so a guard living only under tests/ would never execute on a tools/ change
+    # -- which is the same shape as the defect it guards.
+    if (repo_root / "tests/test_audit_yield.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_audit_yield.py"])
+
     results = []
     for cmd in gates_to_run:
         results.append(run_gate(cmd, repo_root))
@@ -373,7 +395,7 @@ def format_report_markdown(
         "|---|---|---|",
         f"| **Total Ledger Events** | `{ledger_stats.get('total_events', 0)}` | Continuous ledger sequence |",
         f"| **Closed Tasks** | `{ledger_stats.get('closed_tasks', 0)}` | Tasks reaching verified close |",
-        f"| **First-Pass Yield** | `{round(ledger_stats.get('first_pass_yield', 1.0) * 100, 1)}%` | Accepted runs ÷ total runs |",
+        f"| **First-Pass Yield** | `{first_pass_yield_pct(ledger_stats.get('runs_by_outcome', {}).get('accepted', 0), ledger_stats.get('run_events', 0))}%` | Accepted runs ÷ total runs |",
         f"| **Rework Entries** | `{rework_stats.get('total_entries', 0)}` | Defect count recorded in rework.md |",
         f"| **Rework Rate** | `{round(rework_stats.get('rework_rate', 0.0) * 100, 1)}%` | Rework entries ÷ closed tasks |",
         f"| **Avg Task Lead Time** | `{ledger_stats.get('avg_lead_time_sec', 0.0)}s` | Average duration from intake to close |",
@@ -475,7 +497,7 @@ def main() -> int:
         pre_accepted = ledger_stats.get("runs_by_outcome", {}).get("accepted", 0)
         post_runs = pre_runs + 1
         post_accepted = pre_accepted + (1 if healthy else 0)
-        yield_pct = round(post_accepted / post_runs * 100, 1) if post_runs else 0.0
+        yield_pct = first_pass_yield_pct(post_accepted, post_runs)
         detail = f"duration=4s turns=0 outcome={outcome} gate={gate_summary} yield={yield_pct}%"
         stamp_cmd = [
             sys.executable,
@@ -509,7 +531,7 @@ def main() -> int:
     # Text summary output
     print(f"=== Factory Operational Self-Audit ({today}) ===")
     print(f"Status: {'HEALTHY (PASS)' if healthy else 'DEGRADED (FAIL)'}")
-    print(f"  - First-Pass Yield: {round(ledger_stats.get('first_pass_yield', 1.0) * 100, 1)}%")
+    print(f"  - First-Pass Yield: {first_pass_yield_pct(ledger_stats.get('runs_by_outcome', {}).get('accepted', 0), ledger_stats.get('run_events', 0))}%")
     print(f"  - Closed Tasks: {ledger_stats.get('closed_tasks', 0)} | Intake Tasks: {ledger_stats.get('intake_tasks', 0)}")
     print(f"  - Rework Entries: {rework_stats.get('total_entries', 0)} (Rate: {round(rework_stats.get('rework_rate', 0.0) * 100, 1)}%)")
     print(f"  - Cadence: {'HELD' if cadence_ok else 'MISSED'} (last run: {cadence_stats.get('hours_since_last_run')}h ago)")
