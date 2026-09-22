@@ -11,6 +11,8 @@ Usage:
   python3 tools/audit.py --json       # Output machine-readable JSON
   python3 tools/audit.py --report     # Generate dated evidence/scores/<date>.md
   python3 tools/audit.py --stamp      # Record run event in evidence/ledger.jsonl
+  python3 tools/audit.py --report --stamp  # One pass: the run row is written BEFORE the
+                                           # report, so the scorecard includes its own run
 """
 
 from __future__ import annotations
@@ -172,7 +174,13 @@ def parse_ledger(ledger_path: Path) -> dict[str, Any]:
         "intake_tasks": len(subjects_intake),
         "run_events": total_runs,
         "runs_by_outcome": runs_by_outcome,
-        "first_pass_yield": round(yield_val, 4),
+        # The RAW ratio, deliberately NOT pre-rounded (#38). Every display site rounds it
+        # ONCE, as round(ratio * 100, 1), and the run row's own `yield=` field computes the
+        # same expression from the same population — one rounding, one value. Pre-rounding
+        # to 4 dp here made the report round an already-rounded number a SECOND time, so the
+        # row and the scorecard could state two different yields for ONE run (14/17 -> row
+        # 82.4% vs report 82.3%); the divergence was reachable at 3,611 of ~80,000 ratios.
+        "first_pass_yield": yield_val,
         "lead_times_sec": lead_times_sec,
         "avg_lead_time_sec": round(avg_lead_time, 1),
         "total_cost_usd": round(total_cost_usd, 4),
@@ -449,29 +457,25 @@ def main() -> int:
         print(json.dumps(payload, indent=2))
         return 0 if healthy else 1
 
-    # Text summary output
-    print(f"=== Factory Operational Self-Audit ({today}) ===")
-    print(f"Status: {'HEALTHY (PASS)' if healthy else 'DEGRADED (FAIL)'}")
-    print(f"  - First-Pass Yield: {round(ledger_stats.get('first_pass_yield', 1.0) * 100, 1)}%")
-    print(f"  - Closed Tasks: {ledger_stats.get('closed_tasks', 0)} | Intake Tasks: {ledger_stats.get('intake_tasks', 0)}")
-    print(f"  - Rework Entries: {rework_stats.get('total_entries', 0)} (Rate: {round(rework_stats.get('rework_rate', 0.0) * 100, 1)}%)")
-    print(f"  - Cadence: {'HELD' if cadence_ok else 'MISSED'} (last run: {cadence_stats.get('hours_since_last_run')}h ago)")
-    print(f"\nMechanical Gates ({len(gate_results)}):")
-    for g in gate_results:
-        mark = "PASS" if g["passed"] else "FAIL"
-        print(f"  [{mark}] {g['cmd']} ({g['duration_sec']}s)")
-
-    if args.report or args.output:
-        report_md = format_report_markdown(today, ledger_stats, rework_stats, cadence_stats, gate_results)
-        out_path = Path(args.output) if args.output else (REPO_ROOT / f"evidence/scores/{today}-self-audit.md")
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(report_md, encoding="utf-8")
-        print(f"\nAudit report written to: {out_path}")
-
+    # Stamp BEFORE reporting (#38) — a scorecard is a statement about the ledger it is
+    # written into, so the run row must exist before the figures are taken. Reporting
+    # first made every scorecard one row stale BY CONSTRUCTION: its "Total Ledger
+    # Events" and its First-Pass Yield described the ledger as it stood BEFORE the run
+    # being reported, and the error ran in the favourable direction — the run that just
+    # failed was not yet in its own denominator. Order is stamp -> re-parse -> report.
     if args.stamp:
         outcome = "accepted" if healthy else "failed"
         gate_summary = "all-pass" if all_gates_pass else "gate-failure"
-        yield_pct = int(ledger_stats.get("first_pass_yield", 1.0) * 100)
+        # The yield this row carries is the POST-run figure — the same population the
+        # scorecard below reports — so the two artifacts of one run state one number.
+        # It is derived rather than read back because the row must be written before the
+        # ledger can be re-read; `healthy` is this run's own outcome, so its contribution
+        # to accepted/total is already known at this point.
+        pre_runs = ledger_stats.get("run_events", 0)
+        pre_accepted = ledger_stats.get("runs_by_outcome", {}).get("accepted", 0)
+        post_runs = pre_runs + 1
+        post_accepted = pre_accepted + (1 if healthy else 0)
+        yield_pct = round(post_accepted / post_runs * 100, 1) if post_runs else 0.0
         detail = f"duration=4s turns=0 outcome={outcome} gate={gate_summary} yield={yield_pct}%"
         stamp_cmd = [
             sys.executable,
@@ -491,6 +495,35 @@ def main() -> int:
             print(f"Ledger telemetry stamped: {detail}")
         else:
             print(f"Failed to stamp ledger: {res.stderr.strip()}", file=sys.stderr)
+
+        # Re-read the ledger so the report below describes the state INCLUDING this run.
+        # Everything downstream of this line (text summary, markdown report) therefore
+        # carries post-run figures; the gate results are deliberately NOT recomputed,
+        # since a run row cannot change a gate and re-running them would double the cost.
+        # CADENCE IS DELIBERATELY LEFT PRE-STAMP TOO, and that leg is not an optimisation:
+        # `cadence_held` is a VERDICT leg, and it asks whether the PREVIOUS run was on time.
+        # Recomputing it after this row lands would read ~0h since the last run on EVERY
+        # run, so the leg would report HELD by construction and a genuinely missed cadence
+        # would become unobservable — a silent green in the one place built to go red.
+        ledger_stats = parse_ledger(ledger_file)
+    # Text summary output
+    print(f"=== Factory Operational Self-Audit ({today}) ===")
+    print(f"Status: {'HEALTHY (PASS)' if healthy else 'DEGRADED (FAIL)'}")
+    print(f"  - First-Pass Yield: {round(ledger_stats.get('first_pass_yield', 1.0) * 100, 1)}%")
+    print(f"  - Closed Tasks: {ledger_stats.get('closed_tasks', 0)} | Intake Tasks: {ledger_stats.get('intake_tasks', 0)}")
+    print(f"  - Rework Entries: {rework_stats.get('total_entries', 0)} (Rate: {round(rework_stats.get('rework_rate', 0.0) * 100, 1)}%)")
+    print(f"  - Cadence: {'HELD' if cadence_ok else 'MISSED'} (last run: {cadence_stats.get('hours_since_last_run')}h ago)")
+    print(f"\nMechanical Gates ({len(gate_results)}):")
+    for g in gate_results:
+        mark = "PASS" if g["passed"] else "FAIL"
+        print(f"  [{mark}] {g['cmd']} ({g['duration_sec']}s)")
+
+    if args.report or args.output:
+        report_md = format_report_markdown(today, ledger_stats, rework_stats, cadence_stats, gate_results)
+        out_path = Path(args.output) if args.output else (REPO_ROOT / f"evidence/scores/{today}-self-audit.md")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(report_md, encoding="utf-8")
+        print(f"\nAudit report written to: {out_path}")
 
     return 0 if healthy else 1
 
