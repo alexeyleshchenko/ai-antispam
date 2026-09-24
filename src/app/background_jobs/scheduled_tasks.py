@@ -3,9 +3,12 @@ Unified scheduled jobs: low balance warnings, cache cleanups.
 
 Runs daily. Replaces the former low_balance_loop with a single loop that:
 1. Sends low balance / depletion timeline notifications
-2. Cleans message_lookup_cache (configurable TTL)
-3. Cleans message_history (configurable TTL)
-4. Cleans pending spam_examples (configurable TTL)
+2. Leaves no-rights groups past their grace period
+3. Cleans message_lookup_cache (configurable TTL)
+4. Cleans message_history (configurable TTL)
+5. Cleans pending spam_examples (configurable TTL)
+6. Heals bare group rows
+7. Reports paying groups left silently unmoderated (issue #41)
 """
 
 import asyncio
@@ -17,6 +20,7 @@ from ..database.message_lookup import cleanup_old_lookup_entries
 from ..database.message_operations import cleanup_old_message_history
 from ..database.spam_examples import cleanup_pending_spam_examples
 from .low_balance import run_low_balance_checks
+from .moderation_monitor import check_unmoderated_paid_groups
 from .no_rights import leave_no_rights_groups
 
 logger = logging.getLogger(__name__)
@@ -65,6 +69,13 @@ async def run_scheduled_jobs() -> None:
         await heal_bare_group_rows()
     except Exception:
         logger.exception("bare group rows heal failed")
+
+    # Last: reports the SETTLED state, after the jobs above may have paused or
+    # reactivated groups (issue #41).
+    try:
+        await check_unmoderated_paid_groups()
+    except Exception:
+        logger.exception("moderation monitor failed")
 
 
 async def scheduled_jobs_loop() -> None:

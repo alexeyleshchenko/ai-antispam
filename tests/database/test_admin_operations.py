@@ -1,6 +1,7 @@
 import pytest
 
 from app.database import (
+    count_groups_awaiting_moderation_restore,
     cycle_moderation_mode,
     get_admin,
     get_admin_credits,
@@ -334,3 +335,66 @@ async def test_get_admin_stats_7d_slices(patched_db_conn, clean_db, monkeypatch)
     group_stats = stats["groups"][0]
     assert group_stats["approved_users_count"] == 3
     assert group_stats["approved_users_count_7d"] == 2
+
+
+@pytest.mark.asyncio
+async def test_count_groups_awaiting_moderation_restore(patched_db_conn, clean_db):
+    """Issue #41: the payment restore joins `group_administrators`, which the
+    low-balance leave HARD-DELETES — so a top-up made before the bot is re-added
+    matches zero groups and restores nothing. This count is what the payment
+    handler reports, so a zero is visible instead of silent.
+    """
+    admin_id = 8101
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO administrators (admin_id, credits) VALUES ($1, $2)",
+            admin_id,
+            0,
+        )
+        # Moderation off + a mapping -> the payment restores this one.
+        await conn.execute(
+            "INSERT INTO groups (group_id, title, moderation_enabled) "
+            "VALUES ($1, 'Restorable', 0)",
+            -3001,
+        )
+        await conn.execute(
+            "INSERT INTO group_administrators (group_id, admin_id) VALUES ($1, $2)",
+            -3001,
+            admin_id,
+        )
+        # Already moderated -> nothing to restore.
+        await conn.execute(
+            "INSERT INTO groups (group_id, title, moderation_enabled) "
+            "VALUES ($1, 'Already on', 1)",
+            -3002,
+        )
+        await conn.execute(
+            "INSERT INTO group_administrators (group_id, admin_id) VALUES ($1, $2)",
+            -3002,
+            admin_id,
+        )
+        # Another admin's group with moderation off -> must NOT be counted.
+        await conn.execute(
+            "INSERT INTO administrators (admin_id, credits) VALUES ($1, $2)", 8102, 0
+        )
+        await conn.execute(
+            "INSERT INTO groups (group_id, title, moderation_enabled) "
+            "VALUES ($1, 'Someone else', 0)",
+            -3003,
+        )
+        await conn.execute(
+            "INSERT INTO group_administrators (group_id, admin_id) VALUES ($1, $2)",
+            -3003,
+            8102,
+        )
+
+    assert await count_groups_awaiting_moderation_restore(admin_id) == 1
+
+    # The post-leave state: the mapping is gone, so a top-up restores NOTHING.
+    # This is the zero the payment handler now reports instead of staying silent.
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM group_administrators WHERE admin_id = $1", admin_id
+        )
+
+    assert await count_groups_awaiting_moderation_restore(admin_id) == 0

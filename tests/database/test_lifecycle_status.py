@@ -15,6 +15,7 @@ from app.background_jobs import scheduled_tasks
 from app.database.group_operations import (
     cleanup_group_data,
     get_groups_with_no_rights_past_grace,
+    set_group_moderation,
     update_group_admins,
 )
 from app.database.models import GroupStatus
@@ -205,6 +206,130 @@ async def test_update_group_admins_reactivates_paused_group(
         "SET status" in s and "no_rights_detected_at = NULL" in s
         for s in spy.statements
     ), f"reactivation UPDATE missing; got:\n{spy.statements}"
+
+
+@pytest.mark.asyncio
+async def test_readd_after_low_balance_leave_restores_moderation(
+    patched_db_conn, clean_db, monkeypatch
+):
+    """Issue #41: pause -> leave -> re-add must end with moderation ON.
+
+    Drives the sequence that left a paying customer's groups silently
+    unmoderated for ~36 days. The low-balance leave disables moderation and
+    soft-deletes the row; the re-add then reactivated that row WITHOUT
+    restoring `moderation_enabled`, so `validation` dropped every message while
+    the group read `status=active` — every outward signal healthy.
+
+    The SQLite adapter rewrites the `update_group_admins` upsert (ON CONFLICT
+    DO UPDATE, no RETURNING) as INSERT OR REPLACE, which resets `status` to its
+    default `active` and skips the reactivation branch — the branch under test.
+    It is neutralized to INSERT OR IGNORE here so the paused row survives, which
+    is what Postgres does. Without that neutralization this test passes against
+    the unfixed code and guards nothing.
+    """
+    from app.database import group_operations
+
+    group_id = -1006
+    admin_id = 9006
+
+    orig_get_pool = group_operations.get_pool
+
+    class _SpyPool:
+        def __init__(self, inner):
+            self._inner = inner
+            self.statements = []
+
+        def acquire(self):
+            return _SpyConn(self._inner.acquire(), self.statements)
+
+    class _SpyConn:
+        def __init__(self, inner, statements):
+            self._inner = inner
+            self.statements = statements
+
+        async def execute(self, query, *args):
+            self.statements.append(query)
+            # update_group_admins' upsert is the groups upsert that does NOT set
+            # moderation_enabled from EXCLUDED; neutralize ONLY it (see docstring).
+            if (
+                "INSERT INTO groups" in query
+                and "EXCLUDED.moderation_enabled" not in query
+            ):
+                return await self._inner.execute(
+                    "INSERT OR IGNORE INTO groups (group_id) VALUES (?)", args[0]
+                )
+            return await self._inner.execute(query, *args)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return await self._inner.__aexit__(*exc)
+
+    # 1. A live, moderated group with a paying admin.
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO administrators (admin_id, credits) VALUES ($1, 100)",
+            admin_id,
+        )
+        await conn.execute(
+            "INSERT INTO groups (group_id, title, moderation_enabled) "
+            "VALUES ($1, 'Paying customer group', 1)",
+            group_id,
+        )
+        await conn.execute(
+            "INSERT INTO group_administrators (group_id, admin_id) VALUES ($1, $2)",
+            group_id,
+            admin_id,
+        )
+
+    spy = _SpyPool(await orig_get_pool())
+
+    async def _get_pool():
+        return spy
+
+    monkeypatch.setattr(group_operations, "get_pool", _get_pool)
+
+    # 2. Credits run out: moderation is disabled, then the leave soft-deletes the
+    #    row and HARD-deletes the admin mapping (handle_deactivation +
+    #    cleanup_group_data via the low-balance path).
+    await set_group_moderation(group_id, False, "Paying customer group", None)
+    await cleanup_group_data(
+        group_id, status=GroupStatus.PAUSED, reason="low_balance_unpaid"
+    )
+
+    async with clean_db.acquire() as conn:
+        left = await conn.fetchrow(
+            "SELECT status, moderation_enabled FROM groups WHERE group_id = $1",
+            group_id,
+        )
+        # The dangerous post-leave state: the row reads like a live group, but
+        # moderation is off and the mapping that a payment would join on is gone.
+        assert left["status"] == "paused"
+        assert not left["moderation_enabled"]
+        assert (
+            await conn.fetchrow(
+                "SELECT 1 FROM group_administrators WHERE group_id = $1", group_id
+            )
+        ) is None
+
+    # 3. The customer tops up and re-adds the bot.
+    await update_group_admins(group_id, [admin_id], ["admin"], "Back", None)
+
+    async with clean_db.acquire() as conn:
+        after = await conn.fetchrow(
+            "SELECT status, moderation_enabled FROM groups WHERE group_id = $1",
+            group_id,
+        )
+
+    assert after["status"] == "active"
+    assert after["moderation_enabled"], (
+        "re-add left moderation_enabled=false: every message is dropped at "
+        "validation and the group is silently unmoderated (issue #41)"
+    )
 
 
 @pytest.mark.asyncio

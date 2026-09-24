@@ -126,7 +126,26 @@ async def process_successful_payment(message: types.Message) -> str:
     lang = resolve_lang(message, admin)
 
     try:
-        await record_successful_payment(admin_id, stars_amount)
+        restored = await record_successful_payment(admin_id, stars_amount)
+
+        # Issue #41: the restore joins group_administrators, which the
+        # low-balance leave HARD-DELETES — so a top-up made before the bot is
+        # re-added restores nothing. That is correct (re-adding re-creates the
+        # mapping) but it must not be silent: a paying customer sat unmoderated
+        # for ~36 days because no line anywhere said so.
+        if restored:
+            logger.info(
+                f"Payment for admin {admin_id} restored moderation in "
+                f"{restored} group(s)"
+            )
+        else:
+            logger.warning(
+                f"Payment for admin {admin_id} restored moderation in 0 groups — "
+                "the group_administrators join matched nothing: either this admin "
+                "has no groups yet, or the bot is not currently in them (a "
+                "low-balance leave deletes that mapping). Re-adding the bot "
+                "restores moderation."
+            )
 
         success_text = t(lang, "payment.success_full", amount=stars_amount)
 

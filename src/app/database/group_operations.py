@@ -567,14 +567,31 @@ async def update_group_admins(
             "SELECT status FROM groups WHERE group_id = $1", group_id
         )
         if prior and prior["status"] != GroupStatus.ACTIVE.value:
+            # Issue #41: reactivation must ALSO restore moderation_enabled.
+            # A row with status != active can only have come from
+            # cleanup_group_data, i.e. the bot left the group — the low-balance
+            # leave disables moderation first (handle_deactivation), the
+            # no-rights leave leaves the flag alone. Either way the customer is
+            # coming back and wants moderation. Without this, the row
+            # reactivated to status=active with moderation_enabled=false and
+            # `validation` dropped every message: bot present, rights intact,
+            # credits topped up, and silently unmoderated for ~36 days.
+            # Awaiting-rights rows are NOT touched here — they carry
+            # status='active' by schema default, so this branch cannot fire for
+            # them; activate_discussion_group handles those on promotion.
             await conn.execute(
                 """
                 UPDATE groups
-                SET status = $1, no_rights_detected_at = NULL
+                SET status = $1, no_rights_detected_at = NULL,
+                    moderation_enabled = TRUE
                 WHERE group_id = $2
                 """,
                 GroupStatus.ACTIVE.value,
                 group_id,
+            )
+            logger.info(
+                f"Reactivated group {format_chat_log(group_id)} on re-add "
+                "and restored moderation_enabled"
             )
             await conn.execute(
                 """
@@ -860,3 +877,40 @@ async def heal_bare_group_rows(
         f"heal_bare_group_rows: healed={healed} skipped={skipped} total={len(rows)}"
     )
     return {"healed": healed, "skipped": skipped, "total": len(rows)}
+
+
+async def get_paid_groups_with_moderation_off() -> list[dict]:
+    """Active groups with moderation off while a PAYING admin is attached (issue #41).
+
+    This is the silent-death state: `validation` drops every message when
+    `moderation_enabled` is false, so the group reads healthy on every outward
+    signal — the bot is in the chat, its rights are intact, the balance is
+    topped up — while catching nothing and never deducting a credit. It went
+    unnoticed for ~36 days on a paying customer's groups and was reported by the
+    customer, not by any surface we had.
+
+    Only PAYING admins count: a group whose admins are all at zero credits is
+    unmoderated by design (the low-balance path paused it), not by defect.
+
+    Returns one row per offending group, empty when healthy.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT g.group_id,
+                   g.title,
+                   count(ga.admin_id) AS paying_admin_count,
+                   max(a.credits) AS max_credits
+            FROM groups g
+            JOIN group_administrators ga ON ga.group_id = g.group_id
+            JOIN administrators a ON a.admin_id = ga.admin_id
+            WHERE g.status = $1
+              AND g.moderation_enabled = false
+              AND a.credits > 0
+            GROUP BY g.group_id, g.title
+            ORDER BY g.group_id
+            """,
+            GroupStatus.ACTIVE.value,
+        )
+    return [dict(row) for row in rows]

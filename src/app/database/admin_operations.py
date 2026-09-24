@@ -130,8 +130,41 @@ async def update_admin_username_if_needed(admin_id: int, username: str | None) -
         await save_admin(admin)
 
 
-async def record_successful_payment(admin_id: int, stars_amount: int) -> None:
-    """Record a successful Stars payment: add credits, record transaction, enable moderation."""
+async def count_groups_awaiting_moderation_restore(admin_id: int) -> int:
+    """Groups whose moderation a payment from this admin would restore (issue #41).
+
+    `process_successful_payment` enables moderation by joining
+    `group_administrators`, and the low-balance leave HARD-DELETES those rows
+    (`cleanup_group_data`). A top-up made before the bot is re-added therefore
+    matches zero groups and restores nothing — correct behaviour (re-adding
+    re-creates the mapping), but it used to be SILENT: the customer paid,
+    nothing happened, and no line anywhere said so.
+
+    This is the same join the procedure uses, so the count equals the number of
+    groups the payment will actually flip.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        count = await conn.fetchval(
+            """
+            SELECT count(*)
+            FROM groups g
+            JOIN group_administrators ga ON ga.group_id = g.group_id
+            WHERE ga.admin_id = $1 AND g.moderation_enabled = false
+            """,
+            admin_id,
+        )
+    return count or 0
+
+
+async def record_successful_payment(admin_id: int, stars_amount: int) -> int:
+    """Record a successful Stars payment: add credits, record transaction, enable moderation.
+
+    Returns the number of groups whose moderation this payment restored, so the
+    caller can report a zero (issue #41).
+    """
+    restored = await count_groups_awaiting_moderation_restore(admin_id)
+
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
@@ -139,6 +172,8 @@ async def record_successful_payment(admin_id: int, stars_amount: int) -> None:
             admin_id,
             stars_amount,
         )
+
+    return restored
 
 
 def _admin_from_row(row) -> Administrator:
