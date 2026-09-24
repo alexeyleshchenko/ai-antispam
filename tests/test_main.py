@@ -1,6 +1,7 @@
+import asyncio
 import json
 import logging
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiogram.exceptions import TelegramNetworkError
@@ -8,6 +9,7 @@ from aiogram.exceptions import TelegramNetworkError
 from src.app.main import (
     WEBHOOK_TIMEOUT,
     _update_type,
+    handle_classification_pending,
     handle_unhandled_exception,
     log_update_received,
 )
@@ -91,3 +93,87 @@ def test_log_update_received_non_callback_logs_debug(caplog):
         log_update_received(update)
     messages = [r.getMessage() for r in caplog.records]
     assert any("update_id=43" in m and "type=message" in m for m in messages)
+
+# ─── detached update feed: the guard cancels the WAIT, not the work ──────────
+
+
+@pytest.mark.asyncio
+async def test_classification_pending_returns_503_with_retry():
+    """A pending verdict asks for a redelivery, in the same shape as a timeout."""
+    span = MagicMock()
+    response = await handle_classification_pending(span, {"update_id": 1}, elapsed=2.5)
+    assert response.status == 503
+    body = json.loads(response.text)
+    assert body.get("retry") is True
+    assert body.get("error") == "Classification pending"
+    assert span.tags == ["classification_pending"]
+
+
+def _fake_request(payload: dict) -> MagicMock:
+    request = MagicMock()
+    request.read = AsyncMock(return_value=b"{}")
+    request.json = AsyncMock(return_value=payload)
+    return request
+
+
+@pytest.mark.asyncio
+async def test_handle_update_503_while_the_task_still_runs(monkeypatch):
+    """The update outlives the guard: 503 now, and the work is NOT cancelled.
+
+    This is the whole point of detaching. Under a bare wait_for the coroutine
+    is cancelled at the deadline and its verdict is lost; shielded, the task
+    keeps running and completes after the response has gone out.
+    """
+    from src.app import main
+
+    finished = asyncio.Event()
+
+    async def _slow_feed(bot, json):
+        await asyncio.sleep(0.4)
+        finished.set()
+        return "message_ignored"
+
+    monkeypatch.setattr(main, "WEBHOOK_TIMEOUT", 0.1)
+    monkeypatch.setattr(main.dp, "feed_raw_update", _slow_feed)
+
+    payload = {
+        "update_id": 1,
+        "message": {"message_id": 5, "chat": {"id": -100123, "title": "t"}},
+    }
+
+    response = await main.handle_update(_fake_request(payload))
+
+    assert response.status == 503
+    assert json.loads(response.text)["retry"] is True
+    assert not finished.is_set(), "the work must still be running when 503 goes out"
+
+    # It was detached, not cancelled: it completes on its own afterwards.
+    (task,) = main._update_tasks
+    await asyncio.wait_for(task, timeout=3)
+    assert finished.is_set()
+    assert task.cancelled() is False, "the guard must not have cancelled the work"
+    # The done callback is scheduled via call_soon, so give the loop a turn.
+    await asyncio.sleep(0)
+    assert not main._update_tasks, "the finished task must be discarded"
+
+
+@pytest.mark.asyncio
+async def test_handle_update_returns_200_when_the_handler_is_fast(monkeypatch):
+    """The ordinary path is unchanged: a fast handler still answers 200."""
+    from src.app import main
+
+    async def _fast_feed(bot, json):
+        return "message_user_approved"
+
+    monkeypatch.setattr(main, "WEBHOOK_TIMEOUT", 5.0)
+    monkeypatch.setattr(main.dp, "feed_raw_update", _fast_feed)
+
+    payload = {
+        "update_id": 2,
+        "message": {"message_id": 6, "chat": {"id": -100123, "title": "t"}},
+    }
+
+    response = await main.handle_update(_fake_request(payload))
+
+    assert response.status == 200
+    assert json.loads(response.text)["message"] == "Processed successfully"

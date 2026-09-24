@@ -23,10 +23,10 @@ from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 from .background_jobs import scheduled_jobs_loop
 from .bot_commands import setup_bot_commands
 from .common.bot import bot
-from .common.llm_budget import validate_llm_config
+from .common.llm_budget import WEBHOOK_RESERVE_SECONDS, validate_llm_config
 from .common.mcp_client import close_mcp_http_client
 from .common.telegram_errors import is_webhook_retryable
-from .common.trace_context import set_root_span
+from .common.trace_context import set_root_span, set_webhook_deadline
 from .common.utils import get_dotted_path, get_webhook_timeout
 from .database.classification_verdicts import ensure_verdict_table
 from .database.postgres_connection import close_pool, get_pool
@@ -34,6 +34,7 @@ from .database.postgres_connection import close_pool, get_pool
 # Import all handlers to register them with the dispatcher
 from .handlers import *
 from .handlers.dp import dp
+from .handlers.message.verdict import RESULT_VERDICT_PENDING, inflight_tasks
 from .logging_setup import get_telegram_handler, register_telegram_logging_loop
 from .max_webhook import (
     MAX_SECRET_HEADER,
@@ -48,6 +49,26 @@ app = web.Application()
 
 # Telegram allows up to 60s; value comes from config.yaml system.webhook_timeout
 WEBHOOK_TIMEOUT = get_webhook_timeout()
+
+# Detached update tasks. The webhook guard must not be able to cancel the work
+# that produces a verdict, so the update runs in its own task and the guard
+# waits on it through a shield. Drained at shutdown, before the pool closes.
+_update_tasks: set[asyncio.Task] = set()
+
+
+def _on_update_task_done(task: asyncio.Task) -> None:
+    """Discard a finished update task and surface an unretrieved exception.
+
+    An exception nobody retrieves is silent; the task is detached, so nothing
+    else is left to report it.
+    """
+    _update_tasks.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(f"Detached update task failed: {exc!r}")
+
 
 # Create histogram metric once at module level
 serve_time_histogram = logfire.metric_histogram("serve_time", unit="s")
@@ -78,14 +99,34 @@ async def handle_update(request: web.Request) -> web.Response:
     log_update_received(json)
 
     start_time = time.time()
+    # The request deadline the verdict gate reads: what is left of the
+    # webhook budget once the reserve is set aside for the response.
+    set_webhook_deadline(WEBHOOK_TIMEOUT - WEBHOOK_RESERVE_SECONDS)
 
     with logfire.span(extract_chat_or_user(json), update=json) as span:
         set_root_span(span)
         try:
-            # Wrap the update handling in a timeout
+            # Detached, so the guard cannot cancel the work: the task keeps
+            # running past the deadline and still persists its verdict.
+            update_task = asyncio.create_task(dp.feed_raw_update(bot, json))
+            _update_tasks.add(update_task)
+            update_task.add_done_callback(_on_update_task_done)
+
+            # shield, not a bare wait_for on the coroutine: the timeout must
+            # cancel the WAIT, never the task. A cancelled classification is a
+            # decision paid for and thrown away.
             result = await asyncio.wait_for(
-                dp.feed_raw_update(bot, json), timeout=WEBHOOK_TIMEOUT
+                asyncio.shield(update_task), timeout=WEBHOOK_TIMEOUT
             )
+
+            # A pending verdict is not a failure: the classification
+            # outlived the guard and its verdict is still being written.
+            # Answer 503 so Telegram redelivers - the redelivery serves the
+            # stored verdict instead of paying for a second classification.
+            if result == RESULT_VERDICT_PENDING:
+                return await handle_classification_pending(
+                    span, json, time.time() - start_time
+                )
 
             # Add tag based on handler result
             span.tags = (
@@ -246,6 +287,7 @@ async def _on_startup_validate_config(app: web.Application) -> None:
     validate_llm_config()
     logger.info("LLM config validated")
 
+
 async def _on_startup_ensure_verdict_table(app: web.Application) -> None:
     """Create the verdict store if it is missing.
 
@@ -259,9 +301,7 @@ async def _on_startup_ensure_verdict_table(app: web.Application) -> None:
             await ensure_verdict_table(conn)
         logger.info("Verdict store ready")
     except Exception:
-        logger.exception(
-            "Verdict store setup failed; moderation continues without it"
-        )
+        logger.exception("Verdict store setup failed; moderation continues without it")
         return
 
 
@@ -326,6 +366,17 @@ async def _shutdown(app: web.Application) -> None:
         except Exception as e:
             logger.warning(f"Error stopping TelegramLogHandler: {e}", exc_info=True)
 
+    # Drain detached work BEFORE the TaskGroup closes the pool: anything that
+    # finishes after close_pool() cannot write its verdict. Two sets, because
+    # the verdict task is a sibling of the update task, not its child.
+    detached = _update_tasks | inflight_tasks()
+    if detached:
+        _, still_running = await asyncio.wait(detached, timeout=5)
+        for task in still_running:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
     async with asyncio.TaskGroup() as tg:
         tg.create_task(bot.session.close())
         tg.create_task(close_pool())
@@ -350,6 +401,25 @@ async def handle_timeout(
 
     return web.json_response(
         {"error": "Processing timed out", "retry": True},
+        status=503,
+    )
+
+
+async def handle_classification_pending(
+    span: logfire.LogfireSpan, json: dict, elapsed: float
+) -> web.Response:
+    """The verdict is still being written; ask Telegram to redeliver.
+
+    Distinct from handle_timeout: nothing was cancelled and nothing was lost.
+    The classification is running to completion in a detached task, and the
+    redelivery serves its stored verdict. Same 503 + retry shape, so the retry
+    semantics Telegram already honours are reused rather than reinvented.
+    """
+    logger.info(f"Classification pending after {elapsed:.2f}s; requesting redelivery")
+    span.tags = ["classification_pending"]
+
+    return web.json_response(
+        {"error": "Classification pending", "retry": True},
         status=503,
     )
 
