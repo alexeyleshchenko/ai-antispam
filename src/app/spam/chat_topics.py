@@ -14,12 +14,14 @@ Failure semantics (design doc §4):
   first scan, keep existing otherwise.
 """
 
+import asyncio
 import logging
 from dataclasses import dataclass
 
 import logfire
 
 from ..agents import derive_topic_summary, topic_summary_from_title
+from ..common.llm_budget import get_llm_budget_seconds
 from ..common.mtproto_client import (
     MtprotoHttpClient,
     MtprotoHttpError,
@@ -333,8 +335,16 @@ async def scan_chat_topics(group_id: int) -> ChatTopicScanResult:
             )
 
         # Derive via LLM (gateway -> OpenRouter rotation, never raises).
+        # Bounded by the derived classifier budget, which validation guarantees
+        # fits inside the webhook guard with its reserve. Without this the
+        # derivation's own legs could outlive the request and be cancelled
+        # after the work was already paid for.
         sample_text = "\n---\n".join(corpus)
-        summary = await derive_topic_summary(sample_text)
+        try:
+            async with asyncio.timeout(get_llm_budget_seconds()):
+                summary = await derive_topic_summary(sample_text)
+        except TimeoutError:
+            summary = None
 
         if summary is None:
             if was_scanned_before:

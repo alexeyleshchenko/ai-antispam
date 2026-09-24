@@ -4,6 +4,7 @@ Phase 1: manual /scan only. Covers peer selection (channel vs plain group),
 message filtering, trimming, derivation fallbacks, and DB writes.
 """
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -421,6 +422,53 @@ class TestScanChatTopics:
                 -100123,
             )
         assert row["topic_description"] is None
+
+    @pytest.mark.asyncio
+    async def test_derivation_exceeding_the_deadline_is_cut_not_raised(
+        self, patched_db_conn, clean_db
+    ):
+        """A derivation that outlives the deadline takes the None fallback.
+
+        The bound is what keeps the scan inside the request: without it the
+        derivation's own legs could outlive the webhook and be cancelled after
+        the work was already paid for.
+        """
+        await self._seed_group(
+            clean_db, -100123, title="PHP Freelance Hub", username=None
+        )
+
+        mock_client = MagicMock()
+        mock_client.call = AsyncMock(
+            return_value={"messages": [{"message": "hello there"}], "count": 1}
+        )
+
+        completed = False
+
+        async def slow_derivation(*_args, **_kwargs):
+            nonlocal completed
+            await asyncio.sleep(5)
+            completed = True
+
+        with (
+            patch(
+                "app.spam.chat_topics.get_mtproto_client",
+                return_value=mock_client,
+            ),
+            patch(
+                "app.spam.chat_topics.derive_topic_summary",
+                side_effect=slow_derivation,
+            ),
+            patch(
+                "app.spam.chat_topics.get_llm_budget_seconds",
+                return_value=0.05,
+            ),
+        ):
+            result = await scan_chat_topics(-100123)
+
+        assert completed is False, (
+            "the deadline must cancel the derivation, not let it finish"
+        )
+        assert result.status == "title_fallback"
 
 
 # ---------------------------------------------------------------------------
