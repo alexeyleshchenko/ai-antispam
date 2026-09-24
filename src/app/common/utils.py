@@ -172,6 +172,50 @@ def remove_lines_to_fit_len(text: str, max_len: int) -> str:
     return text
 
 
+def truncate_escaped_html(text: str, max_len: int) -> str:
+    """Bound already-HTML-escaped text without splitting an entity.
+
+    A raw slice can cut an entity in half, and Telegram then rejects the whole
+    message as unparseable - the same silent non-delivery that bounding the
+    length exists to prevent. Trimming back to a trailing "&" that has no
+    terminating ";" keeps every entity whole.
+    """
+    if len(text) <= max_len:
+        return text
+
+    cut = text[: max_len - len("...")]
+    amp = cut.rfind("&")
+    if amp != -1 and ";" not in cut[amp:]:
+        cut = cut[:amp]
+
+    return cut + "..."
+
+
+def truncate_telegram_html(text: str, max_len: int) -> str:
+    """Bound a complete HTML message so Telegram can still parse it.
+
+    The last line of defence before a send: whatever the assembled body, it
+    must not exceed the API limit, because an over-long message is not trimmed
+    by Telegram - it is refused, and the admin silently never hears about the
+    spam. A raw slice can land inside a tag (<a href="...) or inside an entity
+    (&amp;), so cut back to the last position that is outside both.
+    """
+    if len(text) <= max_len:
+        return text
+
+    cut = text[: max_len - len("...")]
+
+    amp = cut.rfind("&")
+    if amp != -1 and ";" not in cut[amp:]:
+        cut = cut[:amp]
+
+    lt = cut.rfind("<")
+    if lt != -1 and ">" not in cut[lt:]:
+        cut = cut[:lt]
+
+    return cut + "..."
+
+
 def determine_effective_user_id(message: types.Message) -> int | None:
     """
     Determine the effective user ID for moderation.

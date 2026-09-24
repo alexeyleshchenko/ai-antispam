@@ -18,9 +18,30 @@ from .telegram_errors import (
     is_message_not_found_error,
     is_user_blocked_error,
 )
-from .utils import format_chat_log, format_user_log
+from .utils import format_chat_log, format_user_log, truncate_telegram_html
 
 logger = logging.getLogger(__name__)
+
+# Telegram refuses a message longer than this rather than trimming it, so an
+# over-long notification is never delivered at all. Every admin-facing send
+# goes through _fit_telegram_message so that cannot happen silently.
+TELEGRAM_MESSAGE_LIMIT = 4096
+
+
+def _fit_telegram_message(text: str) -> str:
+    """Bound a notification body, warning when the bound actually fires.
+
+    The body is assembled from several parts, and the LLM-written reason is not
+    bounded anywhere else, so the assembled message - not any single field - is
+    what has to fit.
+    """
+    bounded = truncate_telegram_html(text, TELEGRAM_MESSAGE_LIMIT)
+    if bounded != text:
+        logger.warning(
+            f"Notification body truncated from {len(text)} to {len(bounded)} "
+            f"chars to fit Telegram's {TELEGRAM_MESSAGE_LIMIT} limit"
+        )
+    return bounded
 
 
 @logfire.no_auto_trace
@@ -137,7 +158,7 @@ async def notify_admins_with_fallback_and_cleanup(
             async def send_private_message(admin_id=admin_id, msg_text=msg_text):
                 return await bot.send_message(
                     admin_id,
-                    msg_text,
+                    _fit_telegram_message(msg_text),
                     parse_mode=parse_mode,
                     reply_markup=reply_markup,
                     disable_web_page_preview=True,
@@ -271,7 +292,7 @@ async def notify_admins_with_fallback_and_cleanup(
             async def send_group_message():
                 return await bot.send_message(
                     group_id,
-                    group_message,
+                    _fit_telegram_message(group_message),
                     parse_mode=parse_mode,
                     disable_web_page_preview=True,
                 )

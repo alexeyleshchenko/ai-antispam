@@ -9,7 +9,16 @@ from typing import TYPE_CHECKING, Any
 from .common.utils import (
     determine_effective_user_id,
     format_chat_or_channel_display,
+    truncate_escaped_html,
 )
+
+# Telegram rejects a message longer than 4096 characters with "message is too
+# long" — so an over-long admin notification is not trimmed by the API, it is
+# never delivered at all and the admin never learns about the spam. The
+# user-controlled body is the only unbounded part of that message (the template
+# adds ~700 chars on the longest path), so it is bounded here, at the single
+# place both notification builders read it from.
+ADMIN_CONTENT_MAX_CHARS = 3000
 
 if TYPE_CHECKING:
     from aiogram import types
@@ -393,7 +402,9 @@ class MessageNotificationContext:
         """Create MessageNotificationContext from a Telegram message."""
         effective_user_id = determine_effective_user_id(message)
         content_text = message.text or message.caption or "[MEDIA_MESSAGE]"
-        content_text = html.escape(content_text, quote=True)
+        content_text = truncate_escaped_html(
+            html.escape(content_text, quote=True), ADMIN_CONTENT_MAX_CHARS
+        )
         chat_title = message.chat.title or "Группа"
         chat_username = getattr(message.chat, "username", None)
         is_channel_sender = (
