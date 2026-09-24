@@ -23,13 +23,13 @@ from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 from .background_jobs import scheduled_jobs_loop
 from .bot_commands import setup_bot_commands
 from .common.bot import bot
+from .common.llm_budget import validate_llm_config
 from .common.mcp_client import close_mcp_http_client
 from .common.telegram_errors import is_webhook_retryable
 from .common.trace_context import set_root_span
-from .common.llm_budget import validate_llm_config
 from .common.utils import get_dotted_path, get_webhook_timeout
 from .database.classification_verdicts import ensure_verdict_table
-from .database.postgres_connection import close_pool
+from .database.postgres_connection import close_pool, get_pool
 
 # Import all handlers to register them with the dispatcher
 from .handlers import *
