@@ -36,7 +36,7 @@ def validate_llm_config(config: dict[str, Any] | None = None) -> None:
 
     llm = config.get("llm")
     if not isinstance(llm, dict):
-        raise ValueError("config.yaml: missing or invalid 'llm' section (expected mapping)")
+        raise ValueError("config.yaml: missing or invalid 'llm' section (expected mapping)")  # noqa: TRY004 - config validation: ValueError is the domain error
 
     budget = _parse_positive_number(llm.get("budget_seconds"), "llm.budget_seconds")
     gateway = _parse_positive_number(
@@ -52,7 +52,7 @@ def validate_llm_config(config: dict[str, Any] | None = None) -> None:
     validated_models: list[str] = []
     for index, model in enumerate(models):
         if not isinstance(model, str):
-            raise ValueError(f"config.yaml: llm.openrouter_models[{index}] must be a string")
+            raise ValueError(f"config.yaml: llm.openrouter_models[{index}] must be a string")  # noqa: TRY004 - config validation: ValueError is the domain error
         model_id = model.strip()
         if not model_id or "/" not in model_id:
             raise ValueError(

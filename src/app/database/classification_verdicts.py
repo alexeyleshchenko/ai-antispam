@@ -18,7 +18,7 @@ two deliveries race.
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from .postgres_connection import get_pool
 
@@ -195,7 +195,7 @@ async def store_result_id(chat_id: int, message_id: int, result_id: str) -> None
 
 async def cleanup_old_verdicts(days: int = DEFAULT_VERDICT_TTL_DAYS) -> int:
     """Delete verdicts older than `days`. Returns the deleted count."""
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff = datetime.now(UTC) - timedelta(days=days)
     pool = await get_pool()
     async with pool.acquire() as conn:
         result = await conn.execute(
@@ -218,7 +218,7 @@ async def cleanup_stale_pending_verdicts(
     the `absent` path, so a later delivery re-classifies - whereas leaving it
     would make every redelivery answer 503 forever.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+    cutoff = datetime.now(UTC) - timedelta(minutes=minutes)
     pool = await get_pool()
     async with pool.acquire() as conn:
         result = await conn.execute(
