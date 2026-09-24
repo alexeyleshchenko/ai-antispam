@@ -28,12 +28,19 @@ cache:
 # LLM routing — keep in sync with gateway route "ai-antispam" (OpenRouter fallback steps).
 llm:
   budget_seconds: 45           # total classifier LLM budget; reserve 10s for the webhook
-  gateway_timeout_seconds: 18  # primary gateway leg; classifier-only budget
+  gateway_timeout_seconds: 15  # primary gateway leg; classifier-only budget
   route_timeout_seconds: 30    # non-classification LLM legs (topic derivation, admin DM)
+  # Per-attempt budget is DERIVED: (budget - gateway) / len(models).
+  # Measured 2026-09-24: the gateway leg runs p50 3.3s / p90 5.2s / max 11.8s
+  # over 20 calls, so 15s covers its real ceiling (the previous 18s was above
+  # what it needs). nvidia/nemotron-3.5-lightning:free was dropped: it measured
+  # 45.2/55.6/56.1s per call, so it can never fit the 45s total budget and was
+  # spending one of three attempts on a guaranteed failure. Two models behind a
+  # 15s gateway give 15.0s each (was 9.0s), which the surviving models'
+  # measured 3-27s latencies can meet.
   openrouter_models:
     - nvidia/nemotron-3-super-120b-a12b:free
     - nvidia/nemotron-3-ultra-550b-a55b:free
-    - nvidia/nemotron-3.5-lightning:free
 
 spam:
   high_confidence_threshold: 90
