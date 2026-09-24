@@ -39,7 +39,7 @@ def pytest_collection_finish(session: pytest.Session) -> None:
 
 @pytest.fixture(scope="session", autouse=True)
 def _validate_llm_config_for_test_session() -> None:
-    from app.common.utils import validate_llm_config
+    from app.common.llm_budget import validate_llm_config
 
     validate_llm_config()
 

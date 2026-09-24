@@ -1,5 +1,6 @@
 """Spam classification: prompt building, LLM calls, response parsing."""
 
+import asyncio
 import logging
 
 import logfire
@@ -11,7 +12,7 @@ from ..agents import (
     get_gateway_spam_agent,
     get_openrouter_spam_agent,
 )
-from ..common.utils import get_llm_route_timeout
+from ..common.llm_budget import get_llm_gateway_timeout, get_llm_per_attempt_timeout
 from ..database import get_admin
 from ..i18n import normalize_lang
 from ..types import SpamClassificationContext
@@ -48,18 +49,19 @@ async def is_spam(
         "Analyze this message and respond with JSON spam classification "
         "including is_spam, confidence, and reason."
     )
-    llm_timeout = get_llm_route_timeout()
-    model_settings = ModelSettings(timeout=llm_timeout)
+    gateway_settings = ModelSettings(timeout=get_llm_gateway_timeout())
+    openrouter_settings = ModelSettings(timeout=get_llm_per_attempt_timeout())
 
     # Try gateway first
     try:
         with logfire.span("spam_classifier_gateway_call"):
             agent = get_gateway_spam_agent()
-            result = await agent.run(
-                user_message,
-                instructions=system_prompt,
-                model_settings=model_settings,
-            )
+            async with asyncio.timeout(get_llm_gateway_timeout()):
+                result = await agent.run(
+                    user_message,
+                    instructions=system_prompt,
+                    model_settings=gateway_settings,
+                )
         is_spam_result = result.output.is_spam
         confidence_result = result.output.confidence
         reason_result = result.output.reason
@@ -84,11 +86,12 @@ async def is_spam(
             agent = get_openrouter_spam_agent()
             try:
                 with logfire.span(f"spam_classifier_openrouter_call_{attempt + 1}"):
-                    result = await agent.run(
-                        user_message,
-                        instructions=system_prompt,
-                        model_settings=model_settings,
-                    )
+                    async with asyncio.timeout(get_llm_per_attempt_timeout()):
+                        result = await agent.run(
+                            user_message,
+                            instructions=system_prompt,
+                            model_settings=openrouter_settings,
+                        )
                 is_spam_result = result.output.is_spam
                 confidence_result = result.output.confidence
                 reason_result = result.output.reason

@@ -25,8 +25,9 @@ cache:
 # Examples: limit and ham share for prompt (prefer most recent within each category).
 # LLM routing — keep in sync with gateway route "ai-antispam" (OpenRouter fallback steps).
 llm:
-  route_timeout_seconds: 30       # gateway route_timeout; per agent.run (gateway + OpenRouter)
-  http_client_timeout_seconds: 60 # httpx client total (retries / transport)
+  budget_seconds: 45           # total classifier LLM budget; reserve 10s for the webhook
+  gateway_timeout_seconds: 18  # primary gateway leg; classifier-only budget
+  route_timeout_seconds: 30    # non-classification LLM legs (topic derivation, admin DM)
   openrouter_models:
     - nvidia/nemotron-3-super-120b-a12b:free
     - nvidia/nemotron-3-ultra-550b-a55b:free

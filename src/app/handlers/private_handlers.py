@@ -19,7 +19,8 @@ from ..agents import (
 )
 from ..common.bot import bot
 from ..common.telegram_errors import is_message_not_found_error
-from ..common.utils import get_llm_route_timeout, sanitize_llm_html
+from ..common.llm_budget import get_llm_route_timeout
+from ..common.utils import sanitize_llm_html
 from ..database import (
     add_spam_example,
     find_message_by_text_and_user,

@@ -26,7 +26,8 @@ from .common.bot import bot
 from .common.mcp_client import close_mcp_http_client
 from .common.telegram_errors import is_webhook_retryable
 from .common.trace_context import set_root_span
-from .common.utils import get_dotted_path, get_webhook_timeout, validate_llm_config
+from .common.llm_budget import validate_llm_config
+from .common.utils import get_dotted_path, get_webhook_timeout
 from .database.postgres_connection import close_pool
 
 # Import all handlers to register them with the dispatcher
