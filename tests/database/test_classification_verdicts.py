@@ -54,9 +54,17 @@ async def test_verdict_round_trip(patched_db_conn, clean_db):
 
 @pytest.mark.asyncio
 async def test_duplicate_pending_claim_loses(patched_db_conn, clean_db):
-    """Two deliveries of one update must not both start the work."""
+    """Two deliveries of one update must not both start the work.
+
+    The loser observes the SAME row, unchanged - not a second one. This is the
+    property the un-guarded path does not have: there, both callers proceed.
+    """
     assert await claim_pending(CHAT_ID, MESSAGE_ID) is True
     assert await claim_pending(CHAT_ID, MESSAGE_ID) is False
+
+    row = await claim_or_read(CHAT_ID, MESSAGE_ID)
+    assert row["status"] == "pending"
+    assert row["moderated_at"] is None
 
     row = await claim_or_read(CHAT_ID, MESSAGE_ID)
     assert row["status"] == "pending"
@@ -68,7 +76,14 @@ async def test_duplicate_moderation_claim_loses(patched_db_conn, clean_db):
     await store_verdict(CHAT_ID, MESSAGE_ID, True, 90, "spam")
 
     assert await claim_moderation(CHAT_ID, MESSAGE_ID) is True
+    first = await claim_or_read(CHAT_ID, MESSAGE_ID)
+    assert first["moderated_at"] is not None
+
     assert await claim_moderation(CHAT_ID, MESSAGE_ID) is False
+    # The loser changed nothing: the moderation instant it observes is the
+    # winner's, so N deliveries still produce ONE moderation action.
+    second = await claim_or_read(CHAT_ID, MESSAGE_ID)
+    assert second["moderated_at"] == first["moderated_at"]
 
 @pytest.mark.asyncio
 async def test_released_moderation_claim_can_be_retaken(patched_db_conn, clean_db):

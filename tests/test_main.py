@@ -1,4 +1,5 @@
 import asyncio
+import builtins
 import json
 import logging
 from unittest.mock import AsyncMock, MagicMock
@@ -177,3 +178,53 @@ async def test_handle_update_returns_200_when_the_handler_is_fast(monkeypatch):
 
     assert response.status == 200
     assert json.loads(response.text)["message"] == "Processed successfully"
+
+@pytest.mark.asyncio
+async def test_pre_fix_shape_cancels_the_work():
+    """The control for the detachment guard: the old shape LOSES the work.
+
+    Same slow coroutine, same deadline, but awaited directly under wait_for -
+    which is what handle_update did before the fix. The timeout cancels the
+    coroutine and its result is gone, which is the defect the shield removes.
+    Without this control the detachment test would only show that the fixed
+    code behaves; it would not show that the thing it replaced behaves
+    differently.
+    """
+    finished = asyncio.Event()
+
+    async def _slow():
+        try:
+            await asyncio.sleep(0.4)
+        except asyncio.CancelledError:
+            raise
+        finished.set()
+        return "message_ignored"
+
+    # PRE-FIX SHAPE: await the coroutine directly, as handle_update used to.
+    with pytest.raises(builtins.TimeoutError):
+        await asyncio.wait_for(_slow(), timeout=0.1)
+
+    await asyncio.sleep(0.5)
+    assert not finished.is_set(), (
+        "the pre-fix shape must be shown to LOSE the work - if the coroutine "
+        "still completes, this control is not measuring the defect"
+    )
+
+
+@pytest.mark.asyncio
+async def test_shielded_shape_keeps_the_work():
+    """The mirror half: shielded, the same slow coroutine survives the deadline."""
+    finished = asyncio.Event()
+
+    async def _slow():
+        await asyncio.sleep(0.4)
+        finished.set()
+        return "message_ignored"
+
+    task = asyncio.create_task(_slow())
+    with pytest.raises(builtins.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(task), timeout=0.1)
+
+    assert task.cancelled() is False, "shield must not cancel the work"
+    await asyncio.wait_for(task, timeout=3)
+    assert finished.is_set(), "the shielded task must still complete"
