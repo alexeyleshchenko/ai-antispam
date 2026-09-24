@@ -7,6 +7,8 @@ and retrieve it downstream via get_root_span(). The context propagates through
 async/await automatically.
 """
 
+import contextvars
+import time
 from typing import Any, Protocol, cast
 
 from opentelemetry import context
@@ -39,3 +41,36 @@ def get_root_span() -> SpanLike:
     if span is not None and hasattr(span, "set_attribute"):
         return cast("SpanLike", span)
     return cast("SpanLike", get_current_span())
+
+
+# Request deadline for the webhook turn. A plain ContextVar (not the
+# OpenTelemetry attach used by set_root_span) because asyncio.create_task copies
+# contextvars, so a detached task inherits the deadline it was created under.
+# Holds a time.monotonic() deadline, never wall-clock: monotonic cannot go
+# backwards when the host clock steps.
+_WEBHOOK_DEADLINE_KEY: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "webhook_deadline", default=None
+)
+
+
+def set_webhook_deadline(seconds_from_now: float) -> None:
+    """Stamp the deadline for the current request.
+
+    Called once per update in main.py. The value is the number of seconds this
+    request may consume, counted from now.
+    """
+    _WEBHOOK_DEADLINE_KEY.set(time.monotonic() + seconds_from_now)
+
+
+def remaining_webhook_seconds() -> float | None:
+    """Seconds left before this request's deadline, or None when no deadline is set.
+
+    None means "no request context" (tests, direct calls, background jobs) - the
+    caller falls back to the configured budget. A negative value is real and is
+    returned as such: the caller has already run out of time and must not start
+    new work.
+    """
+    deadline = _WEBHOOK_DEADLINE_KEY.get()
+    if deadline is None:
+        return None
+    return deadline - time.monotonic()

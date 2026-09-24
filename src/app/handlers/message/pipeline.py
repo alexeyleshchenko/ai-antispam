@@ -25,6 +25,7 @@ from .validation import (
     check_skip_channel_bot_message,
     validate_group_and_check_early_exits,
 )
+from .verdict import run_with_verdict
 
 logger = logging.getLogger(__name__)
 
@@ -164,52 +165,62 @@ async def handle_moderated_message(
     if skip:
         return reason
 
-    message_context_result = await collect_message_context(message)
+    context_holder: dict[str, MessageContextResult] = {}
 
-    # Chat-topic signal: what this chat is normally about (derived via /scan).
-    # None (no scan yet / scan failed) -> classifier behaves exactly as before.
-    ctx = message_context_result.context
-    if ctx is not None:
-        ctx.chat_topics = group.topic_description_short
+    async def _ensure_context() -> MessageContextResult:
+        """Collect the message context once per message.
+
+        Lazy so a REPLAYED delivery (a stored verdict, no LLM call) still has
+        the context moderation needs without paying for classification again.
+        """
+        cached = context_holder.get("result")
+        if cached is not None:
+            return cached
+        collected = await collect_message_context(message)
+        context_holder["result"] = collected
+        # Chat-topic signal: what this chat is normally about (derived via
+        # /scan). None (no scan yet / scan failed) -> classifier unchanged.
+        ctx = collected.context
+        if ctx is not None:
+            ctx.chat_topics = group.topic_description_short
+        return collected
+
+    async def _classify() -> tuple[bool, int, str]:
+        collected = await _ensure_context()
+        if collected.is_story:
+            return True, 100, "Story forward"
+        return await classify_spam(
+            comment=collected.message_text,
+            admin_ids=group.admin_ids,
+            context=collected.context,
+        )
+
+    async def _moderate(is_spam: bool, confidence: int, reason: str) -> str:
+        collected = await _ensure_context()
+        target_span = get_root_span()
+        _set_classification_span_attributes(
+            target_span, is_spam, confidence, reason, collected, source
+        )
+        await _save_classification_lookup(message, collected, user_id)
+        result, member_inserted = await process_spam_or_approve(
+            message, is_spam, confidence, group.admin_ids, reason, collected
+        )
+        await _maybe_increment_probation_events(
+            chat_id, user_id, was_approved_before, member_inserted, result
+        )
+        return result
+
+    if source == "new":
+        # Detached + verdict-gated: a redelivery serves the stored verdict
+        # instead of re-classifying, and moderation happens exactly once.
+        return await run_with_verdict(chat_id, message.message_id, _classify, _moderate)
 
     try:
-        if message_context_result.is_story:
-            is_spam, confidence, reason = True, 100, "Story forward"
-        else:
-            is_spam, confidence, reason = await classify_spam(
-                comment=message_context_result.message_text,
-                admin_ids=group.admin_ids,
-                context=message_context_result.context,
-            )
+        verdict = await _classify()
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Failed to get spam classification: {e}")
         return "message_spam_check_failed"
-
-    target_span = get_root_span()
-    _set_classification_span_attributes(
-        target_span,
-        is_spam,
-        confidence,
-        reason,
-        message_context_result,
-        source,
-    )
-
-    await _save_classification_lookup(message, message_context_result, user_id)
-
-    result, member_inserted = await process_spam_or_approve(
-        message,
-        is_spam,
-        confidence,
-        group.admin_ids,
-        reason,
-        message_context_result,
-    )
-
-    await _maybe_increment_probation_events(
-        chat_id, user_id, was_approved_before, member_inserted, result
-    )
-    return result
+    return await _moderate(*verdict)
 
 
 async def process_spam_or_approve(
