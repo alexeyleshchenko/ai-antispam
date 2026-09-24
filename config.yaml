@@ -31,16 +31,24 @@ llm:
   gateway_timeout_seconds: 15  # primary gateway leg; classifier-only budget
   route_timeout_seconds: 30    # non-classification LLM legs (topic derivation, admin DM)
   # Per-attempt budget is DERIVED: (budget - gateway) / len(models).
-  # Measured 2026-09-24: the gateway leg runs p50 3.3s / p90 5.2s / max 11.8s
-  # over 20 calls, so 15s covers its real ceiling (the previous 18s was above
-  # what it needs). nvidia/nemotron-3.5-lightning:free was dropped: it measured
-  # 45.2/55.6/56.1s per call, so it can never fit the 45s total budget and was
-  # spending one of three attempts on a guaranteed failure. Two models behind a
-  # 15s gateway give 15.0s each (was 9.0s), which the surviving models'
-  # measured 3-27s latencies can meet.
+  # The gateway leg runs p50 3.3s / p90 5.2s / max 11.8s over 20 calls, so 15s
+  # covers its real ceiling. Two models behind it give 15.0s per attempt; adding
+  # a third would cut every attempt to 10.0s, which the slowest survivor's
+  # measured latency does not fit - the guard refuses it.
+  #
+  # Model choice is MEASURED, not assumed. At production parity on 2026-09-24
+  # (deployed container, the app's own prompt + owner-scoped corpus, tools
+  # required, 15.0s budget): nex-n2.5-mini 8/8, p50 2.1s, max 5.5s;
+  # dots-3-note-preview 6/8, p50 8.6s, max 9.5s. The two nvidia/nemotron models
+  # previously configured managed 1/8 each - they time out or return output
+  # pydantic-ai cannot parse, which is what made this tier rescue only 3 of 30
+  # gateway failures (10%). Both survivors come from different providers (Nex AGI,
+  # AtlasCloud), so one provider's bad day cannot empty the pool - the failure
+  # mode of the previous list, which was three models from a single family.
+  # See docs/memos/2026-09-24-llm-fallback-model-selection.md
   openrouter_models:
-    - nvidia/nemotron-3-super-120b-a12b:free
-    - nvidia/nemotron-3-ultra-550b-a55b:free
+    - nex-agi/nex-n2.5-mini:free
+    - dots-studio/dots-3-note-preview:free
 
 spam:
   high_confidence_threshold: 90

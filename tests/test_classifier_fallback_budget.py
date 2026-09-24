@@ -25,9 +25,12 @@ from app.common.llm_budget import (
 )
 from app.common.utils import get_webhook_timeout
 
-# The slowest measured latency among the models that must still be able to win.
-# nvidia/nemotron-3-super-120b-a12b:free and ...ultra-550b-a55b:free measured
-# 3.1-10.3s and 3.3-26.7s respectively; a leg shorter than that cannot complete.
+# The floor a fallback leg needs to complete a real model call, and the shape it
+# holds the pool to. The shipped pool's slowest survivor measures max 9.5s
+# (dots-3-note-preview; nex-n2.5-mini max 5.5s), and two models behind the 15s
+# gateway derive exactly 15.0s each. The floor is set at that DERIVED value
+# rather than at 9.5s because it also pins the pool at TWO models: a third would
+# derive (45 - 15) / 3 = 10.0s, below the floor, and the guard refuses it.
 MIN_VIABLE_PER_ATTEMPT_SECONDS = 15.0
 
 # Latency measured for the model that was dropped, against the total budget.
