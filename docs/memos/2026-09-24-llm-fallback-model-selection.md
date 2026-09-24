@@ -185,3 +185,60 @@ Rows whose group has no `group_administrators` mapping derive `lang="en"`, so th
 admin-facing `reason` comes back in English. That is production behaviour, not a model
 property — but it means a Russian-speaking admin can receive an English reason. Worth a
 separate look.
+
+---
+
+## 7. Deployed — 2026-09-24 21:45:37Z
+
+The section-5 recommendation is now the shipped configuration.
+
+| | |
+|---|---|
+| Commit | `778be29` — both remotes (`alexey` and `origin`) |
+| CI | run `36063370960` — build-push **success**, deploy **success** |
+| Container | `2ccd6db3730f`, recreated **21:45:37Z**, healthy |
+| Boot | `Configuration loaded successfully` → `LLM config validated` → `Verdict store ready` |
+
+Verified **inside the running container**, not from the repo:
+
+```
+models      : ['nex-agi/nex-n2.5-mini:free', 'dots-studio/dots-3-note-preview:free']
+gateway     : 15.0
+per-attempt : 15.0
+budget      : 45.0
+```
+
+`per-attempt 15.0` is the DERIVED value (`(45 - 15) / 2`), so the shipped app holds
+the budget section 3's measurements assumed.
+
+**The guard was shown to bite.** Adding a third model to `config.yaml` makes
+`test_derived_per_attempt_budget_leaves_the_fallback_viable` fail with
+`assert 10.0 >= 15.0`; `config.yaml` was restored byte-identical afterwards
+(md5 `38e48b5488aa7ee894bb5e1e8449ea1e`). That is the check that pins the pool at two
+models, and the reason the 15.0s floor sits above the slowest survivor's 9.5s max
+rather than at it. Full suite at this commit: 559 passed, 2 skipped, 4 deselected.
+
+### The baseline this change is judged against
+
+From `classification_verdicts` on `apps`, read ~21:50Z, predicate
+`created_at < the 21:45:37Z deploy`:
+
+| Window | verdicts | failed | rate |
+|---|---|---|---|
+| pre-deploy (all rows) | **308** | **32** | **10.39%** |
+
+Every row in the store predates the deploy, so this is a clean baseline: the old pool
+left **10.39%** of classified messages unmoderated. The comparable figure is the same
+predicate over a post-deploy window of similar traffic.
+
+### What is NOT verified, and cannot be yet
+
+The pool is exercised **only when the gateway fails**, and there were zero gateway
+failures in the minutes after the deploy — so no rescue has been observed. Section 3
+is therefore a production-parity measurement of the models taken 2h BEFORE the deploy
+with the config values now shipped; it is not an observation of a live rescue.
+
+The signal is in the app log: `Gateway spam classification failed: ..., trying
+OpenRouter` followed by **no** `OpenRouter agent N/2 failed` line means the pool
+rescued that message. The store's `failed` count is the aggregate form of the same
+question.
