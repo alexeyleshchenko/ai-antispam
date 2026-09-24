@@ -1,4 +1,5 @@
 from .admin_operations import *
+from .classification_verdicts import *
 from .constants import *
 from .database_schema import *
 from .group_operations import *

@@ -28,6 +28,7 @@ from .common.telegram_errors import is_webhook_retryable
 from .common.trace_context import set_root_span
 from .common.llm_budget import validate_llm_config
 from .common.utils import get_dotted_path, get_webhook_timeout
+from .database.classification_verdicts import ensure_verdict_table
 from .database.postgres_connection import close_pool
 
 # Import all handlers to register them with the dispatcher
@@ -245,6 +246,24 @@ async def _on_startup_validate_config(app: web.Application) -> None:
     validate_llm_config()
     logger.info("LLM config validated")
 
+async def _on_startup_ensure_verdict_table(app: web.Application) -> None:
+    """Create the verdict store if it is missing.
+
+    Never raises: a crash-looping container is worse than a degraded store, and
+    the moderation path has a store-failure fallback that keeps running
+    un-gated.
+    """
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await ensure_verdict_table(conn)
+        logger.info("Verdict store ready")
+    except Exception:
+        logger.exception(
+            "Verdict store setup failed; moderation continues without it"
+        )
+        return
+
 
 async def _on_startup_setup_bot(app: web.Application) -> None:
     """Register logging loop, bot command menus, and webhook."""
@@ -314,6 +333,7 @@ async def _shutdown(app: web.Application) -> None:
 
 
 app.on_startup.append(_on_startup_validate_config)
+app.on_startup.append(_on_startup_ensure_verdict_table)
 app.on_startup.append(_on_startup_setup_bot)
 app.on_startup.append(_on_startup_scheduled_jobs)
 app.on_startup.append(_on_startup_seed_protected_channels)

@@ -17,6 +17,8 @@ billing:
 cache:
   message_lookup_ttl_days: 7   # Lookup cache retention (admin forwards)
   message_history_ttl_days: 7  # Chat history retention
+  verdict_ttl_days: 7              # classification_verdicts retention
+  verdict_pending_stale_minutes: 15 # pending rows older than this are presumed dead
   pending_spam_ttl_days: 7     # Pending spam examples before cleanup
 
 # Confidence threshold (0-100): spam/not-spam with confidence >= this is high-confidence.

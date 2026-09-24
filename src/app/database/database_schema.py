@@ -162,6 +162,22 @@ async def create_schema(conn: asyncpg.Connection):
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 UNIQUE(chat_id, message_id)
             );
+
+            -- Classification verdicts: a decision that outlives the request budget
+            CREATE TABLE IF NOT EXISTS classification_verdicts (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                message_id BIGINT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                is_spam BOOLEAN,
+                confidence INTEGER,
+                reason TEXT,
+                result_id TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                decided_at TIMESTAMPTZ,
+                moderated_at TIMESTAMPTZ,
+                UNIQUE(chat_id, message_id)
+            );
         """
         )
     except Exception as e:
@@ -174,6 +190,10 @@ async def create_schema(conn: asyncpg.Connection):
             -- Administrators indexes
             CREATE INDEX IF NOT EXISTS idx_administrators_username ON administrators(username);
             CREATE INDEX IF NOT EXISTS idx_administrators_credits ON administrators(credits);
+
+            -- Classification verdicts indexes
+            CREATE INDEX IF NOT EXISTS idx_classification_verdicts_created
+                ON classification_verdicts(created_at);
 
             -- Groups indexes
             CREATE INDEX IF NOT EXISTS idx_groups_moderation ON groups(moderation_enabled);

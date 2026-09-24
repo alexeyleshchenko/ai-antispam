@@ -436,6 +436,23 @@ async def create_sqlite_schema(conn):
     """)
 
     await conn.execute("""
+        CREATE TABLE IF NOT EXISTS classification_verdicts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            message_id INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            is_spam INTEGER,
+            confidence INTEGER,
+            reason TEXT,
+            result_id TEXT,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            decided_at TIMESTAMP,
+            moderated_at TIMESTAMP,
+            UNIQUE(chat_id, message_id)
+        );
+    """)
+
+    await conn.execute("""
         CREATE TABLE IF NOT EXISTS entity_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             entity_type TEXT NOT NULL,
@@ -455,6 +472,7 @@ async def truncate_sqlite_tables(conn):
 
     # Delete in reverse dependency order (child tables first)
     tables = [
+        "classification_verdicts",
         "message_lookup_cache",
         "transactions",
         "spam_examples",

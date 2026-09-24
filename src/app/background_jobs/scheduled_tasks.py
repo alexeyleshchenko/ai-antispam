@@ -15,6 +15,10 @@ import asyncio
 import logging
 
 from ..common.utils import load_config
+from ..database.classification_verdicts import (
+    cleanup_old_verdicts,
+    cleanup_stale_pending_verdicts,
+)
 from ..database.group_operations import heal_bare_group_rows
 from ..database.message_lookup import cleanup_old_lookup_entries
 from ..database.message_operations import cleanup_old_message_history
@@ -34,6 +38,8 @@ def _get_cache_ttl_days() -> dict[str, int]:
         "message_lookup": cfg.get("message_lookup_ttl_days", 7),
         "message_history": cfg.get("message_history_ttl_days", 1),
         "pending_spam": cfg.get("pending_spam_ttl_days", 7),
+        "verdict_ttl_days": cfg.get("verdict_ttl_days", 7),
+        "verdict_pending_stale_minutes": cfg.get("verdict_pending_stale_minutes", 15),
     }
 
 
@@ -64,6 +70,18 @@ async def run_scheduled_jobs() -> None:
         await cleanup_pending_spam_examples(days=ttl["pending_spam"])
     except Exception:
         logger.exception("pending spam_examples cleanup failed")
+
+    try:
+        await cleanup_old_verdicts(days=ttl["verdict_ttl_days"])
+    except Exception:
+        logger.exception("classification_verdicts cleanup failed")
+
+    try:
+        await cleanup_stale_pending_verdicts(
+            minutes=ttl["verdict_pending_stale_minutes"]
+        )
+    except Exception:
+        logger.exception("stale pending classification_verdicts cleanup failed")
 
     try:
         await heal_bare_group_rows()

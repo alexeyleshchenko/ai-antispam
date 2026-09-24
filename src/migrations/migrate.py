@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 load_dotenv()
 from src.app.common.utils import load_config
 from src.app.database import get_pool
+from src.app.database.classification_verdicts import ensure_verdict_table
 from src.app.database.database_schema import create_procedures, create_schema
 
 
@@ -559,6 +560,27 @@ async def run_language_code_migration():
         await add_language_code_migration(conn)
 
 
+async def add_classification_verdicts_migration(conn):
+    """Create the classification_verdicts table and its index (idempotent).
+
+    Delegates to the store's own DDL so the incremental path and the running
+    service cannot disagree about the table shape.
+    """
+    await ensure_verdict_table(conn)
+
+
+async def run_classification_verdicts_migration():
+    """Run the classification_verdicts migration manually."""
+    print("Creating database if it doesn't exist...")
+    await create_database()
+    print("Getting database pool...")
+    pool = await get_pool()
+    print("Running classification_verdicts migration...")
+    async with pool.acquire() as conn:
+        print("Acquired connection from pool")
+        await add_classification_verdicts_migration(conn)
+
+
 async def run_message_lookup_cache_migration():
     """Run the message_lookup_cache migration manually."""
     print("Creating database if it doesn't exist...")
@@ -803,6 +825,8 @@ async def main():
             await run_low_balance_columns_migration()
         elif sys.argv[1] == "--add-is-active-column":
             await run_is_active_column_migration()
+        elif sys.argv[1] == "--add-classification-verdicts":
+            await run_classification_verdicts_migration()
         elif sys.argv[1] == "--add-message-lookup-cache":
             await run_message_lookup_cache_migration()
         elif sys.argv[1] == "--rename-account-signals-context":
