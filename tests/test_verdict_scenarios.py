@@ -19,11 +19,10 @@ measures, so its baseline is recorded and the post-deploy check is owed.
 
 import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.database.classification_verdicts import claim_or_read, claim_pending
+from app.database.classification_verdicts import claim_or_read
 from app.handlers.message.verdict import (
     RESULT_VERDICT_PENDING,
     inflight_tasks,
