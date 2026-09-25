@@ -242,3 +242,62 @@ The signal is in the app log: `Gateway spam classification failed: ..., trying
 OpenRouter` followed by **no** `OpenRouter agent N/2 failed` line means the pool
 rescued that message. The store's `failed` count is the aggregate form of the same
 question.
+
+---
+
+## 8. OBSERVED LIVE RESCUE — 2026-09-25 (the section above is now discharged)
+
+The signal section 7 named has fired. Read from the deployed container and the store
+on `apps`, this turn.
+
+**Gateway failures 06:06:32Z → 10:52:21Z** (13 in the 14h window; deploy was
+21:45:37Z the previous day). Against them:
+
+| Measure | Value |
+|---|---|
+| `spam_classifier_gateway_failure` | **13** |
+| `spam_classifier_openrouter_call_1` | **14** — every call attempt 1 |
+| `spam_classifier_openrouter_call_2` | **0** — slot 2 never reached |
+| `OpenRouter agent N failed` | **0** |
+| `All spam classifiers failed` | **0** |
+| `Webhook processing timed out after` | **0** |
+
+**The store, same turn** (`classification_verdicts`, predicate
+`created_at > '2026-09-24 21:45:00+00'`):
+
+| Window | verdicts | decided | failed | rate |
+|---|---|---|---|---|
+| pre-deploy baseline | 308 | 276 | **32** | **10.39%** |
+| post-deploy (this read) | **190** | **190** | **0** | **0.00%** |
+
+**One rescue traced end to end**, 10:52:21Z:
+
+```
+10:52:21.544  Gateway spam classification failed: , trying OpenRouter
+10:52:21.557  spam_classifier_openrouter_call_1
+10:52:21.568    openrouter-spam-nex-agi-nex-n2.5-mini:free run
+10:52:23.600  _moderate -> try_deduct_credits -> deduct_credits_from_admins
+              "Deducted 1* from <admin> in <group>"
+```
+
+Gateway failure → attempt 1 → moderation in **2.0 s**. The message was moderated, not
+merely classified.
+
+### The honest bound on "0 failed"
+
+Zero failures in 190 is **not** a measured 0.00% rate. By the rule of three the 95%
+upper bound on the true failure rate is **3/190 = 1.58%** — so the defensible claim is
+that the rate fell from 10.39% to **below ~1.6%**, not to zero. A longer window tightens
+it.
+
+### What this still does NOT establish
+
+**Slot 2 is unexercised in production.** All 14 calls went to attempt 1 (`nex`), so
+`dots-studio/dots-3-note-preview:free` has never served a production message. Its 6/8
+and its language-bleed defects remain a pre-deploy measurement, and the pool's
+cross-provider diversity — the property that motivated a two-model list — is therefore
+still untested. It will only be exercised when `nex` itself fails.
+
+**Classification quality is still unmeasured.** This section is about availability. No
+labelled-set accuracy run has been done on the shipped pair; the 809-row corpus remains
+the instrument for that, per section 5.
