@@ -97,18 +97,70 @@ jobs:
       GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
       GHCR_PULL_USER: ${{ secrets.GHCR_PULL_USER }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # Half 1 of #47: docker-compose.yml IS in on.push.paths, so a compose change
+      # triggers a full build+deploy - but the deploy ran against the HOST's copy and
+      # nothing compared the two. A compose change therefore deployed nothing and the
+      # guard went GREEN. Digest the repo's spec here and ship it to the host.
+      - name: Digest the deploy spec
+        id: spec
+        run: |
+          set -euo pipefail
+          sha=$(sha256sum docker-compose.yml | awk '{print $1}')
+          b64=$(base64 -w0 docker-compose.yml)
+          [ -n "$sha" ] && [ -n "$b64" ]
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "b64=$b64" >> "$GITHUB_OUTPUT"
+
       - name: Deploy to server
         uses: appleboy/ssh-action@v1.2.0
+        env:
+          COMPOSE_B64: ${{ steps.spec.outputs.b64 }}
+          COMPOSE_SHA: ${{ steps.spec.outputs.sha }}
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ secrets.SSH_PORT }}
           command_timeout: 15m
-          envs: GHCR_PULL_TOKEN, GHCR_PULL_USER
+          envs: GHCR_PULL_TOKEN,GHCR_PULL_USER,COMPOSE_B64,COMPOSE_SHA
           script: |
             set -euo pipefail
             cd /data/projects/ai-antispam
+
+            # --- deploy-spec sync (#47, half 1) --------------------------------
+            # Refuse to touch the spec on an empty payload: a zero-byte write here
+            # would be read by the `docker compose up -d` on the very next line.
+            [ -n "${COMPOSE_B64:-}" ] || { echo "FATAL: COMPOSE_B64 empty - refusing to touch the deploy spec"; exit 1; }
+            [ -n "${COMPOSE_SHA:-}" ] || { echo "FATAL: COMPOSE_SHA empty - refusing to touch the deploy spec"; exit 1; }
+            # compose.yaml / compose.yml / docker-compose.yaml outrank docker-compose.yml,
+            # so a leftover shadow file would silently win over the spec we just wrote.
+            for shadow in compose.yaml compose.yml docker-compose.yaml; do
+              if [ -f "$shadow" ]; then
+                echo "FATAL: $shadow shadows docker-compose.yml (higher compose precedence)"; exit 1
+              fi
+            done
+            if [ -f docker-compose.yml ]; then
+              HOST_SHA=$(sha256sum docker-compose.yml | awk '{print $1}')
+            else
+              HOST_SHA=absent
+            fi
+            if [ "$HOST_SHA" != "$COMPOSE_SHA" ]; then
+              TMP=$(mktemp ./docker-compose.yml.tmp.XXXXXX)
+              printf '%s' "$COMPOSE_B64" | base64 -d > "$TMP"
+              GOT_SHA=$(sha256sum "$TMP" | awk '{print $1}')
+              if [ "$GOT_SHA" != "$COMPOSE_SHA" ]; then
+                rm -f "$TMP"
+                echo "FATAL: transferred deploy spec digests $GOT_SHA, repo says $COMPOSE_SHA - host spec left untouched"; exit 1
+              fi
+              mv "$TMP" docker-compose.yml
+              echo "deploy spec: CHANGED $HOST_SHA -> $COMPOSE_SHA"
+            else
+              echo "deploy spec: unchanged ($COMPOSE_SHA)"
+            fi
+
             if [ -n "${GHCR_PULL_TOKEN:-}" ] && [ -n "${GHCR_PULL_USER:-}" ]; then
               echo "${GHCR_PULL_TOKEN:-}" | docker login ghcr.io -u "${GHCR_PULL_USER:-}" --password-stdin
             fi
@@ -127,6 +179,11 @@ jobs:
             [ "$RUNNING" = "$EXPECT" ] || { echo "FATAL: container runs $RUNNING, expected $EXPECT"; exit 1; }
             [ "$WANT" = "$HAVE" ] || { echo "FATAL: container image stale (compose pulled $WANT, container runs $HAVE)"; exit 1; }
             echo "deploy guard: OK ($RUNNING)"
+            # --- deploy-spec guard (#47, half 2) -------------------------------
+            # Green must mean the DEPLOYMENT SPEC is current, not only the image.
+            NOW_SHA=$(sha256sum docker-compose.yml | awk '{print $1}')
+            [ "$NOW_SHA" = "$COMPOSE_SHA" ] || { echo "FATAL: host deploy spec $NOW_SHA != repo $COMPOSE_SHA"; exit 1; }
+            echo "deploy spec: verified ($NOW_SHA)"
 
       - name: Prune old images
         uses: appleboy/ssh-action@v1.2.0
