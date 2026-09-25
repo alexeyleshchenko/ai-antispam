@@ -10,6 +10,13 @@ services:
     mem_reservation: 128mb
     cpus: 0.5
     restart: unless-stopped
+    # The app's own graceful shutdown budget is 5s (Telegram log handler) + 5s (detached
+    # verdict drain) + the closing TaskGroup, so it can reach docker's default 10s stop
+    # grace with no headroom. When it did, dockerd force-killed the container, compose's
+    # remove collided ("removal of container ... is already in progress"), `up -d` aborted
+    # mid-recreate and the replacement kept its temporary "<replaced-id>_ai-antispam" name
+    # -> a red deploy that had in fact shipped the image (2026-09-25). 30s lets it finish.
+    stop_grace_period: 30s
     env_file:
       - .env
     environment:
