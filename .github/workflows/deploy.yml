@@ -23,6 +23,14 @@ env:
 
 jobs:
   build-push:
+    # Single-homed on the canonical account. The clone pushes the same commit to
+    # BOTH remotes, so an ungated workflow ran two full build+deploy pipelines
+    # concurrently against one host and one container ~3s apart (measured
+    # 2026-09-25: 5bf00e2 at 16:15:42 and 16:15:52, both finishing 16:17:11) -
+    # which is where the "removal of container ... is already in progress"
+    # recreate races came from. The board repo still receives the code; it no
+    # longer deploys it.
+    if: github.repository == 'leshchenko1979/ai-antispam'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -62,9 +70,12 @@ jobs:
 
       - name: Set image repo output
         id: vars
+        # Pinned to the canonical account (owner ruling 2026-09-25). Deriving the
+        # repo from github.repository_owner made the published image identity a
+        # function of WHICH remote received the push, so one commit existed under
+        # two ghcr repositories while the deploy guard asserted only one of them.
         run: |
-          owner_lc=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
-          echo "image_repo=ghcr.io/${owner_lc}/ai-antispam" >> "$GITHUB_OUTPUT"
+          echo "image_repo=ghcr.io/leshchenko1979/ai-antispam" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -92,6 +103,10 @@ jobs:
 
   deploy:
     needs: build-push
+    # Explicit even though `needs` would skip it anyway: the invariant belongs
+    # next to the job that SSHes into production, and it survives someone later
+    # dropping `needs`.
+    if: github.repository == 'leshchenko1979/ai-antispam'
     runs-on: ubuntu-latest
     env:
       GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
@@ -175,7 +190,7 @@ jobs:
             WANT=$(docker compose images -q ai-antispam)
             HAVE=$(docker inspect -f '{{.Image}}' "$CID" | cut -c8-)
             RUNNING=$(docker inspect -f '{{.Config.Image}}' "$CID")
-            EXPECT="ghcr.io/alexeyleshchenko/ai-antispam:main"
+            EXPECT="ghcr.io/leshchenko1979/ai-antispam:main"
             [ "$RUNNING" = "$EXPECT" ] || { echo "FATAL: container runs $RUNNING, expected $EXPECT"; exit 1; }
             [ "$WANT" = "$HAVE" ] || { echo "FATAL: container image stale (compose pulled $WANT, container runs $HAVE)"; exit 1; }
             echo "deploy guard: OK ($RUNNING)"
@@ -194,6 +209,11 @@ jobs:
           port: ${{ secrets.SSH_PORT }}
           command_timeout: 5m
           script: |
+            # Both accounts are covered so the sha-tags of the superseded source
+            # are reclaimed rather than left to accumulate. `grep -v ':main$'`
+            # keeps BOTH :main tags deliberately: the alexeyleshchenko one is the
+            # rollback target for this move, and dropping it would make reverting
+            # a rebuild rather than a re-pull.
             docker images --format '{{.ID}} {{.Repository}}:{{.Tag}}' |
-              grep 'ghcr.io/alexeyleshchenko/ai-antispam' |
+              grep -E 'ghcr.io/(leshchenko1979|alexeyleshchenko)/ai-antispam' |
               grep -v ':main$' | awk '{print $1}' | xargs -r docker rmi -f

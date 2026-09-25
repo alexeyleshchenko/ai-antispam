@@ -6,7 +6,7 @@
 # edit on the host is therefore overwritten by the next deploy.
 services:
   ai-antispam:
-    image: ${GHCR_IMAGE:-ghcr.io/alexeyleshchenko/ai-antispam}:${IMAGE_TAG:-main}
+    image: ${GHCR_IMAGE:-ghcr.io/leshchenko1979/ai-antispam}:${IMAGE_TAG:-main}
     # No container_name on purpose. A fixed name forces compose to rename the outgoing
     # container to "<old-id>_<service>" while recreating, and an interrupted recreate
     # leaves the replacement under that temporary name permanently: the deploy guard then

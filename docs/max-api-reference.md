@@ -146,7 +146,7 @@ Authorization: <token>
 | Fail-closed | secret unset → `503`; wrong/absent → `403`; bad body → `400`; valid → `200` |
 | Traefik | `apps:/data/projects/traefik/config/ai-antispam.yml` — the host rule **AND-s the path**; a path not listed 404s at Traefik before reaching the bot |
 | Subscription | exactly one — the stable URL, `update_types` = the comment trio |
-| Container | `ghcr.io/alexeyleshchenko/ai-antispam:main` on `apps` |
+| Container | `ghcr.io/leshchenko1979/ai-antispam:main` on `apps` (image source moved to the canonical account 2026-09-25) |
 | Deploy | `src/**` triggers the deploy workflow; `scripts/**` does **not** |
 
 **Test surface:** MAX channel **«Тест антиспам»** — `chat_id -77345848199175`,

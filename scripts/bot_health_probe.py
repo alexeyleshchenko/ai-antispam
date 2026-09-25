@@ -41,8 +41,8 @@ OK, WARN, ALERT = 0, 1, 2
 
 SSH_TARGET = "apps"
 CONTAINER = "ai-antispam"
-IMAGE = "ghcr.io/alexeyleshchenko/ai-antispam:main"
-REGISTRY_REPO = "alexeyleshchenko/ai-antispam"
+IMAGE = "ghcr.io/leshchenko1979/ai-antispam:main"
+REGISTRY_REPO = "leshchenko1979/ai-antispam"
 PUBLIC_HEALTH_URL = "https://ai-antispam.l1979.ru/health"
 EXPECTED_WEBHOOK_URL = "https://ai-antispam.l1979.ru/process-tg-updates"
 

@@ -60,7 +60,7 @@ src/app/
 
 ## Docker
 
-**Image:** `ghcr.io/alexeyleshchenko/ai-antispam` — **184MB**. Legacy pulls from `ghcr.io/leshchenko1979/ai-antispam` until the apps compose switchover.
+**Image:** `ghcr.io/leshchenko1979/ai-antispam` — **184MB**. Moved to the canonical account 2026-09-25 (owner ruling); `ghcr.io/alexeyleshchenko/ai-antispam` is the superseded source, kept as the rollback target. The deploy workflow is single-homed on `leshchenko1979/ai-antispam`, so a push to the board repo no longer publishes or deploys.
 
 - Base: `python:3.14-alpine` (Alpine Linux, ~5MB base vs ~25MB Debian)
 - `pydantic-ai-slim[openai,logfire]` instead of full `pydantic-ai`
