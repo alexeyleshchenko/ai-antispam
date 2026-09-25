@@ -114,9 +114,15 @@ jobs:
             fi
             docker compose pull && docker compose up -d
             # deploy guard: fail loud instead of a green no-op (stale-tag incident 2026-08-23..09-01)
+            # Resolve the container from COMPOSE, never by container_name: when a recreate does
+            # not complete, compose leaves the replacement under a temporary
+            # "<replaced-container-id>_<service>" name, so `docker inspect ai-antispam` fails on
+            # a container that is in fact running the right image (2026-09-25).
+            CID=$(docker compose ps -q ai-antispam | head -1)
+            [ -n "$CID" ] || { echo "FATAL: no running container for service ai-antispam"; exit 1; }
             WANT=$(docker compose images -q ai-antispam)
-            HAVE=$(docker inspect -f '{{.Image}}' ai-antispam | cut -c8-)
-            RUNNING=$(docker inspect -f '{{.Config.Image}}' ai-antispam)
+            HAVE=$(docker inspect -f '{{.Image}}' "$CID" | cut -c8-)
+            RUNNING=$(docker inspect -f '{{.Config.Image}}' "$CID")
             EXPECT="ghcr.io/alexeyleshchenko/ai-antispam:main"
             [ "$RUNNING" = "$EXPECT" ] || { echo "FATAL: container runs $RUNNING, expected $EXPECT"; exit 1; }
             [ "$WANT" = "$HAVE" ] || { echo "FATAL: container image stale (compose pulled $WANT, container runs $HAVE)"; exit 1; }
