@@ -1,3 +1,9 @@
+# Deployment spec for ai-antispam.
+#
+# This file is SHIPPED BY CI, not edited on the host (#47). The deploy job digests it,
+# transfers it to /data/projects/ai-antispam, and the guard recomputes the host digest
+# after `up -d` - so a compose change here reaches the host or the run goes red. A local
+# edit on the host is therefore overwritten by the next deploy.
 services:
   ai-antispam:
     image: ${GHCR_IMAGE:-ghcr.io/alexeyleshchenko/ai-antispam}:${IMAGE_TAG:-main}
