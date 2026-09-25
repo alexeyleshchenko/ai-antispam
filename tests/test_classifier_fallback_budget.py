@@ -56,6 +56,20 @@ DEAD_MODELS = (
     "z-ai/glm-5.2:free",  # 404 on probe
 )
 
+# Models BANNED by the owner for reason-language defects - distinct from
+# DEAD_MODELS, which is about availability. A banned model is REACHABLE and
+# would serve; it must not, because the reason it writes is unreadable to the
+# admins who act on it.
+#
+# ling-3.0-flash-fin was banned 2026-09-25. Measured in production: of 494
+# verdict reasons in 24h, 4 carried CJK - and after separating the two causes,
+# 2 were the model's own prose (one 141-char run, entirely Chinese) and 2 were
+# the user's own CJK display name being quoted, which is legitimate. It was
+# serving every fallback rescue at the time.
+BANNED_MODELS = (
+    "inclusionai/ling-3.0-flash-fin:free",  # owner ban 2026-09-25: Chinese reasons
+)
+
 
 
 def test_derived_per_attempt_budget_leaves_the_fallback_viable():
@@ -116,6 +130,26 @@ def test_no_dead_model_occupies_a_fallback_attempt():
         assert dead not in configured, (
             f"{dead} has left the OpenRouter catalogue (404 'No endpoints found') "
             "and cannot serve a fallback attempt"
+        )
+
+
+def test_no_banned_model_occupies_a_fallback_attempt():
+    """A model the owner banned for reason-language must not be re-added.
+
+    Owner ban 2026-09-25: ling-3.0-flash-fin wrote its reason in Chinese in
+    production (one 141-char run, entirely CJK), while serving every fallback
+    rescue. The reason is the admin-facing field - it is what the group owner
+    reads to decide whether the bot was right - so a model that cannot write it
+    in the admins' language is unusable however fast it is.
+    """
+    reset_llm_config_validation()
+    validate_llm_config()
+
+    configured = get_openrouter_models()
+    for banned in BANNED_MODELS:
+        assert banned not in configured, (
+            f"{banned} is banned for reason-language defects and must not occupy "
+            "a fallback attempt"
         )
 
 

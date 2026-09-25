@@ -36,19 +36,26 @@ llm:
   # a third would cut every attempt to 10.0s, which the slowest survivor's
   # measured latency does not fit - the guard refuses it.
   #
-  # Model choice is MEASURED, not assumed. At production parity on 2026-09-24
-  # (deployed container, the app's own prompt + owner-scoped corpus, tools
-  # required, 15.0s budget): nex-n2.5-mini 8/8, p50 2.1s, max 5.5s;
-  # dots-3-note-preview 6/8, p50 8.6s, max 9.5s. The two nvidia/nemotron models
-  # previously configured managed 1/8 each - they time out or return output
-  # pydantic-ai cannot parse, which is what made this tier rescue only 3 of 30
-  # gateway failures (10%). Both survivors come from different providers (Nex AGI,
-  # AtlasCloud), so one provider's bad day cannot empty the pool - the failure
-  # mode of the previous list, which was three models from a single family.
-  # See docs/memos/2026-09-24-llm-fallback-model-selection.md
+  # Model choice is MEASURED, not assumed. At production parity on 2026-09-25
+  # (deployed container, the app's own prompt builder, owner-scoped corpus,
+  # populated context, tools required, 15.0s derived budget), over real
+  # confirmed spam AND ham, scoring availability + verdict accuracy + the
+  # admin-facing reason's language:
+  #   dots-3-note-preview  7/10 returned, 7/7 verdicts correct, 7/7 reasons ru
+  #   liquid/lfm-2.5-2.6b  9/10 returned, 4/9 correct, 7/9 reasons ru
+  # dots is ordered FIRST because accuracy leads; liquid follows as the
+  # availability net for when dots times out. Both write reasons in Russian
+  # and neither emits CJK.
+  #
+  # ling-3.0-flash-fin was BANNED by the owner 2026-09-25: it served every
+  # fallback rescue and wrote its reason in Chinese (a 141-char CJK run in
+  # production). The reason is the admin-facing field, so a model that cannot
+  # write it in the admins' language is unusable however fast it is. It is
+  # pinned in BANNED_MODELS so a later config edit cannot quietly re-add it.
+  # See docs/memos/2026-09-25-fallback-pool-language-and-accuracy.md
   openrouter_models:
-    - inclusionai/ling-3.0-flash-fin:free
     - dots-studio/dots-3-note-preview:free
+    - liquid/lfm-2.5-2.6b:free
 
 spam:
   high_confidence_threshold: 90
