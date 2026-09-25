@@ -330,6 +330,14 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     if (repo_root / "tests/test_audit_yield.py").is_file():
         gates_to_run.append([sys.executable, "tests/test_audit_yield.py"])
 
+    # 10. Gate-note population (2026-09-25) -- the scorecard must state the
+    # POPULATION a failing gate reported, not its final item. Measured: the
+    # schema gate found 3 violations and the scorecard named 1, so a triager
+    # repairing that row would believe the gate done. It runs as a GATE for the
+    # same reason as #9: nothing under tests/ is reached by CI here.
+    if (repo_root / "tests/test_audit_gate_note.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_audit_gate_note.py"])
+
     results = []
     for cmd in gates_to_run:
         results.append(run_gate(cmd, repo_root))
@@ -370,6 +378,27 @@ def check_cadence_integrity(ledger_path: Path) -> dict[str, Any]:
     except Exception:
         return {"cadence_held": False, "hours_since_last_run": None}
 
+
+def gate_note(g: dict[str, Any], max_chars: int = 60) -> str:
+    """One-line summary of a gate's outcome, for the scorecard's gate table.
+
+    A PASSing gate prints a single summary line, so its LAST line is the summary.
+    A FAILing gate prints a header carrying its POPULATION -- "N problem(s)" --
+    and then one line per problem, so its last line is only the FINAL item.
+    Reporting that line states 1 problem where the gate found N, and a triager
+    who repairs the named row believes the gate done. Measured 2026-09-25:
+    tests/test_ledger_schema.py found 3 unauthorized-actor violations and the
+    scorecard named one of them (line 30). A FAIL therefore takes the FIRST
+    non-empty line, which is the header carrying the count; the full output of
+    every failing gate follows in section 2.1, so the population is readable
+    without re-running the gate.
+    """
+    stream = g["stdout"] or g["stderr"]
+    rows = [ln.strip() for ln in stream.splitlines() if ln.strip()]
+    if not rows:
+        return ""
+    note = rows[-1] if g["passed"] else rows[0]
+    return note.replace("|", "/")[:max_chars]
 
 def format_report_markdown(
     date_str: str,
@@ -414,9 +443,28 @@ def format_report_markdown(
 
     for g in gate_results:
         status = "PASS" if g["passed"] else "FAIL"
-        note = g["stdout"].splitlines()[-1] if g["stdout"] else (g["stderr"].splitlines()[-1] if g["stderr"] else "")
-        note = note.replace("|", "/")
-        lines.append(f"| `{g['cmd']}` | `{status}` | `{g['duration_sec']}s` | {note[:60]} |")
+        lines.append(f"| `{g['cmd']}` | `{status}` | `{g['duration_sec']}s` | {gate_note(g)} |")
+
+    # A FAIL row above is truncated for the table, so the population it reports
+    # is repeated in full here. Repair from this section, never from the table.
+    failing = [g for g in gate_results if not g["passed"]]
+    if failing:
+        lines.extend([
+            "",
+            "### 2.1 Failing gate output (full)",
+            "",
+        ])
+        for g in failing:
+            body = (g["stdout"] or g["stderr"] or "(no output)").strip()
+            fence = "````" if "```" in body else "```"
+            lines.extend([
+                f"**`{g['cmd']}`** -- rc={g['exit_code']}, {g['duration_sec']}s",
+                "",
+                fence,
+                body,
+                fence,
+                "",
+            ])
 
     lines.extend([
         "",
