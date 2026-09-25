@@ -1,7 +1,13 @@
 services:
   ai-antispam:
     image: ${GHCR_IMAGE:-ghcr.io/alexeyleshchenko/ai-antispam}:${IMAGE_TAG:-main}
-    container_name: ai-antispam
+    # No container_name on purpose. A fixed name forces compose to rename the outgoing
+    # container to "<old-id>_<service>" while recreating, and an interrupted recreate
+    # leaves the replacement under that temporary name permanently: the deploy guard then
+    # fails on a deploy that shipped, every monitor that names the container breaks, and a
+    # later recreate can hard-fail with a name Conflict (all reproduced 2026-09-25).
+    # Compose's own project-service-N name is stable across recreates, and the service
+    # network alias "ai-antispam" - which is what Traefik dials - is unaffected.
     # aiogram 3.30 alone needs ~234 MiB (it compiles the entire Bot API as
     # pydantic models); idle footprint is ~293 MiB. A 256mb limit caused an OOM
     # crash-loop (RestartCount=9) -> webhook retries -> "duplicate taps".
