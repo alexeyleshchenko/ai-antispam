@@ -114,9 +114,35 @@ def remote(script: str, timeout: int = 90) -> tuple[int, str, str]:
     )
 
 
+_RESOLVED_CONTAINER: str | None = None
+
+
+def container_name() -> str:
+    """Resolve the running container by COMPOSE LABELS, not by name.
+
+    The container NAME is not stable: when a recreate is interrupted, compose
+    leaves the replacement under a temporary "<replaced-container-id>_<service>"
+    name, and that prefix then persists across later recreates (2026-09-25).
+    The compose labels are stable, so resolve by them and fall back to the
+    configured name only when the lookup yields nothing.
+    """
+    global _RESOLVED_CONTAINER
+    if _RESOLVED_CONTAINER is None:
+        rc, out, _ = remote(
+            "docker ps"
+            " --filter label=com.docker.compose.project=ai-antispam"
+            " --filter label=com.docker.compose.service=ai-antispam"
+            " --format '{{.Names}}' | head -1",
+            timeout=45,
+        )
+        name = out.strip().splitlines()[0].strip() if rc == 0 and out.strip() else ""
+        _RESOLVED_CONTAINER = name or CONTAINER
+    return _RESOLVED_CONTAINER
+
+
 def read_bot_token() -> str | None:
     """Read BOT_TOKEN from the container env. Value is never logged."""
-    rc, out, _ = remote(f"docker exec {CONTAINER} printenv BOT_TOKEN", timeout=45)
+    rc, out, _ = remote(f"docker exec {container_name()} printenv BOT_TOKEN", timeout=45)
     if rc != 0:
         return None
     token = out.strip()
@@ -190,7 +216,7 @@ def check_container() -> dict:
         "{{.Config.Image}}|{{.State.Status}}|{{.State.Health.Status}}|"
         "{{.State.StartedAt}}|{{.RestartCount}}|{{.Image}}"
     )
-    rc, out, _ = remote(f"docker inspect {CONTAINER} --format '{fmt}'", timeout=45)
+    rc, out, _ = remote(f"docker inspect {container_name()} --format '{fmt}'", timeout=45)
     if rc != 0 or not out.strip():
         return {"error": "docker inspect failed"}
     parts = out.strip().split("|")
@@ -257,7 +283,7 @@ def check_image_digest(container: dict) -> dict:
 
 
 def check_log_window(hours: int) -> dict:
-    script = f"docker logs --since {hours}h {CONTAINER} 2>&1 | awk '{LOG_WINDOW_AWK}'"
+    script = f"docker logs --since {hours}h {container_name()} 2>&1 | awk '{LOG_WINDOW_AWK}'"
     rc, out, err = remote(script, timeout=120)
     if rc != 0 or "ingress=" not in out:
         return {"error": redact(err.strip()[:200] or f"rc={rc}")}
