@@ -338,6 +338,16 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     if (repo_root / "tests/test_audit_gate_note.py").is_file():
         gates_to_run.append([sys.executable, "tests/test_audit_gate_note.py"])
 
+    # 11. Board-close recorded (2026-09-26, #40) -- a close row must record the board
+    # close it observed, not only the ledger transition. Measured: #49's close row was
+    # written 3h52m54s before the board issue was actually closed, so the board read as
+    # free-and-actionable and a gated trigger fired on it. Offline by necessity -- a gate
+    # cannot call gh, so the settling lane records the state it saw and the gate asserts
+    # it was recorded. Runs as a GATE for the same reason as #9 and #10: nothing under
+    # tests/ is reached by CI here.
+    if (repo_root / "tests/test_close_board_recorded.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_close_board_recorded.py"])
+
     results = []
     for cmd in gates_to_run:
         results.append(run_gate(cmd, repo_root))
