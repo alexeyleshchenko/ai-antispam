@@ -11,8 +11,8 @@ from pydantic import BaseModel, Field
 from pydantic_ai import Agent, ModelSettings
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
-from pydantic_ai.retries import AsyncTenacityTransport, RetryConfig, wait_retry_after
-from tenacity import stop_after_attempt
+from pydantic_ai.retries import AsyncTenacityTransport, RetryConfig
+from tenacity import retry_never
 
 from .common.llm_budget import (
     get_llm_gateway_timeout,
@@ -65,24 +65,38 @@ OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 
-def _create_retrying_client(timeout: float) -> httpx.AsyncClient:
-    """Create a retrying HTTP client bounded by one caller-provided leg."""
+def _create_llm_client(timeout: float) -> httpx.AsyncClient:
+    """Create an HTTP client for one LLM leg, bounded by the caller's timeout.
 
-    def should_retry_status(response: httpx.Response) -> None:
+    There are NO transport-level retries here, deliberately. The callers already
+    own retrying: the OpenRouter pool advances to the next model on any failure
+    (see spam_classifier), and the gateway leg falls through to that same pool.
+    A second, invisible retry layer here is redundant.
+
+    It was also dead, and that is how the defect hid (issue #50): the predicate
+    was written as ``lambda e: isinstance(e, httpx.HTTPStatusError)``, but tenacity
+    calls ``self.retry(retry_state)`` - it hands the callable a RetryCallState,
+    never an exception - so the condition was ALWAYS False and the policy never
+    fired. Its wait/stop strategies could therefore never spend the leg.
+
+    ``retry=retry_never`` is set EXPLICITLY and must stay explicit: omitting the
+    key does NOT disable retrying. tenacity's defaults are
+    ``retry_if_exception_type(Exception)`` (retry everything) with ``stop_never``,
+    i.e. an unbounded retry loop. Measured: an empty ``RetryConfig()`` never
+    terminates.
+
+    ``validate_response`` stays wired: a 429/502/503/504 must still RAISE, because
+    the caller's pool advances on the exception. The transport raises; it does not
+    retry.
+    """
+
+    def raise_for_retryable_status(response: httpx.Response) -> None:
         if response.status_code in (429, 502, 503, 504):
             response.raise_for_status()
 
     transport = AsyncTenacityTransport(
-        config=RetryConfig(
-            retry=lambda e: isinstance(e, (httpx.HTTPStatusError, httpx.ConnectError)),
-            wait=wait_retry_after(
-                fallback_strategy=None,
-                max_wait=60,
-            ),
-            stop=stop_after_attempt(5),
-            reraise=True,
-        ),
-        validate_response=should_retry_status,
+        config=RetryConfig(retry=retry_never),
+        validate_response=raise_for_retryable_status,
     )
     return httpx.AsyncClient(timeout=timeout, transport=transport)
 
@@ -96,12 +110,12 @@ def _create_gateway_model() -> OpenAIChatModel:
     if not GATEWAY_MODEL:
         raise ValueError("CUSTOM_GATEWAY_MODEL environment variable is required")
 
-    client = _create_retrying_client(get_llm_gateway_timeout())
+    client = _create_llm_client(get_llm_gateway_timeout())
     openai_client = AsyncOpenAI(
         base_url=f"{GATEWAY_API_BASE.rstrip('/')}",
         api_key=GATEWAY_API_KEY,
         http_client=client,
-        max_retries=0,  # Disable SDK-level retries; AsyncTenacityTransport handles 502/503/504
+        max_retries=0,  # SDK retries off; the caller's pool owns retrying (see _create_llm_client)
     )
     return OpenAIChatModel(
         GATEWAY_MODEL,
@@ -114,12 +128,12 @@ def _create_openrouter_model(model_name: str) -> OpenAIChatModel:
     if not OPENROUTER_API_KEY:
         raise ValueError("OPENROUTER_API_KEY environment variable is required")
 
-    client = _create_retrying_client(get_llm_per_attempt_timeout())
+    client = _create_llm_client(get_llm_per_attempt_timeout())
     openai_client = AsyncOpenAI(
         base_url=f"{OPENROUTER_API_BASE.rstrip('/')}",
         api_key=OPENROUTER_API_KEY,
         http_client=client,
-        max_retries=0,  # Disable SDK-level retries; AsyncTenacityTransport handles 502/503/504
+        max_retries=0,  # SDK retries off; the caller's pool owns retrying (see _create_llm_client)
     )
     return OpenAIChatModel(
         model_name,
