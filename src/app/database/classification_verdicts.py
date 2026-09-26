@@ -12,6 +12,13 @@ States:
     decided    - a verdict exists (is_spam, confidence, reason)
     failed     - every leg was exhausted; no verdict
 
+`failed` is RETRYABLE, not terminal. Once every leg fails, the caller answers
+503 so Telegram redelivers, and a later delivery reclaims the row through
+`reclaim_failed` and classifies again - this time from the real update, which is
+the only place the message still exists (nothing persists it before a verdict).
+`attempts` counts the failures; `reclaim_failed` refuses past `max_attempts` and
+inside `cooldown`, so the retry is bounded rather than a livelock.
+
 `moderated_at` is the moderation claim, independent of `status`: it is set by
 `claim_moderation` with an `IS NULL` guard, so exactly one caller wins even if
 two deliveries race.
@@ -26,6 +33,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_VERDICT_TTL_DAYS = 7
 DEFAULT_PENDING_STALE_MINUTES = 15
+DEFAULT_VERDICT_RETRY_ATTEMPTS = 3
+DEFAULT_VERDICT_RETRY_COOLDOWN_SECONDS = 60
 
 VERDICT_TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS classification_verdicts (
@@ -40,8 +49,17 @@ CREATE TABLE IF NOT EXISTS classification_verdicts (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     decided_at TIMESTAMPTZ,
     moderated_at TIMESTAMPTZ,
+    attempts INTEGER NOT NULL DEFAULT 0,
     UNIQUE(chat_id, message_id)
 )
+"""
+
+# `CREATE TABLE IF NOT EXISTS` does not alter a table that already exists, so a
+# deployed store needs the column added in place. Idempotent, and run on every
+# boot beside the DDL so the deploy path self-heals without a manual migration.
+VERDICT_ATTEMPTS_DDL = """
+ALTER TABLE classification_verdicts
+    ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0
 """
 
 VERDICT_INDEX_DDL = """
@@ -49,10 +67,13 @@ CREATE INDEX IF NOT EXISTS idx_classification_verdicts_created
     ON classification_verdicts(created_at)
 """
 
+
 async def ensure_verdict_table(conn) -> None:
-    """Create the verdict table and its index. Idempotent."""
+    """Create the verdict table, its index and its added columns. Idempotent."""
     await conn.execute(VERDICT_TABLE_DDL)
+    await conn.execute(VERDICT_ATTEMPTS_DDL)
     await conn.execute(VERDICT_INDEX_DDL)
+
 
 async def claim_or_read(chat_id: int, message_id: int) -> dict | None:
     """Return the stored row for this message, or None if there is none."""
@@ -61,7 +82,7 @@ async def claim_or_read(chat_id: int, message_id: int) -> dict | None:
         row = await conn.fetchrow(
             """
             SELECT chat_id, message_id, status, is_spam, confidence, reason,
-                   result_id, moderated_at
+                   result_id, moderated_at, attempts
             FROM classification_verdicts
             WHERE chat_id = $1 AND message_id = $2
             """,
@@ -79,7 +100,9 @@ async def claim_or_read(chat_id: int, message_id: int) -> dict | None:
         "reason": row["reason"],
         "result_id": row["result_id"],
         "moderated_at": row["moderated_at"],
+        "attempts": row["attempts"],
     }
+
 
 async def claim_pending(chat_id: int, message_id: int) -> bool:
     """Claim the right to classify this message. True if THIS caller won.
@@ -101,6 +124,46 @@ async def claim_pending(chat_id: int, message_id: int) -> bool:
             message_id,
         )
     return row is not None
+
+
+async def reclaim_failed(
+    chat_id: int,
+    message_id: int,
+    cooldown: timedelta | None = None,
+    max_attempts: int = DEFAULT_VERDICT_RETRY_ATTEMPTS,
+) -> bool:
+    """Claim a retry of a FAILED classification. True if THIS caller won.
+
+    The single UPDATE is the whole claim. It matches only a row that is still
+    `failed`, is short of the attempt cap, and has been failed longer than
+    `cooldown`; the row lock serialises concurrent reclaims, so the loser
+    re-evaluates against `pending` and matches nothing. That is the same shape
+    as `claim_pending` and `claim_moderation`: no read-then-write, so no race.
+    """
+    if cooldown is None:
+        cooldown = timedelta(seconds=DEFAULT_VERDICT_RETRY_COOLDOWN_SECONDS)
+    # Cutoff computed here, not as SQL `NOW() - interval`: same shape as
+    # cleanup_stale_pending_verdicts, and it keeps the statement portable.
+    cutoff = datetime.now(UTC) - cooldown
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE classification_verdicts
+            SET status = 'pending'
+            WHERE chat_id = $1 AND message_id = $2
+              AND status = 'failed'
+              AND attempts < $3
+              AND decided_at < $4
+            RETURNING id
+            """,
+            chat_id,
+            message_id,
+            max_attempts,
+            cutoff,
+        )
+    return row is not None
+
 
 async def store_verdict(
     chat_id: int,
@@ -129,19 +192,28 @@ async def store_verdict(
             message_id,
         )
 
+
 async def mark_failed(chat_id: int, message_id: int) -> None:
-    """Record that every leg was exhausted. No verdict exists."""
+    """Record that every leg was exhausted for this attempt.
+
+    Increments `attempts` so `reclaim_failed` can bound the retries. A row that
+    reaches the cap stays `failed` and the caller stops answering 503, which is
+    what ends the retry rather than letting it run forever.
+    """
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
             UPDATE classification_verdicts
-            SET status = 'failed', decided_at = NOW()
+            SET status = 'failed',
+                decided_at = NOW(),
+                attempts = attempts + 1
             WHERE chat_id = $1 AND message_id = $2
             """,
             chat_id,
             message_id,
         )
+
 
 async def claim_moderation(chat_id: int, message_id: int) -> bool:
     """Claim the right to moderate this message. True if THIS caller won.
@@ -163,6 +235,7 @@ async def claim_moderation(chat_id: int, message_id: int) -> bool:
         )
     return row is not None
 
+
 async def release_moderation_claim(chat_id: int, message_id: int) -> None:
     """Undo a moderation claim. Used only when the moderation action raised,
     so a later delivery can retry it instead of the message being stuck."""
@@ -177,6 +250,7 @@ async def release_moderation_claim(chat_id: int, message_id: int) -> None:
             chat_id,
             message_id,
         )
+
 
 async def store_result_id(chat_id: int, message_id: int, result_id: str) -> None:
     """Record the id of the moderation result (e.g. the review message)."""
@@ -193,6 +267,7 @@ async def store_result_id(chat_id: int, message_id: int, result_id: str) -> None
             message_id,
         )
 
+
 async def cleanup_old_verdicts(days: int = DEFAULT_VERDICT_TTL_DAYS) -> int:
     """Delete verdicts older than `days`. Returns the deleted count."""
     cutoff = datetime.now(UTC) - timedelta(days=days)
@@ -207,6 +282,7 @@ async def cleanup_old_verdicts(days: int = DEFAULT_VERDICT_TTL_DAYS) -> int:
         logger.info(f"Cleaned up {count} old classification_verdicts entries")
     return count
 
+
 async def cleanup_stale_pending_verdicts(
     minutes: int = DEFAULT_PENDING_STALE_MINUTES,
 ) -> int:
@@ -214,9 +290,9 @@ async def cleanup_stale_pending_verdicts(
 
     A pending row is DELETED rather than marked: the detached task is bounded at
     roughly the classification budget plus the session-middleware retries inside
-    moderation, so 15 minutes is ~10x the maximum lifetime. Deleting restores
-    the `absent` path, so a later delivery re-classifies - whereas leaving it
-    would make every redelivery answer 503 forever.
+    moderation, so 15 minutes is well beyond the maximum lifetime. Deleting
+    restores the `absent` path, so a later delivery re-classifies - whereas
+    leaving it would make every redelivery answer 503 forever.
     """
     cutoff = datetime.now(UTC) - timedelta(minutes=minutes)
     pool = await get_pool()

@@ -8,11 +8,14 @@ Covers the properties the store exists for:
 - both cleanup paths are wired into the scheduled jobs.
 """
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from app.background_jobs import scheduled_tasks
 from app.database.classification_verdicts import (
     DEFAULT_PENDING_STALE_MINUTES,
+    DEFAULT_VERDICT_RETRY_ATTEMPTS,
     DEFAULT_VERDICT_TTL_DAYS,
     claim_moderation,
     claim_or_read,
@@ -21,6 +24,7 @@ from app.database.classification_verdicts import (
     cleanup_stale_pending_verdicts,
     ensure_verdict_table,
     mark_failed,
+    reclaim_failed,
     release_moderation_claim,
     store_result_id,
     store_verdict,
@@ -173,3 +177,136 @@ def test_ttl_defaults_match_config_keys():
     ttl = scheduled_tasks._get_cache_ttl_days()
     assert ttl["verdict_ttl_days"] == DEFAULT_VERDICT_TTL_DAYS
     assert ttl["verdict_pending_stale_minutes"] == DEFAULT_PENDING_STALE_MINUTES
+
+@pytest.mark.asyncio
+async def test_failed_attempt_increments_attempts(patched_db_conn, clean_db):
+    """Each exhausted attempt is counted: the cap is what bounds the retry."""
+    await claim_pending(CHAT_ID, MESSAGE_ID)
+
+    await mark_failed(CHAT_ID, MESSAGE_ID)
+    assert (await claim_or_read(CHAT_ID, MESSAGE_ID))["attempts"] == 1
+
+    await mark_failed(CHAT_ID, MESSAGE_ID)
+    assert (await claim_or_read(CHAT_ID, MESSAGE_ID))["attempts"] == 2
+
+async def _fail_at(pool, when: datetime) -> None:
+    """Mark the row failed, with `decided_at` set to an EXPLICIT instant.
+
+    The explicit write is load-bearing, not tidiness. `mark_failed` sets
+    `decided_at = NOW()`, which SQLite renders as `2026-09-26 18:06:47` (a
+    SPACE), while conftest's `register_adapter(datetime, isoformat)` binds a
+    parameter as `2026-09-26T17:06:47+00:00` (a T). Space sorts below T, so
+    comparing a NOW()-written column against a bound datetime is TRUE whatever
+    the two instants are - the cooldown would read as "always expired" and the
+    test would pass or fail for a formatting reason rather than the predicate.
+    Writing both sides through the same adapter keeps the comparison ordered.
+    PostgreSQL compares true timestamptz and is unaffected.
+    """
+    await claim_pending(CHAT_ID, MESSAGE_ID)
+    await mark_failed(CHAT_ID, MESSAGE_ID)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE classification_verdicts SET decided_at = $1 "
+            "WHERE chat_id = $2 AND message_id = $3",
+            when,
+            CHAT_ID,
+            MESSAGE_ID,
+        )
+
+@pytest.mark.asyncio
+async def test_reclaim_failed_hands_the_row_back_for_retry(patched_db_conn, clean_db):
+    """A failure older than the cooldown is claimable again, and becomes pending."""
+    await _fail_at(clean_db, datetime.now(UTC) - timedelta(hours=2))
+
+    won = await reclaim_failed(CHAT_ID, MESSAGE_ID, cooldown=timedelta(hours=1))
+    assert won is True
+    assert (await claim_or_read(CHAT_ID, MESSAGE_ID))["status"] == "pending"
+
+@pytest.mark.asyncio
+async def test_reclaim_failed_loses_inside_the_cooldown(patched_db_conn, clean_db):
+    """Too soon after the failure the row is left alone - this is the backoff."""
+    await _fail_at(clean_db, datetime.now(UTC) - timedelta(minutes=1))
+
+    won = await reclaim_failed(CHAT_ID, MESSAGE_ID, cooldown=timedelta(hours=1))
+    assert won is False
+    assert (await claim_or_read(CHAT_ID, MESSAGE_ID))["status"] == "failed"
+
+@pytest.mark.asyncio
+async def test_reclaim_failed_loses_at_the_attempt_cap(patched_db_conn, clean_db):
+    """At the cap the retry stops, which is what ends it instead of looping."""
+    await claim_pending(CHAT_ID, MESSAGE_ID)
+    for _ in range(DEFAULT_VERDICT_RETRY_ATTEMPTS):
+        await mark_failed(CHAT_ID, MESSAGE_ID)
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            "UPDATE classification_verdicts SET decided_at = $1 "
+            "WHERE chat_id = $2 AND message_id = $3",
+            datetime.now(UTC) - timedelta(hours=2), CHAT_ID, MESSAGE_ID,
+        )
+
+    won = await reclaim_failed(CHAT_ID, MESSAGE_ID, cooldown=timedelta(hours=1))
+    assert won is False
+    assert (await claim_or_read(CHAT_ID, MESSAGE_ID))["attempts"] == (
+        DEFAULT_VERDICT_RETRY_ATTEMPTS
+    )
+
+@pytest.mark.asyncio
+async def test_reclaim_wins_exactly_once(patched_db_conn, clean_db):
+    """The UPDATE is the claim: a second reclaimer matches nothing."""
+    await _fail_at(clean_db, datetime.now(UTC) - timedelta(hours=2))
+
+    first = await reclaim_failed(CHAT_ID, MESSAGE_ID, cooldown=timedelta(hours=1))
+    second = await reclaim_failed(CHAT_ID, MESSAGE_ID, cooldown=timedelta(hours=1))
+    assert first is True
+    assert second is False
+
+@pytest.mark.asyncio
+async def test_reclaim_leaves_decided_and_absent_rows_alone(patched_db_conn, clean_db):
+    """Only a FAILED row is reclaimable - a verdict is never re-asked."""
+    await claim_pending(CHAT_ID, MESSAGE_ID)
+    await store_verdict(CHAT_ID, MESSAGE_ID, True, 97, "scam")
+
+    assert (
+        await reclaim_failed(CHAT_ID, MESSAGE_ID, cooldown=timedelta(hours=-1))
+    ) is False
+    assert (await claim_or_read(CHAT_ID, MESSAGE_ID))["status"] == "decided"
+
+    assert (
+        await reclaim_failed(CHAT_ID, MESSAGE_ID + 1, cooldown=timedelta(hours=-1))
+    ) is False
+    assert await claim_or_read(CHAT_ID, MESSAGE_ID + 1) is None
+
+@pytest.mark.asyncio
+async def test_ensure_table_adds_attempts_to_a_legacy_table(patched_db_conn, clean_db):
+    """The upgrade path: an existing table gains the column on the boot hook.
+
+    The live store predates `attempts`, and CREATE TABLE IF NOT EXISTS is a
+    no-op against it, so without the ALTER the deployed column never appears.
+    """
+    async with clean_db.acquire() as conn:
+        await conn.execute("DROP TABLE IF EXISTS classification_verdicts")
+        await conn.execute(
+            """
+            CREATE TABLE classification_verdicts (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                message_id BIGINT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                is_spam BOOLEAN,
+                confidence INTEGER,
+                reason TEXT,
+                result_id TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                decided_at TIMESTAMP,
+                moderated_at TIMESTAMP,
+                UNIQUE(chat_id, message_id)
+            )
+            """
+        )
+        await ensure_verdict_table(conn)
+        await ensure_verdict_table(conn)
+
+    # Functional proof rather than a schema read: claim_or_read selects the
+    # column, so this passes only if the ALTER actually landed.
+    assert await claim_pending(CHAT_ID, MESSAGE_ID) is True
+    assert (await claim_or_read(CHAT_ID, MESSAGE_ID))["attempts"] == 0

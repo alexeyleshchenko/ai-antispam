@@ -213,8 +213,37 @@ class SQLiteConnectionAdapter:
 
         return query, tuple(args_list)
 
+    _ADD_COLUMN_IF_NOT_EXISTS_RE = re.compile(
+        r"ALTER\s+TABLE\s+(?P<table>\w+)\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+(?P<column>\w+)",
+        re.IGNORECASE,
+    )
+
+    async def _emulate_add_column_if_not_exists(self, query):
+        """Emulate PostgreSQL's ADD COLUMN IF NOT EXISTS, which SQLite rejects.
+
+        SQLite has no IF NOT EXISTS on ADD COLUMN, so the statement is a syntax
+        error there and the production upgrade path could not be exercised
+        offline. Returns (skip, query): skipped when the column is already
+        present - which is what makes the statement idempotent, exactly as in
+        PostgreSQL - otherwise the clause is dropped so the ADD itself runs.
+        """
+        match = self._ADD_COLUMN_IF_NOT_EXISTS_RE.search(query)
+        if match is None:
+            return False, query
+        cursor = await self._conn.execute(f"PRAGMA table_info({match.group('table')})")
+        existing = {row[1] for row in await cursor.fetchall()}
+        if match.group("column") in existing:
+            return True, query
+        return False, self._ADD_COLUMN_IF_NOT_EXISTS_RE.sub(
+            lambda m: f"ALTER TABLE {m.group('table')} ADD COLUMN {m.group('column')}",
+            query,
+        )
+
     async def execute(self, query, *args):
         """Execute a query (INSERT, UPDATE, DELETE)"""
+        skipped, query = await self._emulate_add_column_if_not_exists(query)
+        if skipped:
+            return "ALTER TABLE 0"
         query, args = self._transform_query_and_params(query, args)
         cursor = await self._conn.execute(query, args)
         await self._conn.commit()
@@ -448,6 +477,7 @@ async def create_sqlite_schema(conn):
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             decided_at TIMESTAMP,
             moderated_at TIMESTAMP,
+            attempts INTEGER NOT NULL DEFAULT 0,
             UNIQUE(chat_id, message_id)
         );
     """)
