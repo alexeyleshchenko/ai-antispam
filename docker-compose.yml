@@ -34,6 +34,18 @@ services:
     environment:
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
+      # LLM ROUTING IS DEPLOY-CONTROLLED AND LIVES HERE, NOT IN .env.
+      # `.env` is untracked and the deploy job syncs docker-compose.yml ONLY, so a
+      # routing value kept in .env can never be shipped - it drifts silently and the
+      # container keeps running the old target. Measured 2026-09-26: .env.example had
+      # named the ai-gateway `ai-antispam` route since the CI commit, while the host's
+      # .env still said llm.l1979.ru/`auto`, so the classifier ran against a gateway
+      # whose only live channel was returning 503 no-capacity - 47% of gateway calls
+      # failed and the OpenRouter fallback absorbed the rest.
+      # These two are non-secret; the credential (CUSTOM_GATEWAY_API_KEY) stays in .env.
+      # It must authenticate against API_BASE - they are a PAIR.
+      - API_BASE=https://ai-gateway.l1979.ru/v1
+      - CUSTOM_GATEWAY_MODEL=ai-antispam
     networks:
       - traefik-public
     volumes:
