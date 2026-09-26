@@ -11,6 +11,7 @@ from src.app.main import (
     WEBHOOK_TIMEOUT,
     _update_type,
     handle_classification_pending,
+    handle_classification_retry_later,
     handle_unhandled_exception,
     log_update_received,
 )
@@ -228,3 +229,76 @@ async def test_shielded_shape_keeps_the_work():
     assert task.cancelled() is False, "shield must not cancel the work"
     await asyncio.wait_for(task, timeout=3)
     assert finished.is_set(), "the shielded task must still complete"
+
+# ─── retryable failure: 503 inside the cooldown, loud give-up at the cap ─────
+
+@pytest.mark.asyncio
+async def test_classification_retry_later_returns_503_with_retry():
+    """Inside the cooldown the redelivery is asked for, in the timeout's shape."""
+    span = MagicMock()
+    response = await handle_classification_retry_later(
+        span, {"update_id": 1}, elapsed=3.5
+    )
+    assert response.status == 503
+    body = json.loads(response.text)
+    assert body.get("retry") is True
+    assert body.get("error") == "Classification failed; retry later"
+    assert span.tags == ["classification_retry_later"]
+
+@pytest.mark.asyncio
+async def test_handle_update_503_when_a_failed_row_is_inside_its_cooldown(
+    monkeypatch,
+):
+    """The retry mechanism's other half: without 503 there is no redelivery.
+
+    A failed row that cannot be reclaimed yet must NOT be answered 200, because
+    200 tells Telegram the update was handled and it stops retrying - which is
+    exactly how the message would be lost for good.
+    """
+    from src.app import main
+
+    async def _retry_later(bot, json):
+        return main.RESULT_VERDICT_RETRY_LATER
+
+    monkeypatch.setattr(main, "WEBHOOK_TIMEOUT", 5.0)
+    monkeypatch.setattr(main.dp, "feed_raw_update", _retry_later)
+
+    payload = {
+        "update_id": 3,
+        "message": {"message_id": 7, "chat": {"id": -100123, "title": "t"}},
+    }
+    response = await main.handle_update(_fake_request(payload))
+
+    assert response.status == 503
+    assert json.loads(response.text)["retry"] is True
+
+@pytest.mark.asyncio
+async def test_handle_update_acks_and_shouts_when_the_retry_cap_is_reached(
+    monkeypatch, caplog
+):
+    """At the cap the give-up is a 200 AND an ERROR - never a silent drop.
+
+    200 is what stops the redelivery, so it is the point of no return: if this
+    is not logged loudly, a message is left unmoderated with nothing anywhere
+    saying so.
+    """
+    from src.app import main
+
+    async def _failed(bot, json):
+        return main.RESULT_VERDICT_FAILED
+
+    monkeypatch.setattr(main, "WEBHOOK_TIMEOUT", 5.0)
+    monkeypatch.setattr(main.dp, "feed_raw_update", _failed)
+
+    payload = {
+        "update_id": 4,
+        "message": {"message_id": 8, "chat": {"id": -100123, "title": "t"}},
+    }
+    with caplog.at_level(logging.ERROR):
+        response = await main.handle_update(_fake_request(payload))
+
+    assert response.status == 200, "the cap ends the retry rather than looping"
+    assert any(
+        "gave up after exhausting every attempt" in r.getMessage()
+        for r in caplog.records
+    ), "a give-up must be visible, because 200 stops Telegram retrying"

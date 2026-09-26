@@ -34,7 +34,12 @@ from .database.postgres_connection import close_pool, get_pool
 # Import all handlers to register them with the dispatcher
 from .handlers import *
 from .handlers.dp import dp
-from .handlers.message.verdict import RESULT_VERDICT_PENDING, inflight_tasks
+from .handlers.message.verdict import (
+    RESULT_VERDICT_FAILED,
+    RESULT_VERDICT_PENDING,
+    RESULT_VERDICT_RETRY_LATER,
+    inflight_tasks,
+)
 from .logging_setup import get_telegram_handler, register_telegram_logging_loop
 from .max_webhook import (
     MAX_SECRET_HEADER,
@@ -126,6 +131,27 @@ async def handle_update(request: web.Request) -> web.Response:
             if result == RESULT_VERDICT_PENDING:
                 return await handle_classification_pending(
                     span, json, time.time() - start_time
+                )
+
+            # A failed classification is RETRYABLE, and this is the half that
+            # makes the retry happen: the row is inside its cooldown, so the
+            # work cannot start yet. Answer 503 and the next delivery reclaims
+            # it. Without this branch the redelivery would never come, because
+            # anything other than 503 is a successful receipt to Telegram.
+            if result == RESULT_VERDICT_RETRY_LATER:
+                return await handle_classification_retry_later(
+                    span, json, time.time() - start_time
+                )
+
+            # Every leg failed and the retry cap is reached. This answers 200,
+            # which stops Telegram redelivering - so it MUST be loud: a silent
+            # give-up here is a message left unmoderated with no trace. The
+            # tag below carries RESULT_VERDICT_FAILED for the same reason.
+            if result == RESULT_VERDICT_FAILED:
+                logger.error(
+                    "Classification gave up after exhausting every attempt; "
+                    "message left unmoderated and no further retry will be asked",
+                    extra={"update": json},
                 )
 
             # Add tag based on handler result
@@ -420,6 +446,28 @@ async def handle_classification_pending(
 
     return web.json_response(
         {"error": "Classification pending", "retry": True},
+        status=503,
+    )
+
+async def handle_classification_retry_later(
+    span: logfire.LogfireSpan, json: dict, elapsed: float
+) -> web.Response:
+    """A failed classification is retryable, but not yet; ask for a redelivery.
+
+    Its own handler rather than a second call to handle_classification_pending
+    so the log says WHICH retry this is: "pending" means work is in flight,
+    "retry later" means the work failed, the row is inside its cooldown, and
+    the next delivery is the one that will reclaim it. Same 503 + retry shape,
+    so Telegram's existing retry semantics carry it.
+    """
+    logger.warning(
+        f"Classification failed and is inside its retry cooldown after "
+        f"{elapsed:.2f}s; requesting redelivery"
+    )
+    span.tags = ["classification_retry_later"]
+
+    return web.json_response(
+        {"error": "Classification failed; retry later", "retry": True},
         status=503,
     )
 
