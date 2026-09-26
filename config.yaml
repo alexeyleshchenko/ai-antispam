@@ -19,6 +19,12 @@ cache:
   message_history_ttl_days: 7  # Chat history retention
   verdict_ttl_days: 7              # classification_verdicts retention
   verdict_pending_stale_minutes: 15 # pending rows older than this are presumed dead
+  # Retry of a FAILED classification. The webhook answers 503 for a failed row,
+  # so Telegram redelivers and a later delivery reclaims it and classifies
+  # again. Bounded twice: the cooldown is the backoff between attempts, and the
+  # attempt cap is what finally stops the redelivery loop.
+  verdict_retry_attempts: 3        # total attempts before giving up (1 = no retry)
+  verdict_retry_cooldown_seconds: 60 # minimum wait between attempts
   pending_spam_ttl_days: 7     # Pending spam examples before cleanup
 
 # Confidence threshold (0-100): spam/not-spam with confidence >= this is high-confidence.
