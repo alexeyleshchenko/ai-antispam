@@ -56,3 +56,4 @@
 {"n": 56, "ts": "2026-09-26T19:58:30Z", "event": "claim", "actor": "hq", "subject": "#54", "detail": "claimed by HQ; fix is a logging change across 6 sites plus a guard"}
 {"n": 57, "ts": "2026-09-26T20:01:03Z", "event": "intake", "actor": "hq", "subject": "#55", "detail": "fallback pool accuracy-ordered but inverted in effect; attempt 1 times out every time so the weaker model always decides"}
 {"n": 58, "ts": "2026-09-26T20:01:04Z", "event": "claim", "actor": "hq", "subject": "#55", "detail": "claimed by HQ; close condition requires a production-parity re-measurement of the pool ordering"}
+{"n": 59, "ts": "2026-09-26T20:01:37Z", "event": "close", "actor": "worker", "subject": "#46", "detail": "fix verified live and held: container canonical ai-antispam-ai-antispam-1, zero hash-prefixed containers host-wide, health probe OK exit 0, survived recreates at 16:48Z 17:15Z and 19:29Z plus real traffic; all four commits 121ffdb c52e1f2 a8d450a 018a973 on both remotes"}
