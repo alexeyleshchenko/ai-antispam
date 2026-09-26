@@ -8,12 +8,23 @@ moderation is claimed exactly once however many deliveries arrive.
 
 States a delivery can meet, and what each does:
 
-    absent   -> claim the row, detach the work, return the verdict if it lands
-                inside the budget, else PENDING (the caller answers 503 + retry)
-    pending  -> another worker owns it; return PENDING immediately, no LLM call
-    decided  -> moderate from the stored verdict, no LLM call; the moderation
-                claim makes N deliveries produce exactly one action
-    failed   -> every leg was exhausted; return FAILED, no LLM call
+    absent        -> claim the row, detach the work, return the verdict if it
+                     lands inside the budget, else PENDING (503 + retry)
+    pending       -> another worker owns it; return PENDING immediately, no
+                     LLM call
+    decided       -> moderate from the stored verdict, no LLM call; the
+                     moderation claim makes N deliveries produce one action
+    failed, under -> RECLAIM it and classify again (retry). The failed verdict
+      the cap       is neither final nor lost: `attempts` counts how many times
+                    the legs were exhausted, and below the cap a later delivery
+                    takes the row back to `pending` and re-runs the work.
+    failed, at    -> return FAILED, no LLM call. The cap is reached, so the
+      the cap       retry stops here rather than cycling forever; the caller
+                    stops answering 503, which is what ends the redelivery.
+
+A reclaim only succeeds once the row is past its COOLDOWN, so a delivery that
+arrives too soon is told RETRY_LATER: the caller answers 503 again and the
+backoff is enforced by the reclaim predicate rather than by holding the update.
 
 An unavailable store is NOT the absent case. `STORE_UNAVAILABLE` is a distinct
 sentinel and the caller short-circuits to the inline, un-gated path - today's
@@ -25,14 +36,19 @@ instead of silent.
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import timedelta
 
 from ...common.llm_budget import get_llm_budget_seconds
 from ...common.trace_context import remaining_webhook_seconds
+from ...common.utils import load_config
 from ...database import (
+    DEFAULT_VERDICT_RETRY_ATTEMPTS,
+    DEFAULT_VERDICT_RETRY_COOLDOWN_SECONDS,
     claim_moderation,
     claim_or_read,
     claim_pending,
     mark_failed,
+    reclaim_failed,
     release_moderation_claim,
     store_result_id,
     store_verdict,
@@ -43,6 +59,7 @@ logger = logging.getLogger(__name__)
 RESULT_VERDICT_PENDING = "message_classification_pending"
 RESULT_VERDICT_REPLAYED = "message_verdict_replayed"
 RESULT_VERDICT_FAILED = "message_classification_failed"
+RESULT_VERDICT_RETRY_LATER = "message_classification_retry_later"
 
 # Distinct from None ("no row"). A store that cannot be reached must never be
 # read as an absent verdict, or every delivery would re-classify and the
@@ -55,6 +72,19 @@ ModerateFn = Callable[[bool, int, str], Awaitable[str]]
 _inflight: set[asyncio.Task] = set()
 _store_error_logged = False
 
+def _retry_policy() -> tuple[int, timedelta]:
+    """The failed-row retry policy: (max attempts, cooldown between them).
+
+    Read from config beside the other verdict-store keys, defaulting to the
+    store's own constants so a missing key keeps the bounded behaviour rather
+    than silently disabling it.
+    """
+    cache = load_config().get("cache", {})
+    attempts = int(cache.get("verdict_retry_attempts", DEFAULT_VERDICT_RETRY_ATTEMPTS))
+    cooldown_s = int(
+        cache.get("verdict_retry_cooldown_seconds", DEFAULT_VERDICT_RETRY_COOLDOWN_SECONDS)
+    )
+    return attempts, timedelta(seconds=cooldown_s)
 
 def _log_store_error(exc: Exception, operation: str) -> None:
     """Log a store failure once per process, then at debug level."""
@@ -68,7 +98,6 @@ def _log_store_error(exc: Exception, operation: str) -> None:
     else:
         logger.debug(f"Verdict store unavailable during {operation}: {exc!r}")
 
-
 async def _store_call(operation: str, awaitable):
     """Run one store call, returning STORE_UNAVAILABLE instead of raising."""
     try:
@@ -76,7 +105,6 @@ async def _store_call(operation: str, awaitable):
     except Exception as e:  # noqa: BLE001 - any store failure degrades, never breaks
         _log_store_error(e, operation)
         return STORE_UNAVAILABLE
-
 
 def _on_task_done(task: asyncio.Task) -> None:
     """Discard a finished detached task and surface an unretrieved exception."""
@@ -87,11 +115,9 @@ def _on_task_done(task: asyncio.Task) -> None:
     if exc is not None:
         logger.error(f"Detached verdict task failed: {exc!r}")
 
-
 def inflight_tasks() -> set[asyncio.Task]:
     """The detached verdict tasks still running. main.py drains these at shutdown."""
     return set(_inflight)
-
 
 def reset_verdict_state() -> None:
     """Clear module state (for tests)."""
@@ -99,12 +125,10 @@ def reset_verdict_state() -> None:
     _store_error_logged = False
     _inflight.clear()
 
-
 async def _inline(classify: ClassifyFn, moderate: ModerateFn) -> str:
     """The un-gated path: classify then moderate, in the caller's task."""
     is_spam, confidence, reason = await classify()
     return await moderate(is_spam, confidence, reason)
-
 
 async def _moderate_and_record(
     chat_id: int,
@@ -136,7 +160,6 @@ async def _moderate_and_record(
 
     await _store_call("store_result_id", store_result_id(chat_id, message_id, result))
     return result
-
 
 async def _finish(
     chat_id: int,
@@ -176,7 +199,6 @@ async def _finish(
         chat_id, message_id, is_spam, confidence, reason, moderate
     )
 
-
 async def _moderate_decided(
     chat_id: int, message_id: int, row: dict, moderate: ModerateFn
 ) -> str:
@@ -193,39 +215,18 @@ async def _moderate_decided(
         moderate,
     )
 
-
-async def run_with_verdict(
+async def _detach(
     chat_id: int,
     message_id: int,
     classify: ClassifyFn,
     moderate: ModerateFn,
 ) -> str:
-    """Gate one message's classification and moderation on the verdict store.
+    """Run the work in its own task and wait only as long as the webhook may.
 
-    Returns the moderation result id, or one of the three RESULT_VERDICT_*
-    constants. Never raises for a store failure: the inline path is taken
-    instead, so moderation keeps working while the store is down.
+    Shared by the first attempt and by a reclaim, so a retry is guarded exactly
+    like the original: it survives the deadline, persists its verdict, and the
+    caller answers 503 while it is still running.
     """
-    row = await _store_call("claim_or_read", claim_or_read(chat_id, message_id))
-    if row is STORE_UNAVAILABLE:
-        return await _inline(classify, moderate)
-
-    if row is not None:
-        status = row["status"]
-        if status == "pending":
-            return RESULT_VERDICT_PENDING
-        if status == "failed":
-            return RESULT_VERDICT_FAILED
-        if status == "decided":
-            return await _moderate_decided(chat_id, message_id, row, moderate)
-
-    won = await _store_call("claim_pending", claim_pending(chat_id, message_id))
-    if won is STORE_UNAVAILABLE:
-        return await _inline(classify, moderate)
-    if won is False:
-        # A concurrent delivery claimed it between the read and the insert.
-        return RESULT_VERDICT_PENDING
-
     task = asyncio.create_task(_finish(chat_id, message_id, classify, moderate))
     _inflight.add(task)
     task.add_done_callback(_on_task_done)
@@ -245,3 +246,72 @@ async def run_with_verdict(
             return await asyncio.shield(task)
     except TimeoutError:
         return RESULT_VERDICT_PENDING
+
+async def _retry_failed(
+    chat_id: int,
+    message_id: int,
+    row: dict,
+    classify: ClassifyFn,
+    moderate: ModerateFn,
+) -> str:
+    """Take a FAILED row back for another attempt, or refuse in a stated way.
+
+    Three outcomes, and the caller must tell the middle one apart from the
+    third: reclaiming means the work runs again; too-soon means ask again later;
+    at-the-cap means stop.
+    """
+    max_attempts, cooldown = _retry_policy()
+    won = await _store_call(
+        "reclaim_failed",
+        reclaim_failed(chat_id, message_id, cooldown=cooldown, max_attempts=max_attempts),
+    )
+    if won is STORE_UNAVAILABLE:
+        # Cannot tell whether the row moved. Treat as exhausted rather than
+        # ask for a redelivery that may never be able to do anything.
+        return RESULT_VERDICT_FAILED
+    if won:
+        logger.info(
+            f"Reclaiming failed classification for {chat_id}/{message_id} "
+            f"(attempt {int(row.get('attempts') or 0) + 1} of {max_attempts})"
+        )
+        return await _detach(chat_id, message_id, classify, moderate)
+
+    if int(row.get("attempts") or 0) >= max_attempts:
+        return RESULT_VERDICT_FAILED
+    # Still inside the cooldown: the caller answers 503 and this path runs again
+    # on the next delivery, by which time the row is reclaimable.
+    return RESULT_VERDICT_RETRY_LATER
+
+async def run_with_verdict(
+    chat_id: int,
+    message_id: int,
+    classify: ClassifyFn,
+    moderate: ModerateFn,
+) -> str:
+    """Gate one message's classification and moderation on the verdict store.
+
+    Returns the moderation result id, or one of the RESULT_VERDICT_*
+    constants. Never raises for a store failure: the inline path is taken
+    instead, so moderation keeps working while the store is down.
+    """
+    row = await _store_call("claim_or_read", claim_or_read(chat_id, message_id))
+    if row is STORE_UNAVAILABLE:
+        return await _inline(classify, moderate)
+
+    if row is not None:
+        status = row["status"]
+        if status == "pending":
+            return RESULT_VERDICT_PENDING
+        if status == "failed":
+            return await _retry_failed(chat_id, message_id, row, classify, moderate)
+        if status == "decided":
+            return await _moderate_decided(chat_id, message_id, row, moderate)
+
+    won = await _store_call("claim_pending", claim_pending(chat_id, message_id))
+    if won is STORE_UNAVAILABLE:
+        return await _inline(classify, moderate)
+    if won is False:
+        # A concurrent delivery claimed it between the read and the insert.
+        return RESULT_VERDICT_PENDING
+
+    return await _detach(chat_id, message_id, classify, moderate)

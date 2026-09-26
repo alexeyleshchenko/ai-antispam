@@ -15,11 +15,14 @@ names, plus the store-failure fallback:
 """
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from app.common.trace_context import set_webhook_deadline
 from app.database.classification_verdicts import (
+    DEFAULT_VERDICT_RETRY_ATTEMPTS,
+    DEFAULT_VERDICT_RETRY_COOLDOWN_SECONDS,
     claim_or_read,
     claim_pending,
     store_verdict,
@@ -28,6 +31,7 @@ from app.handlers.message.verdict import (
     RESULT_VERDICT_FAILED,
     RESULT_VERDICT_PENDING,
     RESULT_VERDICT_REPLAYED,
+    RESULT_VERDICT_RETRY_LATER,
     reset_verdict_state,
     run_with_verdict,
 )
@@ -192,7 +196,12 @@ async def test_unavailable_store_falls_back_to_inline(patched_db_conn, clean_db)
 async def test_classification_failure_is_recorded_as_failed(
     patched_db_conn, clean_db
 ):
-    """A classify that raises marks the row failed, and a retry does no work."""
+    """A classify that raises marks the row failed; the next delivery re-asks.
+
+    It must NOT re-classify straight away: the cooldown is a backoff, so the
+    delivery arriving immediately after the failure is told to come back rather
+    than paying for the same failing call again.
+    """
 
     async def _fail():
         raise RuntimeError("every leg exhausted")
@@ -205,10 +214,149 @@ async def test_classification_failure_is_recorded_as_failed(
 
     row = await claim_or_read(CHAT_ID, MESSAGE_ID)
     assert row["status"] == "failed"
+    assert row["attempts"] == 1
 
-    # A redelivery reads the failed state and does not re-classify.
+    # One second old, with the default 60s cooldown. Written explicitly because
+    # a NOW()-written row cannot be compared against a bound datetime offline -
+    # see _fail_at. The predicate under test is "a recent failure is not
+    # reclaimable", and PostgreSQL reads the same instant without the shim.
+    await _fail_at(clean_db, datetime.now(UTC) - timedelta(seconds=1))
+
     retry = _Counter()
     assert await run_with_verdict(
         CHAT_ID, MESSAGE_ID, retry.classify, retry.moderate
+    ) == RESULT_VERDICT_RETRY_LATER
+    assert retry.classify_calls == 0, "the cooldown must hold the retry back"
+
+async def _fail_at(clean_db, when) -> None:
+    """Set the failed row's `decided_at` to an explicit instant.
+
+    Load-bearing, not tidiness: `mark_failed` writes `decided_at = NOW()`, which
+    SQLite renders with a SPACE, while conftest binds a datetime parameter with a
+    T - and space sorts below T, so a NOW()-written column compares as older
+    than ANY bound instant. Writing both sides through the same adapter keeps
+    the ordering real. PostgreSQL compares true timestamptz and is unaffected.
+    """
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            "UPDATE classification_verdicts SET decided_at = $1 "
+            "WHERE chat_id = $2 AND message_id = $3",
+            when,
+            CHAT_ID,
+            MESSAGE_ID,
+        )
+
+@pytest.mark.asyncio
+async def test_failed_row_is_reclaimed_past_the_cooldown(patched_db_conn, clean_db):
+    """The retry itself: past the cooldown the work is run again."""
+
+    async def _fail():
+        raise RuntimeError("every leg exhausted")
+
+    await run_with_verdict(CHAT_ID, MESSAGE_ID, _fail, _Counter().moderate)
+    await _fail_at(clean_db, datetime.now(UTC) - timedelta(hours=1))
+
+    counter = _Counter()
+    result = await run_with_verdict(
+        CHAT_ID, MESSAGE_ID, counter.classify, counter.moderate
+    )
+    await _drain_inflight()
+
+    assert counter.classify_calls == 1, "the reclaim must re-run the classification"
+    assert counter.moderate_calls == 1
+    assert result == "moderated:True:97"
+
+    row = await claim_or_read(CHAT_ID, MESSAGE_ID)
+    assert row["status"] == "decided"
+    assert row["moderated_at"] is not None
+
+@pytest.mark.asyncio
+async def test_failed_row_gives_up_at_the_attempt_cap(patched_db_conn, clean_db):
+    """At the cap the retry stops, which is what ends it instead of looping."""
+    from app.handlers.message.verdict import _retry_policy
+
+    max_attempts, _cooldown = _retry_policy()
+
+    async def _fail():
+        raise RuntimeError("every leg exhausted")
+
+    # Each round exhausts the legs again; the explicit timestamp makes the row
+    # reclaimable every time, so this walks attempts up to the cap.
+    for _ in range(max_attempts):
+        await run_with_verdict(CHAT_ID, MESSAGE_ID, _fail, _Counter().moderate)
+        await _fail_at(clean_db, datetime.now(UTC) - timedelta(hours=1))
+
+    row = await claim_or_read(CHAT_ID, MESSAGE_ID)
+    assert row["attempts"] == max_attempts
+    assert row["status"] == "failed"
+
+    counter = _Counter()
+    assert await run_with_verdict(
+        CHAT_ID, MESSAGE_ID, counter.classify, counter.moderate
     ) == RESULT_VERDICT_FAILED
-    assert retry.classify_calls == 0
+    assert counter.classify_calls == 0, "a capped row must not be re-classified"
+
+@pytest.mark.asyncio
+async def test_reclaim_is_not_attempted_for_a_decided_row(patched_db_conn, clean_db):
+    """Only a FAILED row is reclaimable: a verdict is served, never re-asked."""
+    assert await claim_pending(CHAT_ID, MESSAGE_ID) is True
+    await store_verdict(CHAT_ID, MESSAGE_ID, False, 5, "ham")
+
+    counter = _Counter()
+    result = await run_with_verdict(
+        CHAT_ID, MESSAGE_ID, counter.classify, counter.moderate
+    )
+
+    assert counter.classify_calls == 0
+    assert result == "moderated:False:5"
+    assert (await claim_or_read(CHAT_ID, MESSAGE_ID))["status"] == "decided"
+
+# ─── the retry policy is READ, and the shipped config carries it ─────────────
+
+def test_retry_policy_reads_the_config_keys(monkeypatch):
+    """The knobs are read, not decorative.
+
+    A declared value that nothing consumes is the defect class this whole plan
+    exists to fix, so the wiring is asserted rather than assumed.
+    """
+    from app.handlers.message import verdict as verdict_module
+
+    monkeypatch.setattr(
+        verdict_module,
+        "load_config",
+        lambda: {
+            "cache": {
+                "verdict_retry_attempts": 7,
+                "verdict_retry_cooldown_seconds": 120,
+            }
+        },
+    )
+
+    attempts, cooldown = verdict_module._retry_policy()
+    assert attempts == 7
+    assert cooldown == timedelta(seconds=120)
+
+def test_retry_policy_defaults_when_the_keys_are_absent(monkeypatch):
+    """A missing key keeps the bounded behaviour instead of disabling it."""
+    from app.handlers.message import verdict as verdict_module
+
+    monkeypatch.setattr(verdict_module, "load_config", lambda: {"cache": {}})
+
+    attempts, cooldown = verdict_module._retry_policy()
+    assert attempts == DEFAULT_VERDICT_RETRY_ATTEMPTS
+    assert cooldown == timedelta(seconds=DEFAULT_VERDICT_RETRY_COOLDOWN_SECONDS)
+
+def test_shipped_config_carries_the_retry_keys():
+    """config.yaml itself carries them, at an indentation that resolves.
+
+    Read without monkeypatching, because the failure this catches is a config
+    typo: a key nested one level too deep is silently absent, the code falls
+    back to the default, and the knob looks configured while doing nothing.
+    """
+    from app.handlers.message import verdict as verdict_module
+
+    attempts, cooldown = verdict_module._retry_policy()
+    assert attempts == 3, "config.yaml cache.verdict_retry_attempts must resolve"
+    assert cooldown == timedelta(seconds=60), (
+        "config.yaml cache.verdict_retry_cooldown_seconds must resolve"
+    )
