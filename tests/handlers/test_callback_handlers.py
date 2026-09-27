@@ -1,6 +1,7 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Chat, Message, User
 
 from src.app.handlers.callback_handlers import (
@@ -378,3 +379,141 @@ async def test_callback_delete_permission_error_answers_user_with_error():
         assert result is not None
         # callback.answer should have been called with error text
         assert callback.answer.called
+
+
+# =========================================================================
+# #52 — help callbacks must be answered even when the edit fails
+#
+# A repeat tap ("message is not modified") and an expired query both used to
+# escape the handler. The edit ran BEFORE answer(), so when it raised the
+# callback was never answered: the member got a spurious failure popup and the
+# dispatcher logged two ERROR lines per tap. These legs assert the PROPERTY —
+# the callback is answered on the failure path — not the implementation.
+# =========================================================================
+
+
+def _help_callback(data: str) -> AsyncMock:
+    callback = AsyncMock(spec=CallbackQuery)
+    callback.data = data
+    callback.from_user = User(id=999, is_bot=False, first_name="Admin")
+    callback.message = AsyncMock(spec=Message)
+    callback.message.chat = Chat(id=456, type="private")
+    callback.message.message_id = 111
+    callback.answer = AsyncMock()
+    return callback
+
+
+def _patch_help_deps():
+    return patch(
+        "src.app.handlers.callback_handlers.get_admin",
+        new_callable=AsyncMock,
+        return_value=None,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("handler_name", "data"),
+    [
+        ("handle_help_pages", "help.moderation"),
+        ("handle_help_back", "help_back"),
+    ],
+)
+async def test_help_repeat_tap_still_answers_callback(handler_name, data):
+    """Second tap of an already-displayed page: edit raises 'message is not modified'."""
+    from src.app.handlers import callback_handlers
+
+    handler = getattr(callback_handlers, handler_name)
+    callback = _help_callback(data)
+    callback.message.edit_text = AsyncMock(
+        side_effect=TelegramBadRequest(
+            method="editMessageText",
+            message="Bad Request: message is not modified",
+        )
+    )
+
+    with _patch_help_deps():
+        try:
+            result = await handler(callback)
+        except TelegramBadRequest as exc:
+            result = f"<propagated {exc!r}>"
+
+    assert callback.answer.called, (
+        f"{handler_name} left the callback unanswered when edit_text raised "
+        "TelegramBadRequest('message is not modified') "
+        f"(returned {result!r}). Telegram keeps the client spinner up, the "
+        "member taps again, and each tap logs two dispatcher ERRORs (#52)."
+    )
+    assert not str(result).startswith("<propagated"), (
+        f"{handler_name} let the expected repeat-tap error escape to the "
+        f"dispatcher: {result}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_help_page_expired_query_does_not_escape():
+    """A query Telegram already considers expired cannot be answered by anyone."""
+    from src.app.handlers import callback_handlers
+
+    callback = _help_callback("help.payment")
+    callback.answer = AsyncMock(
+        side_effect=TelegramBadRequest(
+            method="answerCallbackQuery",
+            message=(
+                "Bad Request: query is too old and response timeout expired "
+                "or query ID is invalid"
+            ),
+        )
+    )
+    callback.message.edit_text = AsyncMock()
+
+    with _patch_help_deps():
+        try:
+            result = await callback_handlers.handle_help_pages(callback)
+        except TelegramBadRequest as exc:
+            result = f"<propagated {exc!r}>"
+
+    assert not str(result).startswith("<propagated"), (
+        "an expired query must not escape to the dispatcher as an unhandled "
+        f"exception: {result}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_lang_set_repeat_tap_does_not_escape():
+    """Same defect class as the help handlers, found by the sibling audit.
+
+    Re-tapping the same language button re-issues an identical edit, which
+    Telegram refuses as a no-op. The answer must still happen and the no-op must
+    not reach the dispatcher as an unhandled exception (#52).
+    """
+    from src.app.handlers import callback_handlers
+
+    callback = _help_callback("lang_set:en")
+    callback.message.edit_text = AsyncMock(
+        side_effect=TelegramBadRequest(
+            method="editMessageText",
+            message="Bad Request: message is not modified",
+        )
+    )
+
+    with (
+        _patch_help_deps(),
+        patch(
+            "src.app.handlers.callback_handlers.update_admin_language",
+            new_callable=AsyncMock,
+        ),
+    ):
+        try:
+            result = await callback_handlers.handle_lang_set_callback(callback)
+        except TelegramBadRequest as exc:
+            result = f"<propagated {exc!r}>"
+
+    assert callback.answer.called, (
+        "handle_lang_set_callback left the callback unanswered when edit_text "
+        f"raised TelegramBadRequest('message is not modified') (returned {result!r})."
+    )
+    assert not str(result).startswith("<propagated"), (
+        "the expected repeat-tap no-op escaped to the dispatcher as an "
+        f"unhandled exception: {result}"
+    )
