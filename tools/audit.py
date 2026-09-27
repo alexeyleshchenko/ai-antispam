@@ -268,8 +268,30 @@ def parse_rework(rework_path: Path, closed_tasks: int) -> dict[str, Any]:
     }
 
 
-def run_gate(cmd: list[str], cwd: Path) -> dict[str, Any]:
-    """Run an individual verification gate and capture output and exit code."""
+# Each gate's wall, as a DECLARED MULTIPLE of a MEASURED runtime. A gate with no
+# entry uses the default and the audit PRINTS that it did, so a fallback is never
+# an exempt-by-silence surface (ai-antispam#64).
+DEFAULT_GATE_WALL_SEC = 30.0
+GATE_WALLS_SEC: dict[str, float] = {
+    # measured 24.99s wall on an unloaded box for the ledger gate (its own work is
+    # a few seconds; the rest is interpreter + plugin startup under a cold cache),
+    # so 30.0 is a 1.20x factor, not a margin -> 4x the measurement.
+    "tests/test_ledger.py": 100.0,
+}
+
+
+def run_gate(cmd: list[str], cwd: Path, timeout_sec: float = DEFAULT_GATE_WALL_SEC) -> dict[str, Any]:
+    """Run an individual verification gate and capture output and exit code.
+
+    `timeout_sec` is the wall for THIS gate, and it is a DECLARED MULTIPLE of a
+    MEASURED runtime rather than a round number: a wall picked by feel kills a
+    healthy gate when too low and hides a hung one when too high (ai-antispam#64).
+
+    A gate that exceeds its wall is UNKNOWN, never a plain failure, so the except
+    branch keeps the MEASURED elapsed time and names the exception TYPE. A
+    hardcoded `0.0` renders a timeout as an instant logic error, and an empty
+    `str(e)` -- which `TimeoutError` has -- logs as nothing after the colon.
+    """
     try:
         t0 = datetime.datetime.now()
         res = subprocess.run(
@@ -278,7 +300,7 @@ def run_gate(cmd: list[str], cwd: Path) -> dict[str, Any]:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=30,
+            timeout=timeout_sec,
         )
         t_el = (datetime.datetime.now() - t0).total_seconds()
         return {
@@ -290,13 +312,15 @@ def run_gate(cmd: list[str], cwd: Path) -> dict[str, Any]:
             "stderr": res.stderr.strip(),
         }
     except Exception as e:
+        t_el = (datetime.datetime.now() - t0).total_seconds()
+        detail = f"{type(e).__name__}: {e}".strip().rstrip(":")
         return {
             "cmd": " ".join(cmd),
             "exit_code": 99,
             "passed": False,
-            "duration_sec": 0.0,
+            "duration_sec": round(t_el, 2),
             "stdout": "",
-            "stderr": str(e),
+            "stderr": detail,
         }
 
 
@@ -414,6 +438,14 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     if (repo_root / "tests/test_patrol_host_state.py").is_file():
         gates_to_run.append([sys.executable, "tests/test_patrol_host_state.py"])
 
+    # 15. The ledger instrument's own gate, registered because IT asserts its registration:
+    # an unregistered gate never runs (P29), and the adopted copy fails on exactly that check.
+    # Wall: 4x its measured 24.99s. The default 30.0 is a 1.20x factor, not a margin, which is
+    # the flake ai-antispam#64 exists to remove -- so this row carries its own budget
+    # (GATE_WALLS_SEC above) rather than inheriting a wall it does not fit.
+    if (repo_root / "tests/test_ledger.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_ledger.py"])
+
     # tests/test_ledger_close_preflight.py is DELIBERATELY NOT registered here, and the reason is
     # measured rather than a preference -- it is registered where it already runs.
     #
@@ -433,7 +465,10 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
 
     results = []
     for cmd in gates_to_run:
-        results.append(run_gate(cmd, repo_root))
+        wall = GATE_WALLS_SEC.get(cmd[-1], DEFAULT_GATE_WALL_SEC)
+        if wall == DEFAULT_GATE_WALL_SEC:
+            print(f"gate budget: {cmd[-1]} uses the declared default {DEFAULT_GATE_WALL_SEC}s")
+        results.append(run_gate(cmd, repo_root, timeout_sec=wall))
     return results
 
 
