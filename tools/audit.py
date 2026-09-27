@@ -402,6 +402,18 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     if (repo_root / "tests/test_cron_thinness.py").is_file():
         gates_to_run.append([sys.executable, "tests/test_cron_thinness.py"])
 
+    # 14. The patrol RUNNER's own wiring, as its own row (#163, adoption round).
+    # Registered separately from gate 13 because tests/gate_registry.py couples per FILE:
+    # the cron predicate and the patrol runner are two rows, and one row covering the pair
+    # would let a lane unregister the runner while the predicate still reads as covered.
+    # The runner is the live surface (it reads cron rows, the ledger, the log store and the
+    # remote), so a runner whose leg is silently NOT RUN reports the same shape as a runner
+    # whose legs all ran and found nothing -- which is the failure class this gate's own
+    # probes exist to prevent. Measured on adoption: rc=0, 102 checks, and CI's own
+    # invocation 912 passed / 0 failed, so it is safe to hold in the audit AND in pytest.
+    if (repo_root / "tests/test_patrol_host_state.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_patrol_host_state.py"])
+
     results = []
     for cmd in gates_to_run:
         results.append(run_gate(cmd, repo_root))
