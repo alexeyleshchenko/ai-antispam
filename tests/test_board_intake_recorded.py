@@ -366,23 +366,50 @@ def test_the_offline_denominator_counts_what_the_verdict_judged() -> None:
     assert len(problems) + len(excused) == 1, (problems, excused)
     assert coverage["offline_subjects_examined"] == 1, coverage
 
-def test_the_offline_denominator_is_non_zero_on_the_live_ledger() -> None:
-    """Acceptance 2 of #116: an emptied population fails loudly, not vacuously.
+def test_the_offline_denominator_on_the_live_ledger_is_reported() -> None:
+    """Acceptance 2 of #116 — ADAPTED: the live population is REPORTED, and
+    non-vacuity is proven by a synthetic probe (the next test).
 
-    The live ledger carries subjects that closed before the intake requirement
-    existed, so this population is non-empty by construction. If it is ever zero,
-    either the ledger was replaced or the predicate was narrowed to nothing — and a
-    clean verdict over an empty population is indistinguishable from a verified
-    one, which is the failure this assertion exists to make impossible.
+    The kit's copy asserts the LIVE population is non-empty, which holds in the
+    kit's own ledger because it carries subjects that closed before the intake
+    requirement existed (measured 2026-09-27: 1 such subject, `#8`, out of 1387
+    rows — the gate passes there on a margin of ONE). THIS factory's ledger is
+    fully compliant: every numbered subject carrying a `claim` or a `close` has
+    an `intake` row of its own, so the live population is 0 BY CORRECTNESS, not
+    by a narrowed predicate — and the kit's own ruling (#112, ledger n=657 part
+    8) says the loud-fail-on-zero form is WRONG for a population that is
+    legitimately empty, where the PROBE is the only thing that can show the gate
+    bites. The kit's unadapted form reds a compliant factory permanently, with
+    no exemption surface: the same class as our own #45/#156.
+
+    So this leg REPORTS its count and asserts only that the coverage figure
+    agrees with it. Non-vacuity is proven below.
     """
     rows = _load_rows()
     examined = subjects_acted_without_intake(rows)
-    assert examined, (
-        "the offline leg examined NOTHING — a clean verdict over an empty population "
-        "is indistinguishable from a verified one (acceptance 2 of #116)"
-    )
     coverage = board_intake_coverage([], rows, complete_board=False)
     assert coverage["offline_subjects_examined"] == len(examined), coverage
+    print(f"  live offline population: {len(examined)} subject(s)")
+
+
+def test_the_predicate_is_non_vacuous_on_a_synthetic_population() -> None:
+    """The probe the adapted live leg depends on — acceptance 2 of #116, whole.
+
+    A minimal row-set where a numbered subject is acted on WITHOUT an intake row
+    of its own must be FOUND. Narrow the predicate to nothing and this fails,
+    which is exactly the failure the live assertion existed to make impossible.
+    """
+    rows = [
+        _row("intake", "#998", 1, "2026-09-18T09:00:00Z"),
+        _row("claim", "#998", 2, "2026-09-18T09:01:00Z"),
+        _row("claim", "#999", 3, "2026-09-18T09:02:00Z"),
+        _row("claim", "some-descriptive-stem", 4, "2026-09-18T09:03:00Z"),
+    ]
+    found = subjects_acted_without_intake(rows)
+    assert found == ["#999"], (
+        "the offline predicate examined the wrong population — a subject acted on "
+        f"without its own intake must be found (acceptance 2 of #116); got {found}"
+    )
 
 def main() -> int:
     checks = [value for name, value in sorted(globals().items())
