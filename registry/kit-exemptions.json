@@ -6,10 +6,29 @@
       "tests/test_hygiene_namespace.py \u2014 kit's name-derived probe supersedes our local parser patch; closure tests/gate_fixtures.py ported with it",
       "tests/test_ontology.py \u2014 kit's passes against our tree unmodified (13 terms, 35 files)"
     ],
-    "declared": 7,
+    "declared": "NOT restated here \u2014 read the count tools/kit_pin.py prints on every run. A literal duplicates a computed value and drifts: on 2026-09-27 this field still read 7 while the gate printed 8, because a new fork was declared without updating it.",
     "deferred_with_a_stated_reason": [
       "tests/test_ledger.py, tests/test_ledger_schema.py, tests/test_rework.py \u2014 the kit's copies need a closure we do not carry (tests/ledger_boundary.py, tests/rework_table.py, tools/field_predicate.py, tools/ledger_declaration.py). Porting the closure is the ledger instrument's own migration item; until then these are DEFERRED, not forked by preference."
-    ]
+    ],
+    "held_out_of_ci": {
+      "_why": "Kit gates whose migration has NOT landed here, quarantined on 2026-09-27 rather than committed. Measured first: together they are 40 FAILED of 373, and build-push runs pytest with -x, so committing them re-blocks the canonical deploy path the same day it was unblocked (15.5 h, 2026-09-27). Files currently at ~/.opencrabs/profiles/ops/projects/ai-antispam-kit-hold/files/ with a MANIFEST.json carrying the same reasons. Re-entry: the stated migration, then move back and commit.",
+      "tests/test_ledger_close_preflight.py": "6 failed / 1 passed. The kit's ACCEPTANCE TEST for migrating tools/ledger.py to the kit basis (kit RETIRED the order leg at TEMPLATE/tools/ledger.py:526; our fork still enforces it at :228). The ledger instrument lane ruled: hold out of CI until the migration lands, THEN commit. Bite verified: reverting the migration reds it.",
+      "tests/test_patrol_host_state.py": "8 failed. Red at source \u2014 fails in the KIT'S OWN tree too (12/96 with its seeds present), so not an adoption artifact. Two roots: :576 asserts our gate's anchor equals the kit's literal; the board leg derives owner/repo from the git remote.",
+      "tests/test_audit_rates.py": "15 failed. Encodes the KIT's tools/audit.py shape for derived-not-stated rates; our audit.py is a declared fork that carries the #38 yield fix the kit still lacks (agent-factories#143).",
+      "tests/test_reconstructed_claim_declared.py": "3 failed (live legs). Needs reconstructed-claim rows to declare claim=reconstructed + BASIS:; our shape predates the clause and is append-only.",
+      "tests/test_subject_form.py": "3 failed (live legs). Needs historical bare-integer rows excused and cross-repo rows strict; our rows predate the clause.",
+      "tests/test_telemetry_reader_registry.py": "2 failed. Needs the ONE field_predicate reader plus a printed allow-list; our audit.py still parses telemetry naively.",
+      "tests/test_law_structure.py": "1 failed. Section-numbering contiguity over law surfaces carried in the kit's shape.",
+      "tests/test_hq_delegation.py": "1 failed. No law surface may permit HQ alone \u2014 needs a router clause we do not have.",
+      "tests/test_score_artifact_sections.py": "1 failed. A factory without the procedure must declare nothing \u2014 needs the docs/subject/ declaration."
+    },
+    "withdrawn_from_the_delivery": {
+      "BOOTSTRAP.md": "Template scaffolding: the procedure for CREATING a factory.",
+      "docs/addons.md": "Template scaffolding: core template / add-on packs.",
+      "docs/addons/": "Template scaffolding (directory).",
+      "roles/": "Template role cards, used when bootstrapping a new factory.",
+      "topics.md": "Overtaken stub \u2014 its own text reads 'This file has moved.'"
+    }
   },
   "exempt": [
     {
@@ -39,6 +58,10 @@
     {
       "path": "tools/registry.py",
       "reason": "REFRESHED FROM TEMPLATE HEAD \u2014 the kit delivery of 2026-09-27T14:16:10Z predated commit a29a18e (the kit-adoption field), so the delivered copy carried ZERO hits for KIT_KEYS and could not validate the field it exists to read. Our copy carries the fix (two hits). The pin's recorded digest is of the delivered copy, so this entry declares the refresh rather than silently keeping it. Resolves when the kit re-delivers or the pin is re-taken."
+    },
+    {
+      "path": "tests/test_board_intake_recorded.py",
+      "reason": "ADAPTED \u2014 the kit's live leg asserts the offline population is non-empty, which holds in the kit's own ledger (measured 2026-09-27: 1 subject, #8, of 1387 rows \u2014 it passes there on a margin of ONE). This factory's ledger is fully compliant: every numbered subject carrying a claim or a close has its own intake row, so the live population is 0 BY CORRECTNESS and the kit's unadapted form reds this tree permanently, with no exemption surface (the #45/#156 class). Per the kit's own ruling (#112, ledger n=657 part 8) the loud-fail-on-zero form is wrong for a legitimately empty population, where the PROBE is what shows the gate bites \u2014 so the live leg now REPORTS its count and test_the_predicate_is_non_vacuous_on_a_synthetic_population proves non-vacuity. Bite verified: narrowing the predicate fails 4 checks, the probe among them. Resolves when the kit adopts the probe form and we take the merged whole."
     }
   ]
 }
