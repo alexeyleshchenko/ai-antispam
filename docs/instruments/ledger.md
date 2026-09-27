@@ -25,7 +25,7 @@ Per the frame's §1 (what an instrument is) and §2 (the full set), this instrum
 |---|---|
 | **name** | `ledger` |
 | **executable(s)** | `tools/ledger.py` — the only write path and the read path (`append`, `tail`, `verify`, `repair`). `tools/ledger-index.py` — the derived index (build/find/subject/touching/check) |
-| **closure** | `tools/ledger_declaration.py` (the authorized-actor matrix and the declaration readers), `tools/field_predicate.py`, `tools/reconstruction.py`, `tools/telemetry.py`, `tools/registry*.py` — HARD tier; a tree missing any of them fails at import |
+| **closure** | **§2 rows 3–7** — `tools/ledger_declaration.py` (the authorized-actor matrix and the declaration readers), `tools/field_predicate.py`, `tools/reconstruction.py`, `tests/ledger_boundary.py`, `tests/gate_fixtures.py`. HARD tier: measured 2026-09-27 by the **import graph**, `ledger.py` imports rows 3–5 (`:73`, `:87`, `:100`) and `test_ledger.py` imports rows 6–7 (`:53`, `:52`), so a tree missing any of them fails at import. **Two paths previously named here — `tools/telemetry.py` and `tools/registry*.py` — are NOT in the closure:** grepped over every surface file (`grep -nE '^(import\|from) (telemetry\|registry\|kit_pin)'` across `ledger.py`, `ledger-index.py`, `ledger_declaration.py`, `field_predicate.py`, `reconstruction.py`, `ledger_boundary.py`) returns **0 hits**. They were asserted rather than measured; corrected here instead of silently overwritten. |
 | **gate set** | six gates, named in §5 below |
 | **version source** | `registry/kit.json` → `kit_version`, derived from the manifest, never hand-typed (frame §7.1) |
 | **data surfaces** | `evidence/ledger.jsonl` (factory-owned, never overwritten by an update); `docs/ledger-*.json` (factory-owned declarations, shipped as `.example.json` — including `ledger-refs-kinds.json` for vocabulary and `ledger-authorizations.json` for a factory's own lanes); `evidence/.ledger-index.sqlite` (derived, gitignored, deletable) |
@@ -41,7 +41,57 @@ edit mid-flight, not a defect in this figure.
 
 ---
 
-## 2. The write path's identity law — `actor` and `session`
+## 2. The declared file set — and the write path's identity law
+
+**Predicate:** the shipped paths `registry/kit.json` classifies `standalone` or `closure` that carry
+this instrument. **Scope:** the manifest at the instant named in §5. Both halves are listed because
+the pair is what a member adopts; the manifest hashes the `TEMPLATE/` half (frame §7.1).
+
+| # | path (member half ↔ TEMPLATE half) | class | what it is |
+|---|---|---|---|
+| 1 | `tools/ledger.py` ↔ `TEMPLATE/tools/ledger.py` | `standalone` | **the write path and the read path** — `append`, `tail`, `verify`, `repair` |
+| 2 | `tools/ledger-index.py` ↔ `TEMPLATE/tools/ledger-index.py` | `standalone` | the derived index (§8) — `build`, `find`, `subject`, `touching`, `check` |
+| 3 | `tools/ledger_declaration.py` ↔ `TEMPLATE/tools/ledger_declaration.py` | `closure` | the authorized-actor matrix and the declaration readers (`ledger.py:73`) |
+| 4 | `tools/field_predicate.py` ↔ `TEMPLATE/tools/field_predicate.py` | `closure` | the shared field predicate — one field, one read (`ledger.py:87`, `reconstruction.py:26`) |
+| 5 | `tools/reconstruction.py` ↔ `TEMPLATE/tools/reconstruction.py` | `closure` | a reconstructed claim's basis, and its recomputed interval (`ledger.py:100`) |
+| 6 | `tests/ledger_boundary.py` ↔ `TEMPLATE/tests/ledger_boundary.py` | `closure` | the declared boundaries — a row before its boundary is excused (`test_ledger.py:53`); also gate 3 of §5 |
+| 7 | `tests/gate_fixtures.py` ↔ `TEMPLATE/tests/gate_fixtures.py` | `closure` | the staged-tool fixture (`test_ledger.py:52`, `test_ledger_identity.py`) — shared with other instruments' gates |
+| 8 | `tests/test_ledger.py` ↔ `TEMPLATE/tests/test_ledger.py` | `standalone` | **the gate** — the write path and the read path end to end |
+| 9 | `tests/test_ledger_identity.py` ↔ `TEMPLATE/tests/test_ledger_identity.py` | `standalone` | **the gate** — the row's own identity fields |
+| 10 | `tests/test_ledger_schema.py` ↔ `TEMPLATE/tests/test_ledger_schema.py` | `standalone` | **the gate** — the schema, the vocabularies, the authorization matrix |
+| 11 | `tests/test_ledger_no_shrink.py` ↔ `TEMPLATE/tests/test_ledger_no_shrink.py` | `standalone` | **the gate** — the ledger never returns to empty |
+| 12 | `tests/test_ledger_close_preflight.py` ↔ `TEMPLATE/tests/test_ledger_close_preflight.py` | `standalone` | **the gate** — a close's preconditions at the write path |
+| 13 | `tests/test_ledger_commit_cites_no_rows.py` ↔ `TEMPLATE/tests/test_ledger_commit_cites_no_rows.py` | `standalone` | **the gate** — a commit names no row number |
+| 14 | `tests/test_ledger_index.py` ↔ `TEMPLATE/tests/test_ledger_index.py` | `standalone` | **the gate** — a rebuild AGREES WITH A PLAIN SCAN |
+| 15 | `docs/instruments/ledger.md` ↔ `TEMPLATE/docs/instruments/ledger.md` | `standalone` | this file |
+
+**This is the ONE table the census parses** — `tools/instrument_census.py::declared_paths` reads
+the numbered rows rather than keeping a second list that would drift, so a shipped path added here
+is measured there with no second edit. **A member is HELD only when all fifteen are present.**
+
+**Rows 3–7 are the closure, and they are declared here because the census's question is *"is this
+instrument complete here?"* — a closure left out of the measured set answers it wrongly.** Measured
+2026-09-27 by the import graph, not by reading the prose: `ledger.py` imports rows 3, 4 and 5
+(`:73`, `:87`, `:100`), `test_ledger.py` imports rows 6 and 7 (`:53`, `:52`), and
+`test_ledger_identity.py` imports row 7 — so a member holding only the executables and the gates
+reads **8/8 HELD while unable to run.** Row 7 is additionally shared: four other instruments' gates
+import it too, which is why it is a `closure` row of the kit rather than this instrument's own file.
+
+**Not in the measured set, and why — recorded so a later reader does not read the list as
+accidental.** The nine `docs/ledger-*.example.json` seeds ship in the kit but are **factory-owned
+declarations**: a factory writes its own from the example, and their absence is the default state
+rather than an incomplete instrument. `evidence/ledger.jsonl` is a **data surface**, not a shipped
+path (§1). Measuring either would report every member as incomplete for declining an optional file.
+
+**Why the identity law shares §2.** Frame §1.5 puts the declared set at the **§2 coordinate**. This
+instrument's §2 was already the identity law, and renumbering §3–§10 to make room would silently
+repoint `skills/meta-factory/SKILL.md`'s `§9` citation at a different section — a stale pointer that
+lands on a plausible-but-wrong object, which is this fleet's most repeated citation failure. The
+declared set therefore **opens** §2 and the identity law follows in the same section, rather than
+every number below it moving. Measured 2026-09-27: `§9` is the only section number of this file
+cited anywhere outside it.
+
+### The write path's identity law — `actor` and `session`
 
 `actor` is the row's **capacity**: the role the write was made in. It is a role name from a set
 that is closed **PER FACTORY**, not per fleet — the core set (`hq · triage · worker · carrier ·
@@ -267,6 +317,49 @@ and a gate lands with the first promotion rather than ahead of the population it
 family. A gate that refuses what the instrument lawfully writes is worse than no gate: measured
 2026-09-27, `test_ledger_schema.py` carried its **own** `EVENT_TYPES` tuple, so a declared event
 passed the tool and red the gate. It now reads the same declaration through the same seam.
+
+The SAME class has an **actor half**, measured the same day on the first member tree to use the
+seam (`inferhub-watch`): the authorization self-probe asserted the CORE matrix — `worker` for
+`ruling` — while `docs/ledger-authorizations.json` exists precisely so a factory can **ADD** to
+that matrix. That factory lawfully declared the pair, so the probe demanded an error the
+declaration is designed to suppress and the gate returned rc=1 on a correct tree. **A probe that
+asserts a DEFAULT must state which world it asserts in**, by pinning the isolation seam the
+declaration surface already carries; and it must carry the **converse arm**, or it cannot tell
+"no declaration" from "a declaration that extends the default". Both arms ship.
+
+Two probe-design rules follow, and they are what this class keeps teaching:
+
+- **A non-vacuity anchor attaches to the population the check WALKS, never to the defect it
+  COUNTS.** Measured the same day: `test_board_intake_recorded.py` required its defect population
+  — subjects acted on with no intake row — to be non-empty, justified as "non-empty by
+  construction". That is false in a **REPAIRED** ledger: once every acted subject has been
+  backfilled an intake row the predicate returns `[]` legitimately, and the gate reds a ledger in
+  its best state, which is the very failure the anchor exists to prevent. The population that
+  survives repair is the walk; the defect does not.
+- **A fix lands with its rule, and a member's first use is the instrument's real test.** Both
+  defects above were found by a member, not by us, on the first tree that used the seam we
+  shipped — and neither reproduced in the tree that authored it.
+- **A probe that validates a SYNTHETIC tree must pin EVERY ambient seam it reads, and the pin
+  must be to an ABSENT path.** The third instance, same day, one probe deeper: the exemption
+  self-probes build a fixture whose row 2 is an *unauthorized* intake and every arm tests the
+  exemption surface against that premise — but the authorized set arrives from the module-level
+  `REPO` while the exemptions two lines later arrive from the tree under test. A factory that
+  lawfully declared `intake` for `worker` therefore authorized the fixture's row, it stopped
+  being governed, and three probes red on `matches no governed row`. The gate could not be green
+  in that tree **either way**: red with the declaration the seam exists to permit, red without it
+  on the rows that declaration makes lawful. `_DeclarationPin(None)` is not the fix — it POPS the
+  variable and the loader falls back to the real `REPO` file, which IS the leak. **An absent path
+  means NONE; popping means INHERIT.** The generalisation is the two-authority read, not the one
+  seam: wherever a checker takes one input from the tree under test and another from the ambient
+  tree, the ambient half must be pinned.
+- **The membership seam is the deliberate exception, and it is structural, not lucky.**
+  `ACTORS_FILE` binds at import, so no per-block pin could reach it — and it needs none, because
+  `known_actors()` is core UNION declared and the declaration is **additive-only**: membership can
+  grow but never shrink, so a fixture built from CORE actors is untouched by what a factory adds.
+  The additive floor is what buys that, and it is why the matrix is a constant floor rather than a
+  default. A pin, like a probe, must also be **proven load-bearing** — this fix ships a mutation
+  arm that grants the pair and asserts the stale-entry error appears, or the block would pass on
+  a pin that pins nothing.
 
 ---
 

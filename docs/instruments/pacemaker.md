@@ -87,15 +87,42 @@ the class field now carries the fleet-generic-versus-factory-specific distinctio
 carry.
 ## 2. The declared file set
 
-Read from `registry/kit.json` (the manifest, `kit_version` at the instant of writing in §9):
+**Predicate:** the shipped paths the manifest classifies `standalone` or `closure` that carry this
+instrument. **Scope:** `registry/kit.json` at the instant named in §9. Both halves of each row are
+listed because the pair is what a member adopts, and the manifest hashes the `TEMPLATE/` half.
 
-| role | path | class |
-|---|---|---|
-| **executable** — the live runner | `TEMPLATE/tools/patrol_host_state.py` | `standalone` |
-| **gate** — the pure predicate over rows | `TEMPLATE/tests/test_cron_thinness.py` | `standalone` |
-| **gate** — the runner's wiring | `TEMPLATE/tests/test_patrol_host_state.py` | `standalone` |
+| # | path (member half ↔ TEMPLATE half) | class | what it is |
+|---|---|---|---|
+| 1 | `tools/patrol_host_state.py` ↔ `TEMPLATE/tools/patrol_host_state.py` | `standalone` | **the executable** — the live multi-leg runner |
+| 2 | `tests/test_cron_thinness.py` ↔ `TEMPLATE/tests/test_cron_thinness.py` | `standalone` | **the gate** — the pure predicate over rows |
+| 3 | `tests/test_patrol_host_state.py` ↔ `TEMPLATE/tests/test_patrol_host_state.py` | `standalone` | **the gate** — the runner's wiring |
+| 4 | `tools/field_predicate.py` ↔ `TEMPLATE/tools/field_predicate.py` | `closure` | the canonical-trailer read the close-board leg binds to |
+| 5 | `tools/kit_pin.py` ↔ `TEMPLATE/tools/kit_pin.py` | `closure` | the pin reader — travels with its pin (frame §3) |
+| 6 | `tools/publish.py` ↔ `TEMPLATE/tools/publish.py` | `standalone` | the publish-freshness leg |
+| 7 | `tools/registry.py` ↔ `TEMPLATE/tools/registry.py` | `standalone` | the registry read the legs share — also a CLI of its own |
+| 8 | `tests/test_board_intake_recorded.py` ↔ `TEMPLATE/tests/test_board_intake_recorded.py` | `standalone` | the board-intake predicate |
+| 9 | `tests/test_close_board_recorded.py` ↔ `TEMPLATE/tests/test_close_board_recorded.py` | `standalone` | the close-board gate |
+| 10 | `tests/ledger_boundary.py` ↔ `TEMPLATE/tests/ledger_boundary.py` | `closure` | the boundary reader the runner loads by path (`patrol_host_state.py:91`) |
+| 11 | `tools/ledger_declaration.py` ↔ `TEMPLATE/tools/ledger_declaration.py` | `closure` | imported by row 10 (`ledger_boundary.py:69`), so the runner needs it transitively |
 
-**One instrument, one executable, two gates — not three instruments.** Say it explicitly, because a
+**This is the ONE table the census parses** — `tools/instrument_census.py` derives the declared set
+from these numbered rows rather than keeping a second list that would drift, so a shipped path added
+here is measured there with no second edit. **A member is HELD only when all eleven are present.**
+Rows 4–11 are the closure, and they are declared *here* rather than only explained in §3 because the
+census's question is *"is the instrument complete here?"* — and a closure left out of the measured
+set answers that question wrongly, which is the defect §3 describes.
+
+**Rows 10–11 were missing until a member found them.** infra-factory adopted this instrument and
+reported that its tree needed five files rather than three, naming `ledger_boundary.py` and
+`ledger_declaration.py` as the closure the boundary reader needs. Measured here: the runner loads
+row 10 by path, and row 10 does `from ledger_declaration import …` at its line 69 — so a member
+holding rows 1–9 alone reads **9/9 HELD while being unable to run**. That is the exact class §3
+warns about, sitting in the instrument's own declaration rather than in a member's tree. Both are
+manifest rows of class `closure`, so the kit always shipped them; the census simply was never asked
+to look for them. Widening the set changes no member's state — all three adopters already hold 11/11
+(measured 2026-09-27T19:0xZ) — it only makes the held leg mean what it claims to mean.
+
+**One instrument, one executable, two gates — not eleven instruments.** Say it explicitly, because a
 reader counting the instrument's files as so many instruments reads the census in §9 wrong.
 
 **The executable is a SHARED, multi-leg runner, and that boundary is real rather than tidy.**
@@ -119,20 +146,13 @@ the call sits in. So a member holding the gate and the runner but **not** their 
 quiet week — it gets a crash. The frame's warning about the silent tier is about a *different* shape;
 this instrument does not have it, and claiming the exotic failure would be the more flattering error.
 
-Closure, declared (each path as it appears in the manifest, and verified present in the template at
-the instant of writing):
+**The six closure modules — the SET the executable loads, whatever each one's manifest class — are
+declared in §2's table, rows 4–9.** They are deliberately not repeated here, so
+the measured list and the documented list cannot drift apart. The census parses §2; a second copy in
+this section would be a list that drifts from the one being measured.
 
-| path | what the runner loads it for |
-|---|---|
-| `TEMPLATE/tools/field_predicate.py` | the canonical-trailer read that the close-board leg binds to |
-| `TEMPLATE/tools/kit_pin.py` | the pin reader — travels with its pin (frame §3) |
-| `TEMPLATE/tools/publish.py` | the publish-freshness leg |
-| `TEMPLATE/tools/registry.py` | the registry read the legs share |
-| `TEMPLATE/tests/test_board_intake_recorded.py` | the board-intake predicate |
-| `TEMPLATE/tests/test_close_board_recorded.py` | the close-board gate |
-
-The table above is the **shipped** half. The runner also refuses to start without one input that is
-**member-authored and therefore never shipped**:
+**And the closure is not the whole prerequisite.** The runner also refuses to start without one input
+that is **member-authored and therefore never shipped**:
 
 | path | what the runner loads it for |
 |---|---|
@@ -281,12 +301,36 @@ dispatch):
 4. **Create your own reload link** if you want this law to survive your own compaction — the frame's
    §6.1 defines it and it is **your** act, in **your** tree; it is never installed from the template.
    Absent from your tree is a **declared state**, not a failure.
+5. **Declare the adoption, in your fragment.** A complete tree is not an adoption on the record —
+   `registry/factories/<your-slug>.json` carries an `instruments` map, and the census needs
+   `instruments.<this-instrument>` before it will read anything but silence:
 
-**Three prerequisites, and they fail in different places.** Step 1's closure fails **loud** (§3) — the
+       "instruments": {"pacemaker": {"state": "adopted", "green": true, "measured_at": "<ISO instant>"}}
+
+   - `state` is one vocabulary for every adoption declaration: `adopted` · `partial` · `deferred` ·
+     `not-applicable`. `deferred` and `not-applicable` **require a non-empty `reason`**; a reasonless
+     one is refused, because "behind by N, deferred because X" is the clause's own wording and a
+     deferral with no X is an undeclared state wearing a declared label.
+   - **`adopted` requires `green: true`** — HELD and GREEN are independent axes (frame §7.2), so
+     adoption cannot claim one and leave the other unspoken. `green` is YOUR gate's verdict over YOUR
+     tree; nobody else can measure it for you.
+   - Validate before you commit: `python3 tools/registry.py validate <your fragment>` returns rc=0 for
+     a conforming block and **rc=1 with the axis named** for one that omits `green`.
+
+   **Why this step is not optional, measured on 2026-09-27:** three members held this instrument's
+   complete set as §2 then declared it (nine paths) and **not one fragment in the fleet carried `instruments`**, so the census
+   reported `HELD-UNDECLARED` for all of them and could record no adoption, for any instrument,
+   whatever the trees contained. A declared `partial` or `deferred` is a **state, not a failure** — it
+   is the one thing the census can render. Silence is the only reading it cannot distinguish from a
+   member that never considered the instrument.
+
+**Four prerequisites, and they fail in different places.** Step 1's closure fails **loud** (§3) — the
 runner crashes. Step 2's manifest also fails **loud**, and earlier: the `legs = [...]` expression raises
 before any leg runs. Step 2's SECOND declaration fails loud in the other entry point: a tree with no
 `docs/ledger-invariants.json` gets `DeclarationUnavailable` from the gate rather than the runner
-(measured in `ai-antispam`, rc=1). The board convention (§9.1 item 4) fails **quiet in the legs and loud in the
+(measured in `ai-antispam`, rc=1). **Step 5 fails the opposite way — in SILENCE:** nothing crashes and
+nothing reds; the census simply reads `HELD-UNDECLARED`, which is indistinguishable in the artifact
+from a member that never looked. The board convention (§9.1 item 4) fails **quiet in the legs and loud in the
 gates**: the runner completes and honestly reports `examined 0`, while two of the discovered gates red
 on every post-invariant close row the member's ledger holds. A member whose board surface is not
 GitHub — one whose issue board *is* its own ledger — either carries the token convention or has those
@@ -295,28 +339,72 @@ that leaves the member's own suite permanently red.
 
 ## 9. Adoption census
 
-**Predicate:** each of the three declared paths of §2 exists in the factory's own declared `/repo`
-(a member counts as present only if the path is there — the closure of §3 is measured separately,
-because a partially-ported closure is a crash rather than a smaller number).
-**Scope:** all five member manifests in `registry/factories/*.json` (the key is `factory`, not `slug`).
-**Instant:** declared-set counts re-measured **2026-09-27T15:19:17Z** (predicate re-run over all five
-member repos, byte-identity by `cmp`, and both entry points EXECUTED in each adopting tree);
-dispositions carried forward from the 08:38Z round plus two briefs sent 15:21Z. Earlier instants:
-07:27:09Z and 08:38Z. The counts MOVED between the 08:38Z read and this one — `ai-antispam` and
-`inferhub-watch` both went 0/3 → 3/3 — which is why the instant travels with the figure rather than
-the figure alone.
+**TWO predicates, stated separately because they answer different questions — and a figure must carry
+the one it came from.**
 
-| factory | declared set | own `fleet.json` | disposition |
+- **HELD** — `os.path.isfile(member.repo / p)` for each of §2's **eleven** declared paths. This is
+  `tools/instrument_census.py`'s predicate, and its published artifact is the citable form. It reads
+  a **working tree**, so a member reads 11/11 while its own **commit** carries fewer: measured
+  2026-09-27, `inferhub-watch` reads 11/11 held and a clone of its `HEAD` carries **6 of the 11**
+  (five are untracked). Read HELD as *present on disk*, never as *in the repo* — a third axis
+  beside held-vs-current, and the one a fresh clone settles.
+- **CURRENT** — byte-identity of each held file against the template half (`cmp -s`). A member can
+  hold every path and still be **behind**: adoption is a revision, not a copy.
+
+**Scope:** the member fragments in `registry/factories/*.json`. **Instant:** HELD read by
+`tools/instrument_census.py` at **2026-09-27T19:16:27Z** — the stamp the artifact
+`evidence/instrument-census-pacemaker-2026-09-27.md` carries on its own first line, so this citation
+resolves to a receipt that agrees with it, and that artifact reads the **eleven**-path set §2 now
+declares (its predecessor at 18:58:07Z read nine). **CURRENT** read by `md5sum` against the **committed**
+template halves (`git show HEAD:TEMPLATE/<path>`, not a working tree other lanes are editing) at
+**2026-09-27T19:05Z** over the same eleven paths in the same five member repos. Earlier instants:
+07:27:09Z, 08:38Z, 15:19:17Z, 18:49:37Z.
+
+| factory | held | current | disposition |
 |---|---|---|---|
-| `infra-factory` | **3/3** | **written** | **ADOPTED** — commits `e334161e` + `5cd8aefe`, pushed 0/0; closure 11 of 12 paths present (the twelfth is `registry/factories/`, the fragment store). Its own runner gate passes **86 check(s), rc=0**, and the runner itself executes all **eight legs** in its tree. |
-| `ai-antispam` | **3/3** (untracked) | absent | **PORTING** — plan approved 13:53:31Z. Declared set + 4 of 6 closure byte-identical to TEMPLATE (`cmp` rc=0), all untracked. Two measured crashes remain: the runner raises `FleetManifestError` (no `profile_root`), the gate raises `DeclarationUnavailable` → unhandled `SkipGate` → rc=1. Both fixes ship as `seed` skeletons. |
-| `inferhub-watch` | **3/3** (untracked) | absent | **PORTING** — declared set byte-identical (`cmp` rc=0), untracked; already holds `docs/ledger-invariants.json`. Two measured crashes: `tools/field_predicate.py` is a stale revision (`9a42a73`) lacking `declared_duty` → `AttributeError` at `patrol_host_state.py:1233`; and the runner raises `FleetManifestError` (no `profile_root`). |
-| `miidas` | 0/3 | absent | DEFER (declared) — behind by 8 of 9. Its **transport blocker is discharged**: the manual port proved in `infra-factory` needs no selector (§9.1 item 3), and the requirement was relayed to it 2026-09-27T08:35:59Z. The **board-convention prerequisite** (§9.1 item 4) stands, and its own board-vs-ledger unit remains owed regardless of branch. |
-| `opencrabs-dev` | 0/3 | absent | DEFER (declared) — 0 of 3 confirmed, and `registry/` **does not exist** in its tree at all (`ls` rc=2). Its reason is SCOPE rather than effort: the prerequisite (`registry/kit.json` + `tools/kit_pin.py`) does not bootstrap one instrument — it **enrols the factory in the kit manifest system for every instrument at once**, a fleet-level decision that a pacemaker brief would otherwise decide by side effect. Re-entry: when it enrols in the kit for ANY instrument. |
+| `infra-factory` | **11/11** | **11/11** | **ADOPTED** — the fleet's FIRST declared instrument row, and the member that found a defect in this declaration. Its fragment carries `instruments.pacemaker` = `state: adopted`, `green: true`, `behind_by: 0`, `measured_at 2026-09-27T18:35:18Z` (committed `a83b40e`), so the census reads **ADOPTED** on a live member rather than `HELD-UNDECLARED`. Its own gate: `rc=0`, **101 check(s), 1 SKIPPED**; `cron_thinness` `rc=0`. It re-copied all five files this instrument's briefs flagged — including a fourth the brief did not name (`test_board_intake_recorded.py`, found at 17:53Z) — plus the boundary reader and `ledger_declaration` closure, commit `c41d4e8e`. **It adopted five files rather than three** and named `tests/ledger_boundary.py` + `tools/ledger_declaration.py` as the closure the boundary reader needs — which is why §2 now declares eleven paths (§9.1 item 6). It also corrected my framing: the pre-fix gate did **not** crash in its tree, it read green while never exercising the reader's declared SKIP path, so *coverage gap* is the true statement and *adopting fixed a crash* must not travel. **CURRENT 11/11 re-measured independently by this lane** (`md5sum` against `git show HEAD:TEMPLATE/…`, all eleven byte-identical). Its `reason` field carries the one qualifier honestly: two board gates are RED on a **declared inapplicability** — its issue board IS its ledger, one surface, so a board/ledger close-agreement predicate has nothing to agree about (§9.1 item 4) — filed at ledger n=611 and routed to the Instruments-methodology lane. |
+| `ai-antispam` | **11/11** | 8/11 | **HELD-UNDECLARED** — the patrol pair landed (`95b7388`, re-ported to the fixed upstream) and the pin re-vendored (`657108d`); the gate is **registered as its own audit row, gate 14**, and reads `rc=0` / 102 checks in BOTH its script and pytest forms. The held gate that was blocking its deploy path is therefore gone — the declared-skip fix turned a build-push red into a green gate, after a 15.5 h block earlier the same day. **Its declaration was sent to the Delegate at 18:17Z but is not yet in the store**, so the census reads silence. The three divergent paths are `tools/registry.py` and the two board gates: the gates are its **declared forks** (own anchor + the #59 exemption surface), while `registry.py` it believes byte-identical — the template copy last moved at `bee6353` (17:27Z), after its re-vendor, so that one is a **lag rather than a fork**, and it is theirs to declare either way. |
+| `inferhub-watch` | **11/11** | **11/11** | **HELD-UNDECLARED** — refreshed the three pre-fix files (`4566913`, verified a strict subset before overwrite) and its gate reads `rc=0`, 101 checks, 1 SKIPPED. **My earlier row for this member was wrong in two particulars and is withdrawn**: it said the runner "still raises `FleetManifestError` until it writes `registry/fleet.json`". Measured this turn, `registry/fleet.json` exists, is **tracked**, and carries `profile_root` / `profile` / `factories[]` with `job_prefixes ["inferhub-"]`; the runner **completes all eight legs** and `rc=1` is a **verdict, not a crash** — 4 problems over 9 open issues examined, 4 cron rows attributed and judged. A false "cannot start" in a census row sends the next adopter to fix something already fixed, which is why the row carries the re-measurement instead of the claim. It self-corrected the same class one level down: it had told the Delegate it "declared the ledger fork in `kit-decisions.json`" when that file was never written — and `kit-decisions.json` is the meta-factory's own record, not a member surface. |
+| `miidas` | 1/11 | 1/11 | DEFER (declared) — behind by 10 of 11. Its **transport blocker is discharged**: the manual port proved in `infra-factory` needs no selector (§9.1 item 3), and the requirement was relayed to it 2026-09-27T08:35:59Z. The **board-convention prerequisite** (§9.1 item 4) stands. |
+| `opencrabs-dev` | 0/11 | 0/11 | DEFER (declared) — `registry/` **does not exist** in its tree at all (`ls` rc=2). Its reason is SCOPE rather than effort: the prerequisite (`registry/kit.json` + `tools/kit_pin.py`) does not bootstrap one instrument — it **enrols the factory in the kit manifest system for every instrument at once**, a fleet-level decision that a pacemaker brief would otherwise decide by side effect. Re-entry: when it enrols in the kit for ANY instrument. |
 
-**One of five members has adopted it; two are PORTING with the full set already on disk; two have
-declared a deferral with a reason and a re-entry condition.** The distinction is the point of frame §7.2: a declared deferral
-is a *state*, and only undeclared divergence reds. A census that reported "1 of 5" alone would erase
+**Two adjacent columns can both read `absent` and mean different things.** The census's reload-link
+column is about the member's OWN law-survival symlink (step 4, optional and the member's act); the
+declares column is about the fragment's `instruments` entry. `infra-factory` reads `absent` in the
+first and `adopted · green=true` in the second, which is a complete adoption with no reload link — not
+a partial one. Raised by the Delegate from the artifact rather than from a defect report, and recorded
+here because the header that disambiguates them is a scroll away.
+
+**The version gap has closed for two of the three holders, and one path remains.** At the 18:49Z
+reading all three were 6/9 CURRENT on the same three files; `infra-factory` and `inferhub-watch` have
+since re-ported and both read **11/11 byte-identical** against the committed template halves, while
+`ai-antispam` differs on three paths of which two are its **declared forks**. The lesson that survives
+the specific numbers is the one `infra-factory` paid for: a member can hold every declared path and
+still be behind, because **adoption is a revision, not a copy** — and the kit's `behind_by` field
+exists to declare it. Silence is what must not happen, since a member holding a pre-fix gate reads
+green over a defect the fix removed.
+
+**HELD is not ADOPTED — the second leg is the reason, and it is now written by a member.** The
+census reads the per-instrument disposition from `registry/factories/<slug>.json` →
+`instruments.<slug>`, a map `tools/registry.py` gained at 17:29:36Z on 2026-09-27, nineteen minutes
+after the census tool that must read it (17:10:24Z). That window was real and it is **CLOSED**: the
+reader was extended (`84a94ba`) to check the instrument's own entry first and fall back to `kit`
+**labelled as the kit's**, and re-run at HEAD `0aebae9` it publishes **ADOPTED** for `infra-factory`
+rather than `unestablished` for all six. The distinction the original reading existed to keep therefore
+survives the fix, and it still decides the row: a `kit`-level `adopted` can never produce `ADOPTED`
+here, because a member that declared its kit adopted has said nothing about this instrument.
+
+**The reading has MOVED, and this is the instrument's first live adoption.** At the 17:48:33Z read
+every row was silent; at **2026-09-27T18:49:37Z** `infra-factory` reads **ADOPTED** — the fleet's
+first declared instrument row, transcribed by the Delegate from the member's own declaration and
+committed. The two other holders (`ai-antispam`, `inferhub-watch`) remain `HELD-UNDECLARED`: they
+hold the complete set and have not declared into `instruments.<slug>`. That is the frame's §7.2
+silence rendered as silence, and it is a member's own act — not a gap in the reader, which now reads
+the surface and produced a state the moment one existed.
+
+**Three of five members hold the complete declared set; two have declared a deferral with a reason and
+a re-entry condition.** The distinction is the point of frame §7.2: a declared deferral
+is a *state*, and only undeclared divergence reds. A census that reported "3 of 5" alone would erase
 the difference between a member that measured itself and said why, and one that has gone quiet — so
 the disposition column is not decoration, it is the half of the figure that a bare count destroys.
 
@@ -327,7 +415,7 @@ selector exists on the transport (§9.1 item 3) and none is required — which m
 would hand a member a *subset* of the closure, the exact partial-copy state §3 says raises rather than
 degrades. A member adopting this instrument takes the FULL closure, by hand if necessary.
 
-### 9.1 Five corrections from the adoption round, all measured
+### 9.1 Six corrections from the adoption round, all measured
 
 1. **A record in another factory's manifest does not satisfy step 2.** `ai-antispam` reported step 2
    already satisfied, citing a `registry/fleet.json` record carrying its own slug and job prefix. Read
@@ -375,6 +463,22 @@ degrades. A member adopting this instrument takes the FULL closure, by hand if n
    (`cmp` rc=0), stdlib-only. It belongs to the adoption's closure rather than §3's, because the runner
    does not load it — which is precisely why the omission survived four readings of this file. Found by
    the lane it affects, not by its author.
+
+6. **The declared set was under-declared, and a member's adoption found it.** §2 declared nine paths;
+   the true set is eleven. `infra-factory` adopted the instrument and reported that its tree needed
+   **five files rather than three**, naming `tests/ledger_boundary.py` and `tools/ledger_declaration.py`
+   as the closure the boundary reader needs. Measured here, it is right and worse than a member's
+   local note: `patrol_host_state.py:91` sets `LEDGER_BOUNDARY = REPO / "tests" / "ledger_boundary.py"`
+   and loads it by path at `:1188`, and `ledger_boundary.py:69` does `from ledger_declaration import …`.
+   So a member holding rows 1–9 alone reads **HELD — complete set — while being unable to run at
+   all**: the runner raises on the missing path-load. That is the exact class §3 warns about, sitting
+   in the instrument's own declaration rather than in any member's tree. Both files are manifest rows of class `closure`, so the kit always shipped them;
+   the census was simply never asked to look for them, because §2 never listed them. Widening the set
+   changed no member's state — all three adopters already hold 11/11 (measured 19:05Z) — it only made
+   the held leg mean what it claims to mean. The general form is not mine to encode: **a declared set
+   derived from what the manifest classes, rather than from what the executable loads, under-declares
+   by exactly the paths it reaches indirectly.** Routed to the frame's author as a cross-instrument
+   clause rather than patched here.
 
 ## 10. Where this instrument's law lives
 
