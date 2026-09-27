@@ -39,6 +39,10 @@ _MESSAGE_NOT_FOUND_MARKERS = (
     "message not found",
 )
 
+# A repeat tap on the same inline button is refused as a no-op edit. It is not a
+# failure: the member is already looking at the requested page (#52).
+_MESSAGE_NOT_MODIFIED_MARKERS = ("message is not modified",)
+
 _BOT_TO_BOT_DISABLED_MARKERS = ("user_bot_to_bot_disabled",)
 
 
@@ -68,6 +72,18 @@ def is_message_not_found_error(error: Exception) -> bool:
     if isinstance(error, (TelegramBadRequest, TelegramNotFound)):
         return _error_message_contains(error, _MESSAGE_NOT_FOUND_MARKERS)
     return False
+
+
+def is_message_not_modified_error(error: Exception) -> bool:
+    """True when an edit was a no-op because the content already matched.
+
+    A repeated tap on the same inline button lands here: Telegram refuses an
+    edit that would change nothing. The member is already on the requested page,
+    so this is expected rather than an error worth surfacing.
+    """
+    if not isinstance(error, TelegramBadRequest):
+        return False
+    return _error_message_contains(error, _MESSAGE_NOT_MODIFIED_MARKERS)
 
 
 def is_bot_to_bot_disabled_error(error: Exception) -> bool:

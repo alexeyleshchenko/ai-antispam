@@ -9,7 +9,10 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from ..common.bot import bot
-from ..common.telegram_errors import is_message_not_found_error
+from ..common.telegram_errors import (
+    is_message_not_found_error,
+    is_message_not_modified_error,
+)
 from ..common.utils import (
     get_add_to_group_url,
     load_config,
@@ -65,9 +68,14 @@ async def handle_lang_set_callback(callback: CallbackQuery) -> str:
     confirm_text = (
         t(lang, "lang.changed_ru") if lang == "ru" else t(lang, "lang.changed_en")
     )
-    await callback.answer(confirm_text, show_alert=False)
+    await _answer_safe(callback, confirm_text)
     if callback.message and isinstance(callback.message, types.Message):
-        await callback.message.edit_text(confirm_text, parse_mode="HTML")
+        try:
+            await callback.message.edit_text(confirm_text, parse_mode="HTML")
+        except TelegramBadRequest as exc:
+            # Re-tap of the same language: the edit is a no-op. Expected.
+            if not is_message_not_modified_error(exc):
+                raise
     return "callback_lang_set"
 
 
@@ -75,7 +83,9 @@ async def handle_lang_set_callback(callback: CallbackQuery) -> str:
 async def handle_help_pages(callback: CallbackQuery) -> str:
     """Show a help subsection; callback_data is the same string as the t() key."""
     if not callback.message or not isinstance(callback.message, types.Message):
-        await callback.answer(t("en", "callback.message_inaccessible"), show_alert=True)
+        await _answer_safe(
+            callback, t("en", "callback.message_inaccessible"), show_alert=True
+        )
         return "callback_message_inaccessible"
 
     admin_id = callback.from_user.id if callback.from_user else 0
@@ -101,13 +111,24 @@ async def handle_help_pages(callback: CallbackQuery) -> str:
         ]
     )
 
-    await callback.message.edit_text(
-        text,
-        parse_mode="HTML",
-        reply_markup=back_button,
-        disable_web_page_preview=True,
-    )
-    await callback.answer()
+    # Ack first: the answer is what clears the client's spinner, so it must not
+    # be conditional on the edit below. Editing first left every failed edit
+    # unanswered — the member saw a failure popup and tapped again, each tap
+    # logging two dispatcher ERRORs (#52).
+    await _answer_safe(callback)
+
+    try:
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=back_button,
+            disable_web_page_preview=True,
+        )
+    except TelegramBadRequest as exc:
+        # A repeat tap on the same page is refused as a no-op edit. Expected:
+        # the member is already looking at this page. Anything else is real.
+        if not is_message_not_modified_error(exc):
+            raise
 
     return f"{callback_data}_shown"
 
@@ -116,7 +137,9 @@ async def handle_help_pages(callback: CallbackQuery) -> str:
 async def handle_help_back(callback: CallbackQuery) -> str:
     """Return to the main help menu."""
     if not callback.message or not isinstance(callback.message, types.Message):
-        await callback.answer(t("en", "callback.message_inaccessible"), show_alert=True)
+        await _answer_safe(
+            callback, t("en", "callback.message_inaccessible"), show_alert=True
+        )
         return "callback_message_inaccessible"
 
     admin_id = callback.from_user.id if callback.from_user else 0
@@ -159,13 +182,20 @@ async def handle_help_back(callback: CallbackQuery) -> str:
         ]
     )
 
-    await callback.message.edit_text(
-        text,
-        parse_mode="HTML",
-        reply_markup=keyboard,
-        disable_web_page_preview=True,
-    )
-    await callback.answer()
+    # Ack first — see handle_help_pages: the answer clears the spinner and must
+    # not depend on the edit succeeding (#52).
+    await _answer_safe(callback)
+
+    try:
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+            disable_web_page_preview=True,
+        )
+    except TelegramBadRequest as exc:
+        if not is_message_not_modified_error(exc):
+            raise
     return "help_back_shown"
 
 
@@ -308,7 +338,9 @@ async def handle_spam_confirm_callback(callback: CallbackQuery) -> str:
 
         if not callback.message:
             logger.warning("No notification message in callback")
-            await callback.answer(t(lang, "callback.invalid_callback"), show_alert=True)
+            await _answer_safe(
+                callback, t(lang, "callback.invalid_callback"), show_alert=True
+            )
             return "callback_invalid_message"
 
         # Ack immediately, before any network work, so the Telegram client stops
