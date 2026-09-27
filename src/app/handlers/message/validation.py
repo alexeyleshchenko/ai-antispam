@@ -12,6 +12,10 @@ from ...database.models import Group
 
 logger = logging.getLogger(__name__)
 
+# Cache to track last logged moderation state for each group to prevent spam
+# Format: {chat_id: last_logged_moderation_enabled_state}
+_moderation_state_cache = {}
+
 
 async def validate_group_and_check_early_exits(
     chat_id: int, user_id: int, title: str | None = None, username: str | None = None
@@ -212,6 +216,15 @@ async def get_and_check_group(
         return None, "error_message_group_not_found"
 
     if not group.moderation_enabled:
+        # Check if we should log this state change to prevent spam
+        last_logged_state = _moderation_state_cache.get(chat_id)
+        if last_logged_state != group.moderation_enabled:
+            logger.info(
+                f"Group moderation disabled for chat {format_chat_log(chat_id, title, username)}"
+            )
+            _moderation_state_cache[chat_id] = group.moderation_enabled
         return None, "message_moderation_disabled"
 
+    # Update cache when we see an enabled group (in case it was previously disabled)
+    _moderation_state_cache[chat_id] = group.moderation_enabled
     return group, ""
