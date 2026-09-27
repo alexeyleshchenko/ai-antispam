@@ -298,6 +298,11 @@ declared, 0 undeclared divergence). Two independent readings of one row:
 A file-presence predicate cannot see the second, **and neither reading is wrong** — they answer
 different questions. This is why the disposition column names the reader, not only the file.
 
+**And the census carries a predicate bound: it measures the TREE'S AGE, never its owner's decision.**
+The initialization step (§9.1.1 reason 1) postdates five of the six trees, so a member reading 0 of 2
+records *when it was built*, not a judgement about the kit. A later reader must take this table as a
+measurement of the fleet at an instant — and must not read a low row as a member that declined.
+
 **`opencrabs-dev` is out of scope by repo kind, not behind.** Its declared `/repo` is `/root/opencrabs`,
 the OpenCrabs **source** tree. It holds no pin and no kit file, and a factory whose repo is upstream
 source has no tree for this instrument to land in. Reading it as 0-of-4 would file a scope error as a
@@ -320,7 +325,10 @@ The step exists, and it is **one command per member**. `TEMPLATE/BOOTSTRAP.md` *
 the pin, so you can judge yourself") names it, and `tools/kit_deliver.py` implements it: bytes and pin
 are written **in one run**, so the member's own gate cannot red on a state we created.
 
-Dry-run readings, 2026-09-27T14:0xZ (`--dry-run`, nothing written, `rc=0` all three):
+Dry-run readings, 2026-09-27T14:0xZ (`--dry-run`, nothing written, `rc=0` all three). The counts are
+**one instant's property**, exactly as §9.1.2 states for the delivery table beside them — the version
+in force at this reading is the one §9.1.2's pin column names, so an ADD figure travels with it or it
+is unreproducible:
 
 | target | ADD | the two shipping paths |
 |---|---|---|
@@ -338,20 +346,88 @@ So the four measured reasons the census is where it is — none of them a refusa
 3. **Nothing runs it on a cadence, and reporting is not enforcement.** Step 4f's own text is *"run by
    the meta-factory, or handed to you"* — there is no cron and no lane duty. Frame §7.2 records the
    measured cost: *"a dispatch round produced 0 ports from five replies."*
-4. **The member has nowhere to declare the state.** All six member manifests carry the same thirteen
-   keys and **none carries a kit, adoption, deferred or drift field** (scanned this turn). Frame §7.2
-   makes a deferral a **declared** state, but the member's own manifest has no home for it, so a
-   member that has decided to wait reads exactly like one that never considered it.
+4. **The member had nowhere to declare the state — and this one is now CLOSED.** At the census
+   instant all six member manifests carried the same thirteen keys and **none carried a kit,
+   adoption, deferred or drift field** (scanned then). Frame §7.2 makes a deferral a **declared**
+   state, but the member's own manifest had no home for it, so a member that had decided to wait
+   read exactly like one that never considered it.
 
-Reason 4 is the one that keeps the others invisible, and it is a **schema** question, not a
+Reason 4 is the one that kept the others invisible, and it was a **schema** question, not a
 per-instrument one: the surface a member declares adoption on is `registry/factories/<slug>.json`,
-which this instrument does not own.
+which this instrument does not own. **The home now exists** — commit `a29a18e` adds it as an
+optional object, `kit`, with four states (`adopted` / `partial` / `deferred` / `not-applicable`) and
+`KIT_REASON_REQUIRED = ("deferred", "not-applicable")` (`tools/registry.py:298-300`), so a deferral
+or a not-applicable must carry its reason while a member that has not yet answered stays legal
+(absent is a valid state while the obligation is new). **This changes the census above not at all:**
+the six manifests still read thirteen keys with no `kit` value, which is now an *unanswered* state
+rather than an *undeclarable* one — and the table moves only when a member answers on its own
+measurement.
 
 **And the gate's self-probe is stated, not hidden.** In a member tree the fixture arms **SKIP** —
 their inputs are `TEMPLATE/`-only paths and no member carries a `TEMPLATE/` (measured: `ai-antispam`,
 `miidas`, `infra-factory` all NO). The live arm carries the verdict there, and the gate prints the
 skip rather than passing quietly (`f9cc405` made it reach a verdict instead of crashing). An adopter
 should read a member-tree green as *the live population is judged*, never as *every probe ran*.
+
+### 9.1.2 The initialization delivery of 2026-09-27 — measured
+
+**Instant:** 2026-09-27T14:1xZ. **Command:** `python3 tools/kit_deliver.py --to <member-root>`, once per
+member, on owner order (*"the member factories should be initialized to use the kit system"*).
+
+| member | written | local files kept | pin before → after | its gate, after |
+|---|---|---|---|---|
+| `ai-antispam` | 101 | 6 | `ab929a61bcc2` → `6f10a14dcb5f` | **rc=0** |
+| `inferhub-watch` | 105 | 7 | `db6aa904a8a1` → `6f10a14dcb5f` | **rc=1** — 7 undeclared divergences |
+| `infra-factory` | 88 | 21 | `b0bb09cb288f` → `6f10a14dcb5f` | **rc=1** — 18 undeclared divergences |
+| `miidas` | 91 | 17 | `6ab591c618ec` → `6f10a14dcb5f` | **rc=0** |
+| `opencrabs-dev` | — | — | **REFUSED** — no pin | out of scope (§9.1) |
+
+**The counts above are ONE INSTANT's property, and the instant is the version named in the pin
+column.** The manifest moved twice on 2026-09-27 alone — `6f10a14dcb5f` at this delivery,
+`685f40d3648a` after this file's own registration, and a peer's further drift after that — so an ADD
+count without its version beside it is unreproducible, which is the rule §5 already states for the
+identifier itself.
+
+**Every one of the four now holds both shipping paths of §2**, so §9.1's own predicate reads 2 of 2 for
+all four. The two red gates are **not** caused by the delivery, and that is measured rather than
+argued: the delivery **never overwrites an existing file** (it counts them as *local files kept*), so
+each diverging path was compared against the member's **own pre-delivery pin** — and **every one was
+already divergent there** (`inferhub-watch` 7 of 7, `infra-factory` 18 of 18). What the delivery changed
+is that two of these members now **have the reader** that makes their drift measurable at all; before
+it, both carried no `tests/test_kit_pin.py` and could not judge themselves.
+
+**So the delivery resolves the ADD half and leaves the DIVERGENCE half, which is the member's own
+decision** — the gate names both lawful answers (take the update, or declare the fork in
+`registry/kit-exemptions.json` with a reason), and frame §9's O-series is the same rule.
+
+Two smaller measurements from the same run. `miidas`'s pin carries **132** entries, the extra being
+`TEMPLATE/tests/test_template_sync.py` — a path **retired in the source and kept in the member's pin**
+(the tool names it as such on every run, so it is a declared observation, not drift). And the tool's
+own phrase *"local files kept"* is broader than divergence: it counts **every** existing path it
+declines to overwrite, including those byte-identical to the pin — which is why its count (21 for
+`infra-factory`) exceeds the gate's divergence count (18).
+
+**Disposition, ruled by the owner 2026-09-27T15:16Z: *"Leave them for the members."*** Three of the
+four trees keep the delivery **uncommitted and in place** — `ai-antispam`, `inferhub-watch`, and
+`infra-factory`'s declared root `/root/vds-servers` — and whether to commit, adopt selectively, or
+withdraw is **each member's own decision**. The delivery is purely additive, so holding it blocks no
+member. `miidas` was **withdrawn at that member's own request** (2026-09-27T15:04–15:06Z: archived
+first, then removed, pin restored, `git status --porcelain` back to **0 lines**) because its declared
+posture is 17 forks plus a deferred pacemaker, and a wholesale arrival would have changed that posture
+without its decision. **The withdrawal restored `registry/kit.json` by NAME, never a blanket
+`git checkout .`** — which is why that member's uncommitted `evidence/rework.md` survived it.
+
+**One caveat a committing member must weigh, measured 15:2xZ: the delivered `tools/registry.py`
+predates the kit-adoption field.** The delivery ran **14:16Z**; `a29a18e` — the commit adding
+`KIT_KEYS` / `KIT_STATES` / `KIT_REASON_REQUIRED` — landed **14:35:08Z**, 19 minutes later. So the
+two trees that received the file **newly** return **0 hits for `KIT_KEYS` against TEMPLATE's 2**:
+`ai-antispam` and `inferhub-watch`, both untracked at mtime 14:16:10 / 14:16:12. `/root/vds-servers`
+also reads 0, but its `tools/registry.py` is **tracked at mtime 06:10:16** — *older than the
+delivery*, so it is that member's own pre-existing file, **kept** rather than written (the delivery
+never overwrites), and is **not** attributable to this round. A member that commits today adopts a
+validator **blind to the field O6's obligation runs on**; the deliver-side remedy is declared as
+**F3** in §9.2.
+
 
 ### 9.2 The gaps this instrument declares
 
@@ -362,10 +438,34 @@ meets a decision instead of an unknown.
 |---|---|---|---|
 | **F1** | `tools/kit_surfaces.py` has **no gate** — frame §2 part 8 is missing in the instrument that defines the census | `grep -c kit_surfaces TEMPLATE/tests/gate_registry.py` → **0**; no `tests/test_kit_surfaces.py` in either tree | the gate named in §7.2; `tests/**` code, built by the code owner and reviewed by the methodology lane |
 | **F2** | the census returns **FAIL — 2 tool(s) carry an undeclared gap** | `python3 tools/kit_surfaces.py` → `ledger-index` missing S1,S2; `subject_anchor` missing S2 | the two tools' owners; `subject_anchor` is the one the survey named, and `ledger-index` has drifted in since |
+| **F3** | `tools/kit_deliver.py` writes a pin **without checking the pin is current**, so a deliver run behind TEMPLATE's own HEAD writes a pin that is **stale on arrival** — and nothing reds, because the member's gate judges it against the pin it was **handed**, not against the kit that **exists** | `grep -cE 'stale\|current\|newer\|ahead\|behind' tools/kit_deliver.py` → **0**, rc=1; the tool reads `kit_version` (`:54`, `:59`, `:98`) and writes it (`:166`), and never compares it against the source repo's HEAD-computed version | the tool's code owner; a deliver-side guard that refuses or warns when `source_state()['kit_version']` differs from the HEAD-computed one |
+| **F4** | `tools/kit_deliver.py` **AUTHORS the member's pin** — it writes `registry/kit.json` (`:166`) even into a tree that already carries a deliberately authored, committed pin, so a transport rewrites a declaration that is the member's by frame §8 | `sed -n '160,170p' tools/kit_deliver.py` → `pin["kit_version"] = kit` then `planned["pin_path"].write_text(...)`; measured on two trees: `inferhub-watch` HEAD `db6aa904a8a1` / 118 → `6f10a14dcb5f` / 131, `vds-servers` HEAD `b0bb09cb288f` / 118 → `6f10a14dcb5f` / 131 | the tool's code owner; **refuse to write `registry/kit.json` into a tree that already carries one**, unless that member asked for the refresh |
 
 **F2's count moved while this file was being written, and that is the point of stating a predicate
 rather than a figure.** The survey measured **1** undeclared gap; the same command this turn returns
 **2**. A bare "1" would have been a dated claim wearing a general one's clothes.
+
+**F3 is the one gap this round PRODUCED rather than found**, and it was named by a member lane, not by
+this instrument. The `miidas` lane caught a stale validator in its own tree by running its vendored pin
+against a TEMPLATE it went and found — a signal **no member gets from the transport**, which is exactly
+why the remedy is a deliver-side obligation rather than a member-side one. A member that trusts the
+delivery receives whatever the pin held at deliver time and has no way to learn it was 19 minutes
+behind a landing. The same member asked for a **per-instrument selector** (`kit_deliver` accepts only
+`--to` and `--dry-run`), because a wholesale arrival changes a deliberately-partial posture without the
+member's decision; that is a second, separate remedy on the same tool.
+
+**F4 is the same tool violating a DIFFERENT principle, and its harm was measured on two trees the same
+evening.** A pin is the member's *declaration of what it took* — frame §8, and `kit_pin.py`'s own
+docstring says it: *"a gate against MY pin"*. Both trees already carried a **deliberately authored,
+committed** pin: `inferhub-watch`'s commit `04ca2ce` states the reasoning in its own message (*"a gate
+against THEIR live manifest makes my verdict a function of their backlog … A gate against my pin
+reddens it only when my tree diverges from my own declaration"*), and `vds-servers`' refresh is a
+ledger-recorded act (row `n=567`, subject `kit-pin-refresh`). The deliver replaced both with ours. The
+harm is not the file swap — it is that each member's gate then judges its **own declared forks** as
+divergence from a declaration **it never made**: `inferhub-watch` went to **7 undeclared divergences,
+every one its own declared fork**, having had a pin and no gate before the run. So the delivery wrote
+the gate and our pin together, and the member did not choose to be judged. Recovery is one command
+each, member-side, and it restores the member's own bytes: `git checkout registry/kit.json`.
 
 ## 10. Where this instrument's law lives
 

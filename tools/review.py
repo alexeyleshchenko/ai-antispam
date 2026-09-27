@@ -1,20 +1,50 @@
-"""Multi-Lens Review Engine (Duty 4+6 Review Rotation / P32).
+"""Multi-Lens Review Engine (Review Rotation / P32).
 
 Manages periodic quality reviews of factory laws, tools, and artifacts.
 Enforces:
   1. Complete census: all catalog lenses must run or be explicitly waived.
-  2. State durability: state.json tracks cycle lifecycle and step-0 recovery.
-  3. Receipt verification: reports verified with sha256 checksums on disk.
-  4. Adversarial sub-agent dispatch: generates isolated, adversarial auditor prompts.
+  2. State durability and STEP-0 RECOVERY: state.json carries the cycle
+     lifecycle, an explicit terminal state and both durations.  That file IS
+     the step-0 recovery point — after a compaction or restart, RUN
+     `step0 <cycle>` before re-querying input, re-briefing reviewers or
+     re-drafting a plan.  It is a COMMAND rather than this paragraph because a
+     compacted session cannot execute prose, and it reads state.json and
+     nothing else, so it answers the same on a resumed run as on the first.
+     `step0 --record` appends the reading to `step0_log`, which is what makes
+     the recovery durable EVIDENCE instead of an assertion.
+  3. Receipt verification: reports verified with sha256 checksums, and a report
+     with no index line is UNRECEIPTED — a named state, never a silent pass.
+  4. Adversarial sub-agent dispatch: generates isolated, adversarial auditor
+     prompts.  Lenses are executed by READ-ONLY SUB-AGENTS, never by the
+     authoring session inline (docs/review-lenses.md, Adversarial Isolation
+     Requirement).
+  5. An OBSERVABLE cadence: `cadence` derives the boundary stamp from the
+     ledger's own ANCHORED notes, so a member's cadence state is re-derivable
+     by anyone holding the ledger instead of asserted in prose.
+  6. A DECLARED intake: `intake` reads the cycle's input channels and reports a
+     NAMED state.  Nothing declared, nothing submitted and a malformed
+     submission are three different states, and none of them is a pass.
+  7. NO SILENT LIVE READ: a cycle is FROZEN once its lifecycle is terminal.
+     Closing snapshots the declared channels (`inputs_snapshot`), and a later
+     `intake` or `cadence --write` against a frozen cycle is REFUSED, because
+     the bytes on disk now answer a different question than the one the cycle
+     closed on.  `--live` is the explicit way to say the reader means today's
+     bytes, and the read then says so.
 
 Usage:
   python3 tools/review.py init <cycle_id>
   python3 tools/review.py brief <lens> [--json]
   python3 tools/review.py record <cycle_id> <lens> <report_path_or_text>
-  python3 tools/review.py waive <cycle_id> <lens> --reason "..."
+  python3 tools/review.py waive <cycle_id> <lens> --reason "..." [--by WHO]
   python3 tools/review.py status <cycle_id>
   python3 tools/review.py verify <cycle_id>
   python3 tools/review.py compile <cycle_id>
+  python3 tools/review.py close <cycle_id> [--status COMPLETED|ABANDONED] [--stamp --ledger F]
+  python3 tools/review.py cadence --ledger <ledger.jsonl> [--every N] [--write <cycle_id>] [--json]
+  python3 tools/review.py intake <cycle_id> [--record] [--live]
+  python3 tools/review.py step0 <cycle_id> [--record]
+  python3 tools/review.py schema
+  python3 tools/review.py migrate <cycle_id> [--dry-run]
 """
 
 from __future__ import annotations
@@ -183,6 +213,574 @@ LENS_METADATA: dict[str, dict[str, str]] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# THE PROMOTED STATE CONTRACT — schema v1
+# ---------------------------------------------------------------------------
+# The schema is AUTHORED HERE and emitted to the shipped artifact by
+# `review.py schema`.  The pair `docs/review-cycle.schema.json` /
+# `TEMPLATE/docs/review-cycle.schema.json` is generated from that command, and
+# `tests/test_review.py` asserts the shipped pair is byte-identical to what it
+# prints — one authoring home, no drift.  (Same shape as
+# `tools/kit_manifest.py`, which generates `registry/kit.json`.)
+#
+# WHY A CLOSED SCHEMA AND NOT PROSE.  Measured over the donor's own cycle dirs
+# (predicate: each dir's state.json; scope: the donor state root; instant
+# 2026-09-27): the donor's "FROZEN SCHEMA — these five field names are law" is
+# honoured by 4 of 17 state files; `status` carries SIX distinct values where
+# the law says exactly two; `cycle_id` is absent in 1 of 17; and the key union
+# is 35 keys against the 10 the law names.  A declared schema nothing reads is
+# a comment.  This one is emitted, shipped and asserted.
+
+SCHEMA_VERSION = 1
+
+# Terminal ENUM.  `COMPLETED` is the donor's DOMINANT terminal token, not its
+# only one, and the distinction is measured rather than assumed: over the
+# donor's own cycle state files (predicate: each dir's state.json; scope: the
+# donor state root, 17 files; instant 2026-09-27) cycle `status` carries SIX
+# distinct values — COMPLETED 9, IN_PROGRESS 4, reports_persisted 1,
+# intake_complete 1, VALIDATED 1, COMPLETE 1 — and lens entries carry FOUR:
+# COMPLETED 66, COMPLETE 11, PENDING 7, PERSISTED 4.  So the enum keeps the
+# dominant token and `migrate` MAPS the plain synonym `COMPLETE`; anything
+# outside both is REPORTED as UNMAPPED rather than carried in as if valid.
+# `ABANDONED` is ADDED, and the reason is measured rather than speculative:
+# four donor cycles sit at IN_PROGRESS (20260915-c18, 20260916-c20,
+# 20260919-c21 and the live 20260927-c25), three of them days old and dead in
+# fact — an abandoned cycle is otherwise indistinguishable from a live one,
+# the same defect the donor fixed for `ended_at`.
+LIFECYCLE_STATES = ["IN_PROGRESS", "COMPLETED", "ABANDONED"]
+LENS_STATES = ["PENDING", "COMPLETED", "WAIVED"]
+
+# The donor's terminal SYNONYM, and only the synonym.  `PERSISTED` is
+# deliberately NOT mapped: it says a report was written, not that a lens
+# reached a verdict, and collapsing it to COMPLETED would over-claim evidence
+# the donor did not assert.  An unmapped value is named by the caller.
+TERMINAL_SYNONYMS = {"COMPLETE": "COMPLETED"}
+
+# A LENS ENTRY drifts by KEY as well as by VALUE, and the rename is measured rather than
+# assumed: over the donor's 88 lens entries the shapes are `(report_path, status, verdict)`
+# 73, `(path, status)` 11, `(findings_count, report_path, status)` 4 — so eleven entries name
+# the report with `path` where the other seventy-three use `report_path`.  A null-check on
+# `report_path` does NOT survive that: the render prints None for a lens that has a report,
+# which is a wrong value rather than a crash, and the migration's own key filter DROPPED it,
+# because `path` is not a key of the template.
+LENS_KEY_SYNONYMS = {"path": "report_path"}
+
+# The cadence boundary is the NEWEST row whose text ANCHORS on this pattern —
+# the last cycle-close stamp.  ANCHORED, never a substring: a loose search
+# harvests an END from a row whose whole point is that none was written — the
+# donor's `WITHHELD:` convention exists for exactly that row, and a WITHHELD
+# row begins with the literal token, so it can never match an anchored pattern.
+CADENCE_PATTERN = r"^v[0-9]+\.[0-9]+\.[0-9]+ ACCEPTED"
+CADENCE_DEFAULT_EVERY = 5
+
+# ... and the COUNT is a SECOND predicate, not the same one.  Read from the
+# donor's own implementation rather than inferred from its prose: in
+# `oc-ledger`'s `cmd_cadence` the boundary is the newest ANCHORED row, while
+# the bumps are counted over rows of a DIFFERENT kind — `kind == "skill-bump"`.
+# Re-measured against the donor's live ledger (predicate: rows per kind; scope:
+# workers-ledger.json, 11 562 rows; instant 2026-09-27T15:2xZ): boundary
+# n=12391 (`v0.4.266 ACCEPTED — Duty-6 cycle 20260927-c25 closed`), and
+# exactly 2 `skill-bump` rows after it -> 2/5 WAIT.
+#
+# Counting anchored rows instead — the obvious reading, and the one this file
+# first shipped — gives the SAME ledger a different answer, because the close
+# stamp is itself anchored and would be counted as a bump.  The two predicates
+# are one row apart here and diverge without bound over time.
+CADENCE_BUMP_EVENT = "skill-bump"
+
+STATE_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "review-cycle.schema.json",
+    "title": "Review Rotation - cycle state",
+    "description": (
+        "One review cycle's state, at reviews/<cycle-id>/state.json in the "
+        "adopting tree. Emitted by `python3 tools/review.py schema`."
+    ),
+    "schema_version": SCHEMA_VERSION,
+    "type": "object",
+    "required": [
+        "schema_version",
+        "cycle_id",
+        "status",
+        "started_at",
+        "ended_at",
+        "duration_review_min",
+        "duration_cycle_min",
+        "cadence",
+        "corpus",
+        "lenses",
+        "waivers",
+        "proposals",
+        "codification_plan",
+        "frozen_at",
+        "inputs_snapshot",
+        "step0_log",
+        "updated_at",
+    ],
+    "properties": {
+        "schema_version": {
+            "type": "integer",
+            "const": SCHEMA_VERSION,
+            "description": "The schema's own version. A reader REFUSES an unknown value rather than guessing.",
+        },
+        "cycle_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Minted ONCE at init and written to BOTH stores: state.json and the ledger row that opens the cycle.",
+        },
+        "status": {
+            "type": "string",
+            "enum": LIFECYCLE_STATES,
+            "description": "A CLOSED enum. Free text here is the measured defect: six distinct values against a two-value law.",
+        },
+        "started_at": {"type": "string", "format": "date-time"},
+        "ended_at": {
+            "type": ["string", "null"],
+            "format": "date-time",
+            "description": "Null while IN_PROGRESS, and NEVER absent: absence and null are different claims. updated_at is not a substitute.",
+        },
+        "duration_review_min": {
+            "type": ["number", "null"],
+            "minimum": 0,
+            "description": "Review start to last report persisted.",
+        },
+        "duration_cycle_min": {
+            "type": ["number", "null"],
+            "minimum": 0,
+            "description": "Cycle start to cadence close stamp. A SECOND number; the two are never conflated.",
+        },
+        "cadence": {
+            "type": "object",
+            "description": "The cadence boundary as an OBSERVABLE artifact, never prose. Computed by `review.py cadence`.",
+            "required": ["trigger", "boundary", "fires", "evaluated_at"],
+            "properties": {
+                "trigger": {
+                    "type": "object",
+                    "required": ["kind"],
+                    "properties": {
+                        "kind": {"type": "string", "enum": ["version_bumps", "manual", "interval"]},
+                        "every": {"type": ["integer", "null"], "minimum": 1},
+                        "note": {"type": "string"},
+                        "counts": {"type": "string", "description": "The row kind counted as a version bump since the boundary. The count and the boundary are TWO predicates: the close stamp is itself anchored, so counting anchored rows would count it as a bump."},
+                    },
+                },
+                "boundary": {
+                    "type": "object",
+                    "required": ["ref", "at", "pattern", "accepted_since"],
+                    "description": "The newest row matching the ANCHORED pattern — the cycle-close stamp — and how many BUMP rows landed after it. TWO predicates, never one: counting anchored rows would count the close stamp itself as a bump.",
+                    "properties": {
+                        "ref": {"type": ["string", "null"]},
+                        "at": {"type": ["string", "null"], "format": "date-time"},
+                        "pattern": {"type": "string"},
+                        "accepted_since": {"type": "integer", "minimum": 0},
+                    },
+                },
+                "fires": {"type": "boolean"},
+                "evaluated_at": {"type": "string", "format": "date-time"},
+            },
+        },
+        "corpus": {
+            "type": "object",
+            "description": "The FROZEN inputs the cycle reviewed. A report is valid only for this hash.",
+            "required": ["hash", "pack", "pack_status"],
+            "properties": {
+                "hash": {"type": ["string", "null"]},
+                "pack": {
+                    "type": ["string", "null"],
+                    "description": "Optional mechanical corpus pack. NOT promoted: it is a project-dir trial called by absolute path.",
+                },
+                "pack_status": {
+                    "type": "string",
+                    "enum": ["present", "absent", "failed"],
+                    "description": "A missing or failing pack is REPORTED, never silently skipped: the record says which.",
+                },
+            },
+        },
+        "lenses": {
+            "type": "object",
+            "description": "One entry per catalog lens, INCLUDING lenses that never ran. A sparse map is normalized on read, because coverage is complete-or-waived and an absent lens is PENDING, not absent.",
+            "additionalProperties": {
+                "type": "object",
+                "required": ["status"],
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": ["PENDING", "COMPLETED", "WAIVED", "HOLLOW", "FAILED"],
+                    },
+                    "report_path": {"type": ["string", "null"]},
+                    "sha256": {"type": ["string", "null"]},
+                    "verdict": {"type": ["string", "null"]},
+                    "receipt": {
+                        "type": ["string", "null"],
+                        "enum": ["verified", "UNRECEIPTED", None],
+                        "description": "A report with no index line is UNRECEIPTED, which is a distinct state from missing.",
+                    },
+                    "fallback": {
+                        "type": ["string", "null"],
+                        "enum": ["inline", None],
+                        "description": "Set when the inline fallback ran after a second hollow report. The fallback MUST be flagged in the record.",
+                    },
+                    "recorded_at": {"type": ["string", "null"], "format": "date-time"},
+                    "reason": {"type": ["string", "null"]},
+                },
+            },
+        },
+        "waivers": {
+            "type": "array",
+            "description": "The waiver LOG, one record per waived lens. A waiver with no reason is refused. This array is the SINGLE home; the donor's separate waivers.log is not carried.",
+            "items": {
+                "type": "object",
+                "required": ["lens", "reason", "waived_at"],
+                "properties": {
+                    "lens": {"type": "string"},
+                    "reason": {"type": "string", "minLength": 1},
+                    "by": {"type": ["string", "null"]},
+                    "waived_at": {"type": "string", "format": "date-time"},
+                },
+            },
+        },
+        "proposals": {
+            "type": "array",
+            "description": "Intake receipts: what the cycle took in and from which channel. The proposals/ DIRECTORY is the member-owned data surface; this array is the instrument's receipt index.",
+            "items": {
+                "type": "object",
+                "required": ["id", "source", "recorded_at"],
+                "properties": {
+                    "id": {"type": "string"},
+                    "source": {"type": "string", "enum": ["dir", "ledger", "declared"]},
+                    "path": {"type": ["string", "null"]},
+                    "recorded_at": {"type": "string", "format": "date-time"},
+                    "op": {"type": "string", "enum": ["ADD", "CHANGE"],
+                           "description": "The proposal's operation, from the strict intake format."},
+                    "target": {"type": "string",
+                               "description": "The file+section the proposal names, from the strict intake format."},
+                    "dated": {"type": "boolean",
+                              "description": "Whether the evidence carried a date. An undated proposal is RECEIVED and WARNED, never silently accepted as evidenced."},
+                },
+            },
+        },
+        "codification_plan": {
+            "type": "array",
+            "description": "Accepted findings and the home each lands in. An accepted finding with no landed home is a cycle-completion FAILURE, never a scheduling choice.",
+            "items": {
+                "type": "object",
+                "required": ["finding", "disposition"],
+                "properties": {
+                    "finding": {"type": "string"},
+                    "disposition": {"type": "string", "enum": ["landed", "routed", "rejected"]},
+                    "home": {"type": ["string", "null"]},
+                    "reason": {"type": ["string", "null"]},
+                },
+            },
+        },
+        "frozen_at": {
+            "type": ["string", "null"],
+            "description": "Set when the cycle closes. A FROZEN cycle's inputs are historical: a live channel read against it is REFUSED, because the bytes on disk now answer a different question than the one the cycle closed on.",
+        },
+        "inputs_snapshot": {
+            "type": ["object", "null"],
+            "description": "WHAT the cycle read and WHEN, one digest per declared channel, taken at freeze time. A resumed reader compares this against today's channel to tell the cycle's own bytes from the current ones. Digests are computed in constant memory: the ledger may be large and a whole-file read is banned on this box.",
+            "properties": {
+                "taken_at": {"type": "string", "format": "date-time"},
+                "channels": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["kind", "ref", "exists"],
+                        "properties": {
+                            "kind": {"type": "string", "enum": ["dir", "ledger"]},
+                            "ref": {"type": "string"},
+                            "exists": {"type": "boolean"},
+                            "sha256": {"type": ["string", "null"]},
+                            "bytes": {"type": ["integer", "null"]},
+                            "files": {"type": ["integer", "null"]},
+                        },
+                    },
+                },
+            },
+        },
+        "step0_log": {
+            "type": "array",
+            "description": "One entry per `step0 --record`: where the cycle stood, read from state ALONE. This is the durable half of the step-0 recovery claim — a resumed session can show where it recovered from rather than assert it.",
+            "items": {
+                "type": "object",
+                "required": ["at", "status", "frozen", "completed", "waived", "pending", "next_action"],
+                "properties": {
+                    "at": {"type": "string", "format": "date-time"},
+                    "status": {"type": "string"},
+                    "frozen": {"type": "boolean"},
+                    "completed": {"type": "integer"},
+                    "waived": {"type": "integer"},
+                    "pending": {"type": "integer"},
+                    "pending_lenses": {"type": "array", "items": {"type": "string"}},
+                    "next_action": {"type": "string"},
+                },
+            },
+        },
+        "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Written by the engine on every save. Not a claim that the cycle is current.",
+        },
+    },
+}
+
+
+def _now() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _empty_state(cycle_id: str) -> dict[str, Any]:
+    """The v1 shape, complete. Every required key is present from init."""
+    now = _now()
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "cycle_id": cycle_id,
+        "status": "IN_PROGRESS",
+        "started_at": now,
+        "ended_at": None,
+        "duration_review_min": None,
+        "duration_cycle_min": None,
+        "cadence": {
+            "trigger": {"kind": "version_bumps", "every": CADENCE_DEFAULT_EVERY, "note": ""},
+            "boundary": {"ref": None, "at": None, "pattern": CADENCE_PATTERN, "accepted_since": 0},
+            "fires": False,
+            "evaluated_at": now,
+        },
+        "corpus": {"hash": None, "pack": None, "pack_status": "absent"},
+        "lenses": {
+            lens: {"status": "PENDING", "report_path": None, "sha256": None, "verdict": None,
+                   "receipt": None, "fallback": None, "recorded_at": None, "reason": None}
+            for lens in CATALOG_LENSES
+        },
+        "waivers": [],
+        "proposals": [],
+        "codification_plan": [],
+        # A cycle is FROZEN once its lifecycle is terminal: its inputs were read
+        # at a known instant and a later read of a LIVE mutable channel (a
+        # ledger, a proposals dir) would answer a different question than the
+        # one the cycle closed on. `inputs_snapshot` records the digests taken
+        # at freeze time, so a resumed reader can say WHAT it read and WHEN
+        # instead of silently re-reading whatever is on disk now.
+        "frozen_at": None,
+        "inputs_snapshot": None,
+        # The step-0 recovery log: each `step0 --record` appends where the cycle
+        # stood at that instant. It is EVIDENCE rather than a convenience —
+        # a resumed session can prove it recovered from state alone, instead of
+        # asserting it did.
+        "step0_log": [],
+        "updated_at": now,
+    }
+
+
+def normalize_state(state: dict[str, Any], cycle_id: str) -> dict[str, Any]:
+    """Read ANY state file into the v1 shape.
+
+    This is the frozen legacy reader.  It NEVER rewrites history on disk: a
+    donor cycle is migrated by a caller that decides to save, and a cycle read
+    only for its status is left byte-for-byte alone.
+
+    Three donor shapes are reconciled here, all measured on the donor's own
+    tree: a sparse `lenses` map (12 of 17 files carry the key at all, and the
+    live cycle carries `{}`); `waivers` as a dict rather than a log; and free
+    text in `status`.
+    """
+    if not state:
+        return {}
+    out = _empty_state(state.get("cycle_id") or cycle_id)
+    for key, value in state.items():
+        if key in ("schema_version", "lenses", "waivers", "cadence", "corpus"):
+            continue
+        out[key] = value
+
+    # status: the donor's terminal SYNONYM is mapped, so a cycle it closed as
+    # `COMPLETE` reads as closed here instead of as an unknown state.  Only the
+    # named synonym is mapped; anything else is carried in as-is and REPORTED by
+    # `migrate` as unmapped, because inventing a mapping for a value whose
+    # meaning was never measured is how a schema stops describing its data.
+    if out.get("status") in TERMINAL_SYNONYMS:
+        out["status"] = TERMINAL_SYNONYMS[out["status"]]
+
+    # lenses: normalize each entry, and materialize every catalog lens.
+    raw_lenses = state.get("lenses") or {}
+    if isinstance(raw_lenses, dict):
+        for lens in CATALOG_LENSES:
+            entry = dict(out["lenses"][lens])
+            incoming = raw_lenses.get(lens)
+            if isinstance(incoming, dict):
+                # The KEY RENAME is applied BEFORE the filter, because the filter keeps only
+                # keys the template has and `path` is not one of them — so an un-renamed entry
+                # loses its report path silently, which is how eleven donor lenses arrived
+                # with no report at all.
+                incoming = {LENS_KEY_SYNONYMS.get(k, k): v for k, v in incoming.items()}
+                entry.update({k: v for k, v in incoming.items() if k in entry})
+                if entry.get("status") is None:
+                    entry["status"] = "PENDING"
+                elif entry["status"] in TERMINAL_SYNONYMS:
+                    entry["status"] = TERMINAL_SYNONYMS[entry["status"]]
+            out["lenses"][lens] = entry
+
+    # waivers: a DICT (engine shape) becomes a LOG (v1 shape).
+    raw_waivers = state.get("waivers")
+    if isinstance(raw_waivers, dict):
+        for lens, rec in raw_waivers.items():
+            if isinstance(rec, dict):
+                out["waivers"].append({
+                    "lens": lens,
+                    "reason": rec.get("reason", ""),
+                    "by": rec.get("by"),
+                    "waived_at": rec.get("waived_at", out["started_at"]),
+                })
+    elif isinstance(raw_waivers, list):
+        out["waivers"] = raw_waivers
+
+    # cadence: prose (donor) is NOT parsed into fields; it is preserved as the
+    # trigger note and the boundary is left unevaluated until `cadence` runs.
+    raw_cadence = state.get("cadence")
+    if isinstance(raw_cadence, dict):
+        out["cadence"].update(raw_cadence)
+    elif isinstance(raw_cadence, str) and raw_cadence:
+        out["cadence"]["trigger"]["note"] = raw_cadence
+
+    # corpus: the donor's flat `corpus_hash` folds into the corpus object.
+    if state.get("corpus_hash") and not isinstance(state.get("corpus"), dict):
+        out["corpus"]["hash"] = state["corpus_hash"]
+        out["corpus"]["pack_status"] = "present" if state.get("corpus_hash") else "absent"
+        out.pop("corpus_hash", None)
+    return out
+
+
+def _ledger_text(row: dict[str, Any]) -> str:
+    for key in ("note", "detail", "text", "message", "subject", "what"):
+        value = row.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _row_kind(row: dict[str, Any]) -> str:
+    """The row's kind, under either ledger vocabulary.
+
+    The template's ledger column is `event` (`n/ts/event/actor/subject/detail`);
+    the donor's is `kind`.  ONE predicate serves both, so a cadence read does
+    not depend on which vocabulary an adopter's ledger happens to carry.
+    """
+    for key in ("event", "kind"):
+        value = row.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _row_ts(row: dict[str, Any]) -> Any:
+    """The row's timestamp, under either ledger vocabulary.
+
+    The template's column is `ts`; the donor's is `t`.  Reading only one makes
+    the other's boundary `at` silently None — a field loss that looks like an
+    absent timestamp rather than a vocabulary mismatch.
+    """
+    for key in ("ts", "t"):
+        value = row.get(key)
+        if value:
+            return value
+    return None
+
+
+def _ledger_rows(ledger_path: str) -> list[dict[str, Any]]:
+    """Read a ledger's rows, in file order, from either shipped format.
+
+    TWO formats are in service, and a reader that silently returns [] for the
+    one it does not recognise reports a boundary of `None` and a count of 0 —
+    which is indistinguishable from a genuine `0/5 WAIT`.  So:
+
+    - JSONL, one object per line — the template's `evidence/ledger.jsonl`;
+    - a single JSON OBJECT carrying an `events` array — the donor's
+      `workers-ledger.json`.
+
+    File order IS append order in both, which is what makes "the newest row"
+    and "the rows after it" well defined without reading a clock.
+    """
+    path = Path(ledger_path)
+    if not path.is_file():
+        return []
+
+    text = path.read_text(encoding="utf-8", errors="replace")
+    stripped = text.lstrip()
+    if stripped.startswith("{"):
+        # Could be a single JSON object (donor) or JSONL whose first line is one.
+        try:
+            obj = json.loads(text)
+        except json.JSONDecodeError:
+            obj = None
+        if isinstance(obj, dict):
+            events = obj.get("events")
+            if isinstance(events, list):
+                return [r for r in events if isinstance(r, dict)]
+
+    rows: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def cadence_stamp(ledger_path: str, every: int = CADENCE_DEFAULT_EVERY,
+                  pattern: str = CADENCE_PATTERN,
+                  bump_event: str = CADENCE_BUMP_EVENT) -> dict[str, Any]:
+    """Compute the cadence boundary from a ledger JSONL.
+
+    TWO predicates, and they are not the same one:
+
+    - the BOUNDARY is the NEWEST row whose text ANCHORS on `pattern` — the last
+      cycle-close stamp;
+    - the COUNT is the number of `bump_event` rows AFTER that boundary — the
+      version bumps that have landed since the last cycle closed.
+
+    `fires` is `count >= every`.  Counting anchored rows instead is the
+    plausible misreading this docstring exists to prevent: the close stamp is
+    itself anchored, so it would be counted as a bump.
+
+    A row's kind is read from `event` (the template ledger's column), then
+    `kind` (the donor's), so one predicate serves both vocabularies.
+
+    An unreadable or absent ledger is a NAMED state, never a silent zero:
+    `fires` stays False and `ref` stays None, and the caller reports which.
+    """
+    rows = _ledger_rows(ledger_path)
+
+    anchored = [(i, r) for i, r in enumerate(rows) if re.match(pattern, _ledger_text(r))]
+    if anchored:
+        index, row = anchored[-1]
+        boundary_ref = f"n={row.get('n')}" if row.get("n") is not None else f"line={index + 1}"
+        boundary_at = _row_ts(row)
+        # The COUNT is over bump rows, not over anchored rows — see the note on
+        # CADENCE_BUMP_EVENT.  Rows BEFORE the boundary are excluded by index.
+        accepted_since = sum(
+            1 for r in rows[index + 1:] if _row_kind(r) == bump_event
+        )
+    else:
+        boundary_ref, boundary_at, accepted_since = None, None, 0
+
+    return {
+        "trigger": {"kind": "version_bumps", "every": every, "note": "", "counts": bump_event},
+        "boundary": {
+            "ref": boundary_ref,
+            "at": boundary_at,
+            "pattern": pattern,
+            "accepted_since": accepted_since,
+        },
+        "fires": accepted_since >= every,
+        "evaluated_at": _now(),
+    }
+
+
 def get_cycle_dir(cycle_id: str) -> Path:
     return REPO_ROOT / "reviews" / cycle_id
 
@@ -195,14 +793,190 @@ def load_state(cycle_id: str) -> dict[str, Any]:
         return json.load(f)
 
 
-def save_state(cycle_id: str, state: dict[str, Any]) -> None:
+def read_state(cycle_id: str) -> dict[str, Any]:
+    """The state AS THE v1 CONTRACT: normalized in memory, never on disk."""
+    return normalize_state(load_state(cycle_id), cycle_id)
+
+
+def save_state(cycle_id: str, state: dict[str, Any], migrate: bool = False) -> int:
+    """Write the v1 shape.
+
+    Refuses (rc=3) to overwrite a state file that predates the schema unless
+    the caller passes `migrate=True`, because historical evidence is migrated
+    by an explicit act that leaves a pre-image, never as a side effect of a
+    routine write.
+    """
     cycle_dir = get_cycle_dir(cycle_id)
     cycle_dir.mkdir(parents=True, exist_ok=True)
-    state["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     state_file = cycle_dir / "state.json"
+
+    existing = load_state(cycle_id)
+    if existing and "schema_version" not in existing and not migrate:
+        print(
+            f"REFUSED: '{state_file}' predates schema v{SCHEMA_VERSION}. "
+            f"Run `review.py migrate {cycle_id}` - it writes a pre-image first.",
+            file=sys.stderr,
+        )
+        return 3
+
+    state["schema_version"] = SCHEMA_VERSION
+    state["updated_at"] = _now()
     with open(state_file, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
+        f.write("\n")
+    return 0
 
+
+def _stream_sha256(path: Path) -> str:
+    """Digest a file in CONSTANT memory. A whole-file read() is banned here.
+
+    The memory law on this box is a cgroup decision, not a host one, and every
+    tool child adds to that cgroup: a 1 GB read to compute a digest is exactly
+    the fat child the rule exists to prevent.
+    """
+    hasher = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+def is_frozen(state: dict[str, Any]) -> bool:
+    """A cycle is FROZEN when its lifecycle is terminal, or when frozen_at is set.
+
+    Terminal status IS the freeze, not a separate switch: a closed cycle's
+    inputs became historical the moment it closed, so a design that required a
+    second command to freeze it would leave open exactly the window this guard
+    exists to shut.
+    """
+    if not state:
+        return False
+    return bool(state.get("frozen_at")) or state.get("status") in ("COMPLETED", "ABANDONED")
+
+def snapshot_inputs(cycle_dir: Path) -> dict[str, Any]:
+    """Record WHAT the cycle read and WHEN: one digest per declared channel.
+
+    Two channels are named because they are the two the engine can read: the
+    `proposals/` directory, which is authoritative and always current, and an
+    OPTIONAL ledger, which must be declared before it is read at all.
+    """
+    declaration = _intake_declaration(cycle_dir)
+    candidates: list[tuple[str, str, Path]] = [("dir", "proposals", cycle_dir / "proposals")]
+    declared_ledger = declaration.get("ledger")
+    if declared_ledger:
+        candidates.append(("ledger", str(declared_ledger), Path(str(declared_ledger))))
+
+    channels: list[dict[str, Any]] = []
+    for kind, ref, path in candidates:
+        entry: dict[str, Any] = {"kind": kind, "ref": ref, "exists": path.exists()}
+        if path.is_file():
+            entry["sha256"] = _stream_sha256(path)
+            entry["bytes"] = path.stat().st_size
+        elif path.is_dir():
+            files = sorted(p for p in path.rglob("*") if p.is_file())
+            hasher = hashlib.sha256()
+            for item in files:
+                hasher.update(item.relative_to(path).as_posix().encode())
+                hasher.update(_stream_sha256(item).encode())
+            entry["files"] = len(files)
+            entry["sha256"] = hasher.hexdigest()
+        channels.append(entry)
+    return {"taken_at": _now(), "channels": channels}
+
+def refuse_live_read(state: dict[str, Any], cycle_id: str, channel: str,
+                     live: bool) -> int | None:
+    """Gate a LIVE-sourced read against a FROZEN cycle.
+
+    Returns None when the read may proceed, else the exit code and the refusal.
+    Not a lock — a named state: `--live` is the explicit way to say "I know this
+    cycle is closed and I want today's bytes anyway", and the read then says so
+    on stdout so the answer can never be mistaken for the frozen one.
+    """
+    if not is_frozen(state):
+        return None
+    frozen_at = state.get("frozen_at") or state.get("ended_at") or state.get("status")
+    if live:
+        print(
+            f"WARNING: cycle '{cycle_id}' is FROZEN at {frozen_at} and {channel} was "
+            f"read with --live. These bytes are TODAY's, not the cycle's: the frozen "
+            f"snapshot is inputs_snapshot in state.json.",
+            file=sys.stderr,
+        )
+        return None
+    print(
+        f"REFUSED: cycle '{cycle_id}' is FROZEN at {frozen_at}; {channel} would read live "
+        f"mutable input the cycle did not close on. Re-run with --live to read today's bytes "
+        f"deliberately, or read the frozen snapshot in state.json.",
+        file=sys.stderr,
+    )
+    return 2
+
+def cmd_step0(cycle_id: str, record: bool = False) -> int:
+    """The step-0 recovery point: where a resumed reader stands, from state ALONE.
+
+    The module docstring has claimed since promotion that state.json IS the
+    step-0 recovery point. A claim in a docstring is not a mechanism: a
+    compacted session cannot run a paragraph. This is the claim as a COMMAND,
+    and it reads state.json and nothing else — no ledger, no proposals dir, no
+    live channel — so it answers the same way on a resumed run as on the first.
+
+    `--record` appends the reading to step0_log, which is what makes the
+    recovery DURABLE rather than merely printed.
+    """
+    state = read_state(cycle_id)
+    if not state:
+        print(f"Error: Cycle '{cycle_id}' not found.", file=sys.stderr)
+        return 2
+
+    lenses = state.get("lenses", {})
+    completed = [l for l in CATALOG_LENSES if (lenses.get(l) or {}).get("status") == "COMPLETED"]
+    waived = [l for l in CATALOG_LENSES if (lenses.get(l) or {}).get("status") == "WAIVED"]
+    pending = [l for l in CATALOG_LENSES
+               if (lenses.get(l) or {}).get("status", "PENDING") not in ("COMPLETED", "WAIVED")]
+    frozen = is_frozen(state)
+
+    if frozen:
+        next_action = (
+            "cycle is FROZEN (terminal): report the frozen snapshot. Do NOT re-read a live "
+            "ledger or proposals dir — pass --live only to say you mean today's bytes."
+        )
+    elif pending:
+        next_action = f"brief and record lens {pending[0]} (pending: {','.join(pending)})"
+    elif not state.get("ended_at"):
+        next_action = f"verify, then close (status={state.get('status')})"
+    else:
+        next_action = "nothing owed"
+
+    print(f"=== Step 0 recovery: {cycle_id} ===")
+    frozen_note = f" (frozen_at {state.get('frozen_at')})" if state.get("frozen_at") else ""
+    print(f"status      : {state.get('status')}  frozen={'yes' if frozen else 'no'}{frozen_note}")
+    print(f"started_at  : {state.get('started_at')}   ended_at: {state.get('ended_at')}")
+    print(f"census      : {len(completed)} completed | {len(waived)} waived | "
+          f"{len(pending)} pending (of {len(CATALOG_LENSES)})")
+    print(f"proposals   : {len(state.get('proposals') or [])} receipt(s)")
+    snapshot = state.get("inputs_snapshot") or {}
+    if snapshot:
+        print(f"inputs      : frozen snapshot taken {snapshot.get('taken_at')}")
+        for channel in snapshot.get("channels") or []:
+            print(f"  [{channel.get('kind')}] {channel.get('ref')} "
+                  f"exists={channel.get('exists')} sha256={str(channel.get('sha256'))[:16]}")
+    print(f"next action : {next_action}")
+
+    if record:
+        state.setdefault("step0_log", []).append({
+            "at": _now(),
+            "status": state.get("status"),
+            "frozen": frozen,
+            "completed": len(completed),
+            "waived": len(waived),
+            "pending": len(pending),
+            "pending_lenses": pending,
+            "next_action": next_action,
+        })
+        rc = save_state(cycle_id, state)
+        if rc != 0:
+            return rc
+        print(f"recorded step-0 reading #{len(state['step0_log'])} in {cycle_id}/state.json")
+    return 0
 
 def cmd_init(cycle_id: str) -> int:
     cycle_dir = get_cycle_dir(cycle_id)
@@ -214,18 +988,13 @@ def cmd_init(cycle_id: str) -> int:
         print(f"Cycle '{cycle_id}' already initialized and IN_PROGRESS.")
         return 0
 
-    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    state = {
-        "cycle_id": cycle_id,
-        "started_at": now,
-        "status": "IN_PROGRESS",
-        "lenses": {lens: {"status": "PENDING", "report_path": None, "sha256": None} for lens in CATALOG_LENSES},
-        "waivers": {},
-        "codification_plan": [],
-        "updated_at": now,
-    }
-    save_state(cycle_id, state)
-    print(f"Initialized review cycle '{cycle_id}' with {len(CATALOG_LENSES)} catalog lenses.")
+    rc = save_state(cycle_id, _empty_state(cycle_id))
+    if rc != 0:
+        return rc
+    print(
+        f"Initialized review cycle '{cycle_id}' with {len(CATALOG_LENSES)} "
+        f"catalog lenses (schema v{SCHEMA_VERSION})."
+    )
     return 0
 
 
@@ -315,30 +1084,37 @@ def cmd_record(cycle_id: str, lens: str, content_or_path: str) -> int:
     hasher.update(report_file.read_bytes())
     digest = hasher.hexdigest()
 
-    # Append to index log
-    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    index_file = cycle_dir / "review-index.log"
+    # Append to index log — the receipt.  The FULL path is written, never a
+    # bare filename: a receipt that cannot be re-resolved from the line is not
+    # a receipt.  The line format is the donor's, `ts|lens|path|sha256|bytes`.
+    now = _now()
+    index_file = reports_dir / "review-index.log"
     with open(index_file, "a", encoding="utf-8") as f:
-        f.write(f"{now}|{lens}|{report_file.name}|{digest}|{len(body)}\n")
+        f.write(
+            f"{now}|{lens}|{report_file.relative_to(REPO_ROOT)}|{digest}|{len(body)}\n"
+        )
 
     # Update state
-    state = load_state(cycle_id)
+    state = read_state(cycle_id)
     if not state:
-        state = {"cycle_id": cycle_id, "lenses": {}, "waivers": {}}
-    if "lenses" not in state:
-        state["lenses"] = {}
-    state["lenses"][lens] = {
+        state = _empty_state(cycle_id)
+    entry = dict(state["lenses"].get(lens) or {})
+    entry.update({
         "status": "COMPLETED",
         "report_path": str(report_file.relative_to(REPO_ROOT)),
         "sha256": digest,
+        "receipt": "verified",
         "recorded_at": now,
-    }
-    save_state(cycle_id, state)
+    })
+    state["lenses"][lens] = entry
+    rc = save_state(cycle_id, state)
+    if rc != 0:
+        return rc
     print(f"Persisted report for Lens {lens}: {digest[:16]}... ({len(body)} bytes)")
     return 0
 
 
-def cmd_waive(cycle_id: str, lens: str, reason: str) -> int:
+def cmd_waive(cycle_id: str, lens: str, reason: str, by: str | None = None) -> int:
     lens = lens.upper()
     if lens not in CATALOG_LENSES:
         print(f"Error: Lens '{lens}' not in catalog {CATALOG_LENSES}", file=sys.stderr)
@@ -347,26 +1123,35 @@ def cmd_waive(cycle_id: str, lens: str, reason: str) -> int:
         print("Error: Waiver reason cannot be empty.", file=sys.stderr)
         return 2
 
-    state = load_state(cycle_id)
+    state = read_state(cycle_id)
     if not state:
         print(f"Error: Cycle '{cycle_id}' not found.", file=sys.stderr)
         return 2
 
-    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    state.setdefault("waivers", {})[lens] = {"reason": reason, "waived_at": now}
-    state.setdefault("lenses", {})[lens] = {"status": "WAIVED", "reason": reason}
-    save_state(cycle_id, state)
-
-    waivers_file = get_cycle_dir(cycle_id) / "waivers.log"
-    with open(waivers_file, "a", encoding="utf-8") as f:
-        f.write(f"{now}|{lens}|{reason}\n")
+    now = _now()
+    # ONE home: the log array in state.json.  The donor's separate
+    # `waivers.log` is not carried — two homes for one thing is the defect
+    # promotion exists to collapse, and the donor's own live cycle
+    # (20260927-c25) carries no such file at all.
+    state.setdefault("waivers", []).append({
+        "lens": lens,
+        "reason": reason,
+        "by": by,
+        "waived_at": now,
+    })
+    entry = dict(state["lenses"].get(lens) or {})
+    entry.update({"status": "WAIVED", "reason": reason, "recorded_at": now})
+    state["lenses"][lens] = entry
+    rc = save_state(cycle_id, state)
+    if rc != 0:
+        return rc
 
     print(f"Waived Lens {lens}: {reason}")
     return 0
 
 
 def cmd_status(cycle_id: str) -> int:
-    state = load_state(cycle_id)
+    state = read_state(cycle_id)
     if not state:
         print(f"Error: Cycle '{cycle_id}' not found.", file=sys.stderr)
         return 2
@@ -382,7 +1167,17 @@ def cmd_status(cycle_id: str) -> int:
         status = info.get("status", "PENDING")
         if status == "COMPLETED":
             completed += 1
-            print(f"  [{status}] Lens {lens} -> {info.get('report_path')} ({info.get('sha256', '')[:8]})")
+            # A MIGRATED record carries the report PATH and no digest: the donor
+            # never recorded one, and a migration that invented a digest would be
+            # asserting a verification nobody performed.  Rendered as `unrecorded`
+            # rather than crashed on, so a donor cycle reads end-to-end.
+            digest = info.get("sha256")
+            shown = digest[:8] if isinstance(digest, str) and digest else "unrecorded"
+            # The report path is resolved across BOTH key names, because the donor renamed
+            # it in eleven of its own entries and a record read without migration must not
+            # report a launched lens as having no report.
+            path = info.get("report_path") or info.get("path")
+            print(f"  [{status}] Lens {lens} -> {path} ({shown})")
         elif status == "WAIVED":
             waived += 1
             print(f"  [{status}] Lens {lens} -> {info.get('reason')}")
@@ -390,12 +1185,20 @@ def cmd_status(cycle_id: str) -> int:
             pending += 1
             print(f"  [{status}] Lens {lens}")
 
+    cadence = state.get("cadence") or {}
+    boundary = cadence.get("boundary") or {}
+    every = (cadence.get("trigger") or {}).get("every", CADENCE_DEFAULT_EVERY)
+    print(
+        f"\nCadence: {boundary.get('accepted_since', 0)}/{every} "
+        f"{'FIRE' if cadence.get('fires') else 'WAIT'} "
+        f"(boundary {boundary.get('ref')}, evaluated {cadence.get('evaluated_at')})"
+    )
     print(f"\nSummary: {completed} Completed | {waived} Waived | {pending} Pending (Total: {len(CATALOG_LENSES)})")
     return 0 if pending == 0 else 1
 
 
 def cmd_verify(cycle_id: str) -> int:
-    state = load_state(cycle_id)
+    state = read_state(cycle_id)
     if not state:
         print(f"FAIL: Cycle '{cycle_id}' state.json missing.", file=sys.stderr)
         return 1
@@ -403,14 +1206,19 @@ def cmd_verify(cycle_id: str) -> int:
     lenses = state.get("lenses", {})
     missing: list[str] = []
     corrupted: list[str] = []
+    unverified: list[str] = []
 
     for lens in CATALOG_LENSES:
         info = lenses.get(lens, {})
         status = info.get("status", "PENDING")
         if status == "WAIVED":
+            # A waiver without a reason is refused at write time; one that
+            # slipped in without a reason is a finding here, never a pass.
+            if not (info.get("reason") or "").strip():
+                missing.append(f"{lens} (waived with no reason)")
             continue
         if status != "COMPLETED":
-            missing.append(lens)
+            missing.append(f"{lens} ({status})")
             continue
 
         # Verify physical file existence and checksum
@@ -428,13 +1236,19 @@ def cmd_verify(cycle_id: str) -> int:
         actual_sha = hasher.hexdigest()
         if actual_sha != info.get("sha256"):
             corrupted.append(f"{lens} (checksum mismatch)")
+        # A report whose index line is absent is UNRECEIPTED: a distinct state
+        # from missing, and never a silent pass.
+        if info.get("receipt") != "verified":
+            unverified.append(lens)
 
-    if missing or corrupted:
+    if missing or corrupted or unverified:
         print(f"FAIL: Cycle '{cycle_id}' census check failed.")
         if missing:
             print(f"  Missing or incomplete lenses: {', '.join(missing)}")
         if corrupted:
             print(f"  Checksum corrupted lenses: {', '.join(corrupted)}")
+        if unverified:
+            print(f"  UNRECEIPTED lenses (no index line): {', '.join(unverified)}")
         return 1
 
     print(f"PASS: Cycle '{cycle_id}' census verified clean across all {len(CATALOG_LENSES)} lenses.")
@@ -442,7 +1256,7 @@ def cmd_verify(cycle_id: str) -> int:
 
 
 def cmd_compile(cycle_id: str) -> int:
-    state = load_state(cycle_id)
+    state = read_state(cycle_id)
     if not state:
         print(f"Error: Cycle '{cycle_id}' not found.", file=sys.stderr)
         return 2
@@ -489,6 +1303,431 @@ def cmd_compile(cycle_id: str) -> int:
     return 0
 
 
+def _parse_ts(value: Any) -> datetime.datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed
+
+
+def cmd_schema() -> int:
+    """Emit the state schema.
+
+    The shipped artifact `docs/review-cycle.schema.json` (and its
+    `TEMPLATE/docs/` twin) is generated from THIS command, so the contract has
+    one authoring home.  Regenerate with:
+        python3 tools/review.py schema > docs/review-cycle.schema.json
+        cp docs/review-cycle.schema.json TEMPLATE/docs/review-cycle.schema.json
+    """
+    sys.stdout.write(json.dumps(STATE_SCHEMA, indent=2) + "\n")
+    return 0
+
+
+def cmd_cadence(ledger_path: str, every: int, cycle_id: str | None,
+                json_out: bool, live: bool = False) -> int:
+    """Compute the cadence boundary stamp, and optionally record it.
+
+    The boundary is an OBSERVABLE artifact, not prose: a member's cadence state
+    is the ledger's own anchored notes, re-derivable by anyone holding the
+    ledger.  Recording it into a cycle is `--write <cycle_id>` — and a ledger is
+    LIVE mutable input, so writing one into a FROZEN cycle is refused unless
+    `--live` says the reader means today's ledger.
+    """
+    stamp = cadence_stamp(ledger_path, every)
+    if cycle_id:
+        state = read_state(cycle_id)
+        if not state:
+            print(f"Error: Cycle '{cycle_id}' not found.", file=sys.stderr)
+            return 2
+        refused = refuse_live_read(state, cycle_id, "cadence --write", live)
+        if refused is not None:
+            return refused
+        state["cadence"] = stamp
+        rc = save_state(cycle_id, state)
+        if rc != 0:
+            return rc
+
+    if json_out:
+        sys.stdout.write(json.dumps(stamp, indent=2) + "\n")
+        return 0
+    boundary = stamp["boundary"]
+    print(
+        f"cadence: {boundary['accepted_since']}/{stamp['trigger']['every']} "
+        f"{'FIRE' if stamp['fires'] else 'WAIT'} "
+        f"(boundary {boundary['ref']} at {boundary['at']}, "
+        f"pattern {boundary['pattern']}, ledger {ledger_path})"
+    )
+    return 0
+
+
+def cmd_close(cycle_id: str, status: str, stamp: bool,
+              ledger_path: str | None) -> int:
+    """Close the cycle: an EXPLICIT terminal state carrying both durations.
+
+    `ended_at` is set here and never inferred from `updated_at`, because a
+    reader that cannot tell "finished" from "untouched" is the defect the
+    donor's own schema table records.
+    """
+    if status not in LIFECYCLE_STATES:
+        print(f"Error: status must be one of {LIFECYCLE_STATES}", file=sys.stderr)
+        return 2
+    state = read_state(cycle_id)
+    if not state:
+        print(f"Error: Cycle '{cycle_id}' not found.", file=sys.stderr)
+        return 2
+    if state.get("status") != "IN_PROGRESS":
+        print(f"Error: Cycle '{cycle_id}' is already {state.get('status')}.", file=sys.stderr)
+        return 2
+
+    started = _parse_ts(state.get("started_at"))
+    state["status"] = status
+    state["ended_at"] = _now()
+    if started:
+        span = (datetime.datetime.now(datetime.timezone.utc) - started).total_seconds() / 60.0
+        state["duration_cycle_min"] = round(span, 1)
+
+    # duration_review_min is review start to the LAST report persisted — a
+    # different number from the cycle span, never conflated with it.
+    recorded = [
+        _parse_ts((state["lenses"].get(lens) or {}).get("recorded_at"))
+        for lens in CATALOG_LENSES
+    ]
+    recorded = [t for t in recorded if t is not None]
+    if recorded and started:
+        review_span = (max(recorded) - started).total_seconds() / 60.0
+        state["duration_review_min"] = round(review_span, 1)
+
+    if stamp and ledger_path:
+        every = (state["cadence"].get("trigger") or {}).get("every", CADENCE_DEFAULT_EVERY)
+        state["cadence"] = cadence_stamp(ledger_path, every)
+
+    # Closing FREEZES: the inputs become historical at this instant, and the
+    # snapshot records what they were so a later reader can tell the cycle's
+    # own bytes from today's. Taken here rather than in a separate command
+    # because the window between close and freeze is the window that matters.
+    state["frozen_at"] = _now()
+    state["inputs_snapshot"] = snapshot_inputs(get_cycle_dir(cycle_id))
+
+    rc = save_state(cycle_id, state)
+    if rc != 0:
+        return rc
+    print(
+        f"Closed cycle '{cycle_id}' as {status}; "
+        f"duration_cycle_min={state['duration_cycle_min']}, "
+        f"duration_review_min={state['duration_review_min']}, "
+        f"frozen_at={state['frozen_at']}, "
+        f"inputs snapshotted={len((state['inputs_snapshot'] or {}).get('channels') or [])} channel(s)"
+    )
+    return 0
+
+
+def cmd_migrate(cycle_id: str, dry_run: bool) -> int:
+    """Migrate a pre-v1 state file to v1, leaving a pre-image behind.
+
+    This is the documented adapter, and it is an EXPLICIT act: a routine write
+    refuses a legacy file (rc=3) rather than migrating it by accident, because
+    historical evidence is never rewritten in place as a side effect.
+    """
+    raw = load_state(cycle_id)
+    if not raw:
+        print(f"Error: Cycle '{cycle_id}' has no state.json to migrate.", file=sys.stderr)
+        return 2
+    if "schema_version" in raw:
+        print(f"Cycle '{cycle_id}' is already schema v{raw['schema_version']}; nothing to migrate.")
+        return 0
+
+    migrated = normalize_state(raw, cycle_id)
+    dropped = sorted(set(raw) - set(migrated))
+    print(
+        f"Migrate '{cycle_id}': {len(raw)} keys read -> {len(migrated)} written, "
+        f"schema v{SCHEMA_VERSION}"
+    )
+    for key in sorted(raw):
+        print(f"  {key:24} {'kept' if key in migrated else 'DROPPED'}")
+    if dropped:
+        print(f"  dropped: {', '.join(dropped)}")
+
+    # TERMINAL VOCABULARY, reported rather than silently absorbed.  The donor's
+    # `status` carries six distinct values and its lens entries four, so a
+    # migration that maps the known synonym and says nothing about the rest
+    # leaves a reader unable to tell "mapped" from "carried in unvalidated".
+    raw_status = raw.get("status")
+    if raw_status is not None and raw_status != migrated.get("status"):
+        print(f"  status mapped: {raw_status!r} -> {migrated['status']!r}")
+    unmapped: list[str] = []
+    if migrated.get("status") not in LIFECYCLE_STATES:
+        unmapped.append(f"status={migrated.get('status')!r}")
+    seen_lens_values: dict[str, str] = {}
+    for lens, entry in ((raw.get("lenses") or {}) if isinstance(raw.get("lenses"), dict) else {}).items():
+        if isinstance(entry, dict) and entry.get("status") is not None:
+            seen_lens_values[str(entry["status"])] = lens
+    for value in sorted(seen_lens_values):
+        if value not in LENS_STATES and value not in TERMINAL_SYNONYMS:
+            unmapped.append(f"lens status={value!r} (e.g. lens {seen_lens_values[value]})")
+    if unmapped:
+        print(f"  UNMAPPED (carried in, not valid here): {'; '.join(unmapped)}")
+
+    # LENS ENTRY KEYS, reported for the same reason the values are: the donor renames a key in
+    # some entries and carries keys the schema has no home for, and a migration that absorbed
+    # either in silence would leave a reader unable to tell what was kept from what was lost.
+    template_keys: set[str] = set()
+    for lens in CATALOG_LENSES:
+        e = (migrated.get("lenses") or {}).get(lens)
+        if isinstance(e, dict):
+            template_keys = set(e)
+            break
+    raw_lenses = raw.get("lenses") if isinstance(raw.get("lenses"), dict) else {}
+    renamed: dict[str, str] = {}
+    dropped_keys: dict[str, str] = {}
+    for lens, entry in raw_lenses.items():
+        if not isinstance(entry, dict):
+            continue
+        for k in entry:
+            if k in LENS_KEY_SYNONYMS:
+                renamed.setdefault(k, lens)
+            elif template_keys and k not in template_keys:
+                dropped_keys.setdefault(k, lens)
+    if renamed:
+        print("  lens keys mapped: " + "; ".join(
+            f"{k!r} -> {LENS_KEY_SYNONYMS[k]!r} (e.g. lens {v})" for k, v in sorted(renamed.items())))
+    if dropped_keys:
+        print("  lens keys DROPPED (no home in the schema): " + "; ".join(
+            f"{k!r} (e.g. lens {v})" for k, v in sorted(dropped_keys.items())))
+    if dry_run:
+        print("dry run: nothing written")
+        return 0
+
+    state_file = get_cycle_dir(cycle_id) / "state.json"
+    pre_image = state_file.with_name("state.json.pre-v1.bak")
+    if not pre_image.exists():
+        pre_image.write_bytes(state_file.read_bytes())
+        print(f"pre-image written: {pre_image}")
+    rc = save_state(cycle_id, migrated, migrate=True)
+    if rc != 0:
+        return rc
+    print(f"migrated: {state_file}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Duty-4 intake — the member-facing input leg
+# ---------------------------------------------------------------------------
+
+PROPOSAL_FORMAT = re.compile(
+    r"^(?P<op>ADD|CHANGE)\s+(?P<rule>.+?)\s+in\s+(?P<target>[^\s]+)\s+BECAUSE\s+(?P<evidence>.+)$",
+    re.DOTALL,
+)
+DATE_TOKEN = re.compile(r"\b(?:\d{4}-\d{2}-\d{2}|\d{2}\.\d{2}\.\d{4})\b")
+INTAKE_DECL_NAME = "intake.json"
+PROPOSAL_KIND_DEFAULT = "proposal"
+
+def _intake_declaration(cycle_dir: Path) -> dict[str, Any]:
+    """The member's declaration of where its input lands.
+
+    Absent is a STATE, not an error: a member with no ledger says so by not
+    declaring one, and the leg NAMES the absent channel rather than reading
+    nothing from it and calling that a clean zero.
+
+    A DECLARED channel the tree cannot honour is a REFUSAL, not an empty read.
+    That distinction is the whole point — the false-negative this leg exists to
+    prevent is a declared channel that silently yields nothing, which is
+    indistinguishable from a genuine "nobody submitted".
+    """
+    decl_file = cycle_dir / INTAKE_DECL_NAME
+    if not decl_file.is_file():
+        return {"declared": False, "ledger": None, "ledger_kind": PROPOSAL_KIND_DEFAULT,
+                "decl_file": None, "error": None}
+    try:
+        raw = json.loads(decl_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"declared": True, "ledger": None, "ledger_kind": PROPOSAL_KIND_DEFAULT,
+                "decl_file": str(decl_file), "error": str(exc)}
+    if not isinstance(raw, dict):
+        return {"declared": True, "ledger": None, "ledger_kind": PROPOSAL_KIND_DEFAULT,
+                "decl_file": str(decl_file), "error": "top level is not an object"}
+    ledger = raw.get("ledger")
+    kind = raw.get("ledger_kind")
+    return {
+        "declared": True,
+        "ledger": ledger if isinstance(ledger, str) and ledger.strip() else None,
+        "ledger_kind": kind if isinstance(kind, str) and kind.strip() else PROPOSAL_KIND_DEFAULT,
+        "decl_file": str(decl_file),
+        "error": None,
+    }
+
+def _parse_proposal(text: str) -> dict[str, Any]:
+    """Validate one proposal against the strict format, or say why it is INVALID.
+
+    `ADD|CHANGE <rule> in <file+section> BECAUSE <gap actually hit>` with a date
+    in the evidence. A malformed proposal is INVALID and REPORTED — never
+    skipped. A file quietly passed over reads exactly like one that was never
+    written, which is the same false-negative shape as an unread channel.
+    """
+    m = PROPOSAL_FORMAT.match(text.strip())
+    if not m:
+        return {"valid": False, "reason": "format"}
+    evidence = m.group("evidence").strip()
+    if not evidence:
+        return {"valid": False, "reason": "empty-evidence"}
+    return {
+        "valid": True,
+        "op": m.group("op"),
+        "rule": m.group("rule").strip(),
+        "target": m.group("target"),
+        "evidence": evidence,
+        "dated": bool(DATE_TOKEN.search(evidence)),
+    }
+
+def _proposal_rows_from_ledger(ledger_path: Path, kind: str) -> list[tuple[str, str]]:
+    """The ledger channel's proposal rows, as (id, text).
+
+    The KIND is declared, never assumed: the template's ledger vocabulary is
+    `event`, the donor's is `kind`, and a member may name its own. `_row_kind`
+    reads both, so one predicate serves every adopter.
+    """
+    out: list[tuple[str, str]] = []
+    for row in _ledger_rows(str(ledger_path)):
+        if _row_kind(row) != kind:
+            continue
+        text = _ledger_text(row)
+        if not text:
+            continue
+        ref = row.get("n") or row.get("id") or row.get("ts") or row.get("t") or "?"
+        out.append((str(ref), text))
+    return out
+
+def cmd_intake(cycle_id: str, record: bool = False, live: bool = False) -> int:
+    """Read the cycle's input channels and report a NAMED intake state.
+
+    TWO channels, and the difference between them is load-bearing:
+
+    - the `proposals/` DIRECTORY is authoritative and always current;
+    - a LEDGER is OPTIONAL and must be DECLARED. A member with no ledger is not
+      a member with no input, so an undeclared ledger is named ABSENT rather
+      than read as empty.
+
+    READ-ONLY over every factory-owned byte. The proposal files and the ledger
+    are the member's data, and this leg never writes them; the receipt index it
+    produces goes into the cycle STATE, which is the instrument's own.
+
+    FROZEN cycles are REFUSED here: both channels are LIVE and MUTABLE, so
+    re-reading one against a closed cycle answers a different question than the
+    one the cycle closed on. `--live` is the deliberate way to ask for today's
+    bytes, and it says so on stdout.
+
+    Exit: 0 COMPLETE · 1 EMPTY or INCOMPLETE (a named state, never a pass) ·
+          2 REFUSED (nothing declared, a channel the tree lacks, or a frozen cycle).
+    """
+    cycle_dir = get_cycle_dir(cycle_id)
+    if not cycle_dir.is_dir():
+        print(f"INTAKE REFUSED: cycle '{cycle_id}' has no directory at {cycle_dir}.",
+              file=sys.stderr)
+        return 2
+
+    refused = refuse_live_read(read_state(cycle_id), cycle_id, "intake", live)
+    if refused is not None:
+        return refused
+
+    decl = _intake_declaration(cycle_dir)
+    proposals_dir = cycle_dir / "proposals"
+
+    if decl["error"]:
+        print(f"INTAKE REFUSED: {INTAKE_DECL_NAME} is unreadable — {decl['error']}",
+              file=sys.stderr)
+        return 2
+    if not decl["declared"] and not proposals_dir.is_dir():
+        print(
+            "INTAKE REFUSED: no intake declarations — neither "
+            f"{proposals_dir} nor {cycle_dir / INTAKE_DECL_NAME} exists. "
+            "A member declares where its input lands; nothing declared is nothing to read.",
+            file=sys.stderr,
+        )
+        return 2
+
+    receipts: list[dict[str, Any]] = []
+    invalid: list[tuple[str, str]] = []
+    channels: list[str] = []
+
+    if proposals_dir.is_dir():
+        channels.append(f"dir:{proposals_dir} ({len(list(proposals_dir.glob('*.md')))} file(s))")
+        for path in sorted(proposals_dir.glob("*.md")):
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                invalid.append((path.name, f"unreadable: {exc}"))
+                continue
+            parsed = _parse_proposal(text)
+            if parsed["valid"]:
+                receipts.append({
+                    "id": path.stem, "source": "dir", "path": str(path),
+                    "recorded_at": _now(),
+                    "op": parsed["op"], "target": parsed["target"],
+                    "dated": parsed["dated"],
+                })
+            else:
+                invalid.append((path.name, parsed["reason"]))
+    else:
+        channels.append(f"dir:{proposals_dir} ABSENT (not present)")
+
+    if decl["ledger"]:
+        ledger_path = Path(decl["ledger"])
+        if not ledger_path.is_absolute():
+            ledger_path = REPO_ROOT / ledger_path
+        if not ledger_path.is_file():
+            print(
+                f"INTAKE REFUSED: {INTAKE_DECL_NAME} declares ledger "
+                f"'{decl['ledger']}' but no such file exists. A declared channel "
+                "the tree cannot honour is a refusal, not an empty read.",
+                file=sys.stderr,
+            )
+            return 2
+        rows = _proposal_rows_from_ledger(ledger_path, decl["ledger_kind"])
+        channels.append(f"ledger:{ledger_path} (kind={decl['ledger_kind']}, {len(rows)} row(s))")
+        for ref, text in rows:
+            parsed = _parse_proposal(text)
+            if parsed["valid"]:
+                receipts.append({
+                    "id": ref, "source": "ledger", "path": str(ledger_path),
+                    "recorded_at": _now(),
+                    "op": parsed["op"], "target": parsed["target"],
+                    "dated": parsed["dated"],
+                })
+            else:
+                invalid.append((f"ledger row {ref}", parsed["reason"]))
+    else:
+        channels.append("ledger ABSENT (not declared)")
+
+    for line in channels:
+        print(f"  channel {line}")
+    undated = [r["id"] for r in receipts if not r["dated"]]
+
+    if invalid:
+        for name, reason in invalid:
+            print(f"  INVALID {name}: {reason}", file=sys.stderr)
+        print(f"INTAKE INCOMPLETE: {len(receipts)} valid, {len(invalid)} invalid.")
+        rc = 1
+    elif not receipts:
+        print("INTAKE EMPTY: channels read, 0 proposals. Nothing submitted is a state, not a pass.")
+        rc = 1
+    else:
+        print(f"INTAKE COMPLETE: {len(receipts)} proposal(s).")
+        if undated:
+            print(f"  WARNING undated evidence: {', '.join(undated)}")
+        rc = 0
+
+    if record:
+        state = read_state(cycle_id)
+        state["proposals"] = receipts
+        state["status"] = state.get("status") or "IN_PROGRESS"
+        save_state(cycle_id, state)
+        print(f"  recorded {len(receipts)} receipt(s) in the cycle state")
+    return rc
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Multi-Lens Review Engine")
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
@@ -509,6 +1748,7 @@ def main() -> int:
     p_waive.add_argument("cycle_id", help="Cycle identifier")
     p_waive.add_argument("lens", help="Lens letter")
     p_waive.add_argument("--reason", required=True, help="Reason for waiver")
+    p_waive.add_argument("--by", default=None, help="Who took the waiver decision")
 
     p_status = subparsers.add_parser("status", help="Show cycle progress")
     p_status.add_argument("cycle_id", help="Cycle identifier")
@@ -519,6 +1759,52 @@ def main() -> int:
     p_compile = subparsers.add_parser("compile", help="Generate verdict template")
     p_compile.add_argument("cycle_id", help="Cycle identifier")
 
+    subparsers.add_parser(
+        "schema", help="Emit the state schema — the source of the shipped artifact"
+    )
+
+    p_cadence = subparsers.add_parser("cadence", help="Compute the cadence boundary stamp from a ledger")
+    p_cadence.add_argument("--ledger", required=True, help="Path to the ledger JSONL")
+    p_cadence.add_argument(
+        "--every", type=int, default=CADENCE_DEFAULT_EVERY,
+        help=f"Accepted version bumps required to fire (default {CADENCE_DEFAULT_EVERY})",
+    )
+    p_cadence.add_argument(
+        "--write", dest="write_cycle", default=None,
+        help="Record the stamp into this cycle's state",
+    )
+    p_cadence.add_argument("--json", action="store_true", help="Output the stamp as JSON")
+    p_cadence.add_argument("--live", action="store_true",
+                           help="Write today's ledger boundary into a FROZEN cycle, and say so")
+
+    p_close = subparsers.add_parser("close", help="Close a cycle with an explicit terminal state")
+    p_close.add_argument("cycle_id", help="Cycle identifier")
+    p_close.add_argument("--status", default="COMPLETED", choices=LIFECYCLE_STATES)
+    p_close.add_argument("--stamp", action="store_true", help="Recompute the cadence stamp at close")
+    p_close.add_argument("--ledger", default=None, help="Ledger JSONL; required with --stamp")
+
+    p_migrate = subparsers.add_parser(
+        "migrate", help="Migrate a pre-v1 state file, leaving a pre-image behind"
+    )
+    p_migrate.add_argument("cycle_id", help="Cycle identifier")
+    p_migrate.add_argument("--dry-run", action="store_true", help="Print the mapping, write nothing")
+
+    p_intake = subparsers.add_parser(
+        "intake", help="Read the cycle's input channels and report a named intake state"
+    )
+    p_intake.add_argument("cycle_id", help="Cycle identifier")
+    p_intake.add_argument("--record", action="store_true",
+                          help="Write the receipt index into the cycle state (read-only over member data)")
+    p_intake.add_argument("--live", action="store_true",
+                          help="Read today's bytes even on a FROZEN cycle, and say so")
+
+    p_step0 = subparsers.add_parser(
+        "step0", help="Recovery point: where a resumed reader stands, read from state alone"
+    )
+    p_step0.add_argument("cycle_id", help="Cycle identifier")
+    p_step0.add_argument("--record", action="store_true",
+                         help="Append the reading to step0_log (durable evidence)")
+
     args = parser.parse_args()
 
     if args.subcommand == "init":
@@ -528,13 +1814,25 @@ def main() -> int:
     elif args.subcommand == "record":
         return cmd_record(args.cycle_id, args.lens, args.content)
     elif args.subcommand == "waive":
-        return cmd_waive(args.cycle_id, args.lens, args.reason)
+        return cmd_waive(args.cycle_id, args.lens, args.reason, by=args.by)
     elif args.subcommand == "status":
         return cmd_status(args.cycle_id)
     elif args.subcommand == "verify":
         return cmd_verify(args.cycle_id)
     elif args.subcommand == "compile":
         return cmd_compile(args.cycle_id)
+    elif args.subcommand == "schema":
+        return cmd_schema()
+    elif args.subcommand == "cadence":
+        return cmd_cadence(args.ledger, args.every, args.write_cycle, args.json, args.live)
+    elif args.subcommand == "close":
+        return cmd_close(args.cycle_id, args.status, args.stamp, args.ledger)
+    elif args.subcommand == "migrate":
+        return cmd_migrate(args.cycle_id, args.dry_run)
+    elif args.subcommand == "intake":
+        return cmd_intake(args.cycle_id, args.record, args.live)
+    elif args.subcommand == "step0":
+        return cmd_step0(args.cycle_id, args.record)
     return 1
 
 
