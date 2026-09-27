@@ -1,0 +1,23 @@
+{
+  "_note": "Factory data read by tests/test_close_board_recorded.py. An exemption is a dated, attributed admission, never a convenience: it may only excuse a close row whose repair space is EMPTY, it names the ruling that sanctions it, and it is printed as an 'excused:' line on EVERY gate run — a visible debt rather than forgiveness. Key every entry by ROW IDENTITY (n + ts), never by a commit sha: the gate validates the live file, and a sha would pin a transport rather than the row. A malformed entry, or an entry matching no violation, is a gate ERROR rather than a silent pass. Expect this list to stay near-empty: the ordering rule now makes the token straightforward to write, so the condition that produced these entries no longer exists.",
+  "exemptions": [
+    {
+      "n": 54,
+      "ts": "2026-09-26T19:42:04Z",
+      "subject": "#50",
+      "event": "close",
+      "admission_ruled_by": "ai-antispam HQ 2026-09-27",
+      "reason": "Admission ruled by ai-antispam HQ 2026-09-27. The ordering requirement — close the board first, then write the row — was UNSTATED at write time. The rule as it stood required the two closes to land 'in the same pass' and never said which came first, so a closer who closed the board first would have observed CLOSED and written the token correctly. This author closed the board afterwards, observing OPEN at the moment of the write. The row is immutable and the ledger is append-only, so the repair space is empty. Not 'unsatisfiable' — under-specified.",
+      "empty_repair_space": "appended and committed at 19:42:04Z; the ledger is append-only with no --ts, so no retro row can carry this event's true time and restamping the intake leg would assert an acceptance that never happened"
+    },
+    {
+      "n": 59,
+      "ts": "2026-09-26T20:01:37Z",
+      "subject": "#46",
+      "event": "close",
+      "admission_ruled_by": "ai-antispam HQ 2026-09-27",
+      "reason": "Admission ruled by ai-antispam HQ 2026-09-27. The ordering requirement — close the board first, then write the row — was UNSTATED at write time. The rule as it stood required the two closes to land 'in the same pass' and never said which came first, so a closer who closed the board first would have observed CLOSED and written the token correctly. This author closed the board afterwards, observing OPEN at the moment of the write. The row is immutable and the ledger is append-only, so the repair space is empty. Not 'unsatisfiable' — under-specified.",
+      "empty_repair_space": "appended and committed at 20:01:37Z; the ledger is append-only with no --ts, so no retro row can carry this event's true time and restamping the intake leg would assert an acceptance that never happened"
+    }
+  ]
+}
