@@ -1,0 +1,4 @@
+{
+  "_note": "This factory declares NO sequence exemptions. The three inline entries our previous tools/ledger.py carried named #6 and #8, dated 2026-09-12, with the reason \"close written before the gate existed\" -- those are META-FACTORY\u0027s own pre-gate closes, inherited verbatim when this tool was forked at cd2a3f8. Our ledger carries zero #6 rows and zero #8 rows (measured 2026-09-27, 69 rows / 27 distinct subjects), so the entries excused nothing here and were dead weight from the fork. The kit moved this table out of the tool into factory data on 2026-09-25 precisely so a factory could not have its own sequence defects excused by another factory\u0027s history; migrating tools/ledger.py to the template basis retires the inherited entries rather than carrying them forward. Add an entry only against a real omission in THIS ledger, with the ruling that grants it named in `proof`.",
+  "exempt": []
+}

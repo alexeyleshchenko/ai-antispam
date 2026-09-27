@@ -414,6 +414,23 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     if (repo_root / "tests/test_patrol_host_state.py").is_file():
         gates_to_run.append([sys.executable, "tests/test_patrol_host_state.py"])
 
+    # tests/test_ledger_close_preflight.py is DELIBERATELY NOT registered here, and the reason is
+    # measured rather than a preference -- it is registered where it already runs.
+    #
+    # (1) CI RUNS IT. deploy.yml:69 is `uv run pytest --ignore=tests/integration -x`, which collects
+    #     its 7 test functions. Registering it here would run the same gate twice per audit.
+    # (2) THE WALL DOES NOT FIT IT. run_gate hardcodes timeout=30; this gate measured 24.35s wall
+    #     on an unloaded box (its own pytest time is 4.66s -- the rest is interpreter+plugin
+    #     startup under a cold cache). That is a 1.23x factor, not a margin, so it flakes under
+    #     load -- and flakes into the WORST shape: the except branch reports duration_sec 0.0 with
+    #     the exception in stderr, so a timeout is indistinguishable from an instant logic error.
+    # (3) It is pytest-MODE only (no __main__), so a bare-script registration would exit 0 having
+    #     executed ZERO checks -- a decorative green, the class this file's own gate 10 exists for.
+    #
+    # The fork's real gap is that this audit hardcodes its wall where the kit's reads
+    # tools/gate_budget.py + registry/gates.json (9 refs there, 0 here). Tracked as ai-antispam#64;
+    # porting the budget reader is what would let this gate be registered honestly.
+
     results = []
     for cmd in gates_to_run:
         results.append(run_gate(cmd, repo_root))

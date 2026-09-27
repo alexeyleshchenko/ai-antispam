@@ -27,8 +27,8 @@ daily pacemaker therefore reaches it) and under pytest, which collects the
 from __future__ import annotations
 
 import json
+import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -81,6 +81,19 @@ def _append_run(tree: Path, outcome: str) -> None:
         cwd=tree,
         capture_output=True,
         text=True,
+        env={
+            **os.environ,
+            # The migrated tool resolves an --actor through the fleet registry unless the
+            # append is marked a FIXTURE, and the mark is `OC_LEDGER_PATH` being set
+            # (tools/ledger.py:643). It is pinned to the SAME file the tree already uses, so
+            # the seam is honoured without moving the ledger out from under tools/audit.py,
+            # which resolves evidence/ledger.jsonl from its own REPO_ROOT and honours no
+            # override at all (tools/audit.py:596).
+            # OC_ACTORS_PATH is pinned for the reason the kit's own gate states: without it a
+            # probe passes or fails on this factory's declared lanes instead of on the code.
+            "OC_LEDGER_PATH": str(tree / "evidence" / "ledger.jsonl"),
+            "OC_ACTORS_PATH": str(tree / "evidence" / "actors-fixture.txt"),
+        },
     )
     if res.returncode != 0:
         raise RuntimeError(f"seed append failed:\n{res.stdout}{res.stderr}")
@@ -102,8 +115,17 @@ def check_end_to_end(base: Path) -> list[str]:
     tree = base / "repo"
     (tree / "tools").mkdir(parents=True)
     (tree / "evidence").mkdir()
-    shutil.copy(REPO / "tools" / "audit.py", tree / "tools" / "audit.py")
-    shutil.copy(REPO / "tools" / "ledger.py", tree / "tools" / "ledger.py")
+    # The closure travels with the tool. Copying ledger.py alone held while it was
+    # self-contained, and broke the moment tools/ledger.py was migrated onto the
+    # template basis (2026-09-27) and gained `from ledger_declaration import ...`:
+    # ModuleNotFoundError in the SEED loop, with the tool correct and the fixture
+    # wrong -- exactly what tests/gate_fixtures.py::stage_tool exists to prevent
+    # (P35, meta-factory #60). stage_tool computes the closure, so nothing here
+    # hardcodes which modules ledger.py imports and the assumption cannot go stale.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from gate_fixtures import stage_tool
+    stage_tool(REPO / "tools" / "audit.py", tree / "tools", REPO / "tools")
+    stage_tool(REPO / "tools" / "ledger.py", tree / "tools", REPO / "tools")
 
     # 13 accepted + 3 failed, then this run is accepted -> 14/17, the first ratio
     # where the two old expressions disagreed.
@@ -125,6 +147,19 @@ def check_end_to_end(base: Path) -> list[str]:
         cwd=tree,
         capture_output=True,
         text=True,
+        env={
+            **os.environ,
+            # The migrated tool resolves an --actor through the fleet registry unless the
+            # append is marked a FIXTURE, and the mark is `OC_LEDGER_PATH` being set
+            # (tools/ledger.py:643). It is pinned to the SAME file the tree already uses, so
+            # the seam is honoured without moving the ledger out from under tools/audit.py,
+            # which resolves evidence/ledger.jsonl from its own REPO_ROOT and honours no
+            # override at all (tools/audit.py:596).
+            # OC_ACTORS_PATH is pinned for the reason the kit's own gate states: without it a
+            # probe passes or fails on this factory's declared lanes instead of on the code.
+            "OC_LEDGER_PATH": str(tree / "evidence" / "ledger.jsonl"),
+            "OC_ACTORS_PATH": str(tree / "evidence" / "actors-fixture.txt"),
+        },
     )
     if res.returncode != 0:
         return [f"audit run failed (rc={res.returncode}):\n{res.stdout}{res.stderr}"]
