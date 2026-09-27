@@ -1,0 +1,40 @@
+{
+  "_note": "Paths this factory CARRIES whose bytes differ from registry/kit.json, declared here rather than silently kept. The pin's gate reads this file and reports every declared path as `excused:` on EVERY run, so clean and excused are never the same output. A path that is ABSENT is not a verdict — a factory ports a subset, so this file names only carried-and-diverged paths. Declared 2026-09-27 against kit_version ab929a61bcc2.",
+  "_dispositions": {
+    "migrated": [
+      "tools/hygiene.py — kit's is a superset; same --audit/--clean flags, stdlib-only",
+      "tests/test_hygiene_namespace.py — kit's name-derived probe supersedes our local parser patch; closure tests/gate_fixtures.py ported with it",
+      "tests/test_ontology.py — kit's passes against our tree unmodified (13 terms, 35 files)"
+    ],
+    "declared": 6,
+    "deferred_with_a_stated_reason": [
+      "tests/test_ledger.py, tests/test_ledger_schema.py, tests/test_rework.py — the kit's copies need a closure we do not carry (tests/ledger_boundary.py, tests/rework_table.py, tools/field_predicate.py, tools/ledger_declaration.py). Porting the closure is the ledger instrument's own migration item; until then these are DEFERRED, not forked by preference."
+    ]
+  },
+  "exempt": [
+    {
+      "path": "tools/audit.py",
+      "reason": "DELIBERATE FORK — our gate list plus the #38 first-pass-yield fix (one rounding site, stamp-then-reparse-then-report). The pin's copy still carries the truncating int(_yield * 100) at the run-row site, so it would reintroduce the defect we fixed; promotion into the template is tracked as agent-factories#143. Repair space is NOT empty, and that is stated: the fork resolves when #143 lands and we take the merged whole."
+    },
+    {
+      "path": "tools/ledger.py",
+      "reason": "DELIBERATE FORK — minimal by choice: verbs append|tail|verify only, 277 lines against the template's 1308. We do not carry the repair verb, the exemption loaders or the second-row close receipt. This is the fork the ledger instrument's migration brief asks us to declare, and it is declared here rather than silently kept. Two known gaps ride in it and are NOT excused by this entry: no per-event authorization matrix at the write path (agent-factories#157), and no write-path close refusal (agent-factories#144)."
+    },
+    {
+      "path": "tests/test_ledger.py",
+      "reason": "DEFERRED, with the reason — the pin's copy tests the full tool (repair verb, exemption loaders, matrix enforcement) that we deliberately do not carry, so it cannot pass until tools/ledger.py is either migrated or the gate is scoped to our verb set. Its closure (tests/ledger_boundary.py) is absent from our tree. Deferred pending the ledger instrument's own migration ruling."
+    },
+    {
+      "path": "tests/test_ledger_schema.py",
+      "reason": "DEFERRED, with the reason — the pin's copy is pytest-COLLECTABLE (8 test functions) where ours is script-mode only, and it reads the LIVE ledger. Taking it would run live-ledger schema checks inside CI, which would red build-push on committed history with no exemption surface — the same class as our own #45/#156, which blocked canonical deploys for 15.5 h on 2026-09-27. It also needs the tools/field_predicate.py + tools/ledger_declaration.py closure. Deferred until the kit's exemption surface (#156) lands."
+    },
+    {
+      "path": "tests/test_rework.py",
+      "reason": "DEFERRED, with the reason — the pin's copy imports `audit` and the tests/rework_table.py closure, and asserts against the template's audit, which is itself a deliberate fork here. Porting the test without its subject would test the wrong tool. Deferred pending the audit fork's own disposition."
+    },
+    {
+      "path": "tests/test_close_board_recorded.py",
+      "reason": "DELIBERATE FORK — two reasons, both ours to hold: (1) our INVARIANT_LANDED is this factory's own boundary (2026-09-26T15:25:00Z), because the pin's hardcodes the meta-factory's 2026-09-18T18:04:24Z, which governs 6 of our close rows and reds 5 of them — rows written after the rule existed elsewhere but before any gate existed here; (2) our copy carries the exemption surface the pin's lacks, which is what let canonical deploys resume. Kit item agent-factories#81 tracks moving this boundary out of the paired file into docs/ledger-invariants.json; when that lands we take the merged whole."
+    }
+  ]
+}

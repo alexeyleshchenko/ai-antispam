@@ -40,6 +40,33 @@ def first_pass_yield_pct(accepted: int, total: int) -> float:
     return round(accepted / total * 100, 1) if total else 0.0
 
 
+def hygiene_namespace(repo_root: Path) -> str:
+    """The scratch namespace this factory OWNS, resolved from ANY worktree (#174).
+
+    `tools/hygiene.py` derives its own namespace from the directory the tool
+    sits in, which is right only in the MAIN worktree: run from a linked
+    worktree it globs `/tmp/<worktree-dir>-*`, a namespace belonging to nobody,
+    and returns a clean verdict over a population it never examined. The
+    canonical namespace is the main worktree's directory name, and
+    `git rev-parse --git-common-dir` resolves it from either. A tree that is not
+    a checkout at all falls back to its own directory name, which is the
+    pre-#174 behaviour and the correct one there.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            cwd=repo_root, capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return repo_root.name
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return repo_root.name
+    git_dir = Path(proc.stdout.strip())
+    if not git_dir.is_absolute():
+        git_dir = repo_root / git_dir
+    return git_dir.resolve().parent.name
+
+
 def parse_ledger(ledger_path: Path) -> dict[str, Any]:
     """Parse ledger.jsonl and calculate operational delivery metrics, including token/cost economics."""
     if not ledger_path.is_file():
@@ -316,8 +343,14 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     # complete, the run is RED. A reap that fails silently would let a namespace
     # nobody cleaned read exactly like a namespace that is clean.
     if (repo_root / "tools/hygiene.py").is_file():
-        gates_to_run.append([sys.executable, "tools/hygiene.py", "--clean"])
-        gates_to_run.append([sys.executable, "tools/hygiene.py", "--audit"])
+        gates_to_run.append(
+            [sys.executable, "tools/hygiene.py", "--clean",
+             "--namespace", hygiene_namespace(repo_root)]
+        )
+        gates_to_run.append(
+            [sys.executable, "tools/hygiene.py", "--audit",
+             "--namespace", hygiene_namespace(repo_root)]
+        )
 
     # 8. Visual roadmap and process-to-product matrix audit
     if (repo_root / "tools/roadmap.py").is_file():
@@ -347,6 +380,17 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     # tests/ is reached by CI here.
     if (repo_root / "tests/test_close_board_recorded.py").is_file():
         gates_to_run.append([sys.executable, "tests/test_close_board_recorded.py"])
+
+    # 12. Kit pin (2026-09-27) -- the tree judged against the kit state it VENDORED, not
+    # against the meta-factory's live manifest. The direction of the verdict is the whole
+    # point: a gate against someone else's manifest reds our audit when THEY move, for a
+    # change we never took; a gate against our own pin reds only when our tree diverges
+    # from our own declaration, which is the only thing we can act on. ABSENT is not a
+    # verdict -- we port a subset -- so the gate judges only carried paths, and a
+    # deliberate fork is a declaration in registry/kit-exemptions.json, never a silent
+    # divergence. Measured on landing: 14 carried paths judged, 6 declared exempt.
+    if (repo_root / "tests/test_kit_pin.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_kit_pin.py"])
 
     results = []
     for cmd in gates_to_run:
