@@ -392,6 +392,16 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     if (repo_root / "tests/test_kit_pin.py").is_file():
         gates_to_run.append([sys.executable, "tests/test_kit_pin.py"])
 
+    # 13. Cron thinness (2026-09-27, pacemaker instrument) -- every enabled cron row
+    # must either wake a lane (deliver_to session:*, or a notify in the prompt) or
+    # carry the wake-only marker; a row that does neither runs its work inside its own
+    # session and cannot be seen by any lane. Measured on adoption: 10 problems over
+    # 12 enabled ai-antispam rows. Pure predicate -- no sqlite3/subprocess/socket import
+    # is permitted in it, so it reads rows handed to it and never the live table.
+    # Runs as a GATE for the same reason as #9-#12: nothing under tests/ is reached by CI.
+    if (repo_root / "tests/test_cron_thinness.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_cron_thinness.py"])
+
     results = []
     for cmd in gates_to_run:
         results.append(run_gate(cmd, repo_root))

@@ -1,0 +1,15 @@
+{
+  "profile_root": "/root/.opencrabs/profiles",
+  "profile": "ops",
+  "factories": [
+    {
+      "slug": "ai-antispam",
+      "display_name": "AI AntiSpam",
+      "chat_id": -1003993000918,
+      "repo": "/root/ai-antispam",
+      "skill": "/root/ai-antispam/SKILL.md",
+      "job_prefixes": ["ai-antispam-"],
+      "aliases": ["ai-antispam", "ai antispam", "antispam"]
+    }
+  ]
+}

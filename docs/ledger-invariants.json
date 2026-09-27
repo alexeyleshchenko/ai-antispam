@@ -1,0 +1,13 @@
+{
+  "_note": "This factory's own declaration of WHEN each ledger invariant landed IN THIS FACTORY, read by tests/ledger_boundary.py on behalf of the gates that assert those invariants. Every key is the NAME OF THE GATE that asserts it, and every value is the ISO-8601 UTC instant the invariant landed HERE. Rows at or after a boundary are governed by its gate; rows before it are printed as 'excused:' on every run and are NEVER backfilled. These boundaries are the instant this factory ADOPTED each gate (2026-09-27, the kit-adoption wave), not the instant the rule landed in the kit: ai-antispam's ledger history is its own, and a gate that borrowed the kit's dates would judge a tree it does not describe. A key that is present but unreadable is a gate FAILURE, never a skip.",
+  "invariants": {
+    "skill_version_contract": "2026-09-27T15:23:00Z",
+    "subject_form": "2026-09-27T15:23:00Z",
+    "insights_gate_recorded": "2026-09-27T15:23:00Z",
+    "close_row_revision": "2026-09-27T15:23:00Z",
+    "score_gate_recorded": "2026-09-27T15:23:00Z",
+    "reconstructed_claim_declared": "2026-09-27T15:23:00Z",
+    "close_telemetry_provenance": "2026-09-27T15:23:00Z",
+    "duty_receipt_declared": "2026-09-27T15:23:00Z"
+  }
+}
