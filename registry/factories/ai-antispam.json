@@ -1,0 +1,195 @@
+{
+  "factory": "ai-antispam",
+  "display_name": "ai-antispam",
+  "profile": "ops",
+  "repo": "/root/ai-antispam",
+  "skill": "/root/ai-antispam/SKILL.md",
+  "purpose": "Run the ai-antispam AI spam-blocker bot service (Telegram + MAX) and the outreach campaign that recruits channel owners to install it.",
+  "zone": {
+    "owns": [
+      "the ai-antispam bot service repo /root/ai-antispam (LLM classifier, handlers, deploys)",
+      "the outreach campaign repo /root/ai-antispam-outreach and its Postgres state",
+      "Postgres ai_spam_bot on apps (schema outreach; single writer outreach/lib/db.py)",
+      "the MAX domain - API surface, webhook ingress, subscription, moderation port",
+      "this factory's own chat (-1003993000918), its topics and its 16 cron rows (14 enabled, 2 disabled one-shots parked for 2027)"
+    ],
+    "does_not_own": [
+      "the OpenCrabs daemon, its core tools, brain/skill loading - OpenCrabs factory",
+      "VDS host infrastructure, fleet deploy scripts, Gatus - infra-factory",
+      "token provisioning, model routing, inference pricing - inferhub-watch",
+      "the factory template and meta-factory law - meta-factory",
+      "Miidas accounting - miidas",
+      "tg_* tools (fast-mcp-telegram) and telegram_send (OpenCrabs core)"
+    ]
+  },
+  "services": [
+    {
+      "name": "ai-spam-blocker bot (Telegram + MAX moderation)",
+      "audience": "owner",
+      "entry": "apps host: /process-tg-updates and /process-max-updates webhooks",
+      "cadence": "continuous, event-driven"
+    },
+    {
+      "name": "ai-antispam-self-audit-daily",
+      "audience": "agent",
+      "entry": "cron f5256d96-3d12-47f7-95ab-082d8db4d741",
+      "cadence": "daily 08:50 MSK"
+    },
+    {
+      "name": "ai-antispam-owner-digest",
+      "audience": "owner",
+      "entry": "cron a3a292e7-4c14-401e-8095-02e86f5530ea",
+      "cadence": "daily 09:30 MSK"
+    },
+    {
+      "name": "ai-antispam-bot-service-health",
+      "audience": "owner",
+      "entry": "cron d2c7e157-9370-4752-a054-c853b4bb2d3c",
+      "cadence": "daily 09:00 MSK"
+    },
+    {
+      "name": "ai-antispam-triage-sweep",
+      "audience": "agent",
+      "entry": "cron e1588fe5-ddbb-4f4f-84f4-b6e06513683c",
+      "cadence": "every 6h UTC at :25"
+    },
+    {
+      "name": "ai-antispam-outreach-watch-poll",
+      "audience": "agent",
+      "entry": "cron cfb86dc5-4be4-4984-8331-d682504d2d1f",
+      "cadence": "every 6h UTC at :07"
+    },
+    {
+      "name": "ai-antispam-stream-liveness-check",
+      "audience": "agent",
+      "entry": "cron 3384c696-7b75-4668-97c3-a73eab96e38e",
+      "cadence": "every 6h UTC at :40"
+    },
+    {
+      "name": "ai-antispam-outreach-auto-kick",
+      "audience": "agent",
+      "entry": "cron e1fb18bc-0e0c-432e-a54a-1734feab7438",
+      "cadence": "daily 07:00 UTC"
+    },
+    {
+      "name": "ai-antispam-outreach-mining-tranche",
+      "audience": "agent",
+      "entry": "cron f3f5f53c-d218-4cf3-9bbc-d26a12c3f9ca",
+      "cadence": "Mon/Wed/Fri 06:00 UTC"
+    },
+    {
+      "name": "ai-antispam-wave0-reply-sweep",
+      "audience": "agent",
+      "entry": "cron 5e515bac-fb81-41c6-b1e2-603ab824ad90",
+      "cadence": "daily 12:00 MSK"
+    },
+    {
+      "name": "ai-antispam-wave0-unactivated-reprobe",
+      "audience": "agent",
+      "entry": "cron 61fcbbfc-e365-4db0-926b-2ad13873a517",
+      "cadence": "Tue 12:00 MSK"
+    },
+    {
+      "name": "ai-antispam-timeout-monitor",
+      "audience": "agent",
+      "entry": "cron ai-antispam-timeout-monitor",
+      "cadence": "daily 12:00 UTC"
+    },
+    {
+      "name": "ai-antispam-43-close-gate",
+      "audience": "agent",
+      "entry": "cron ai-antispam-43-close-gate",
+      "cadence": "daily 12:05 UTC, trigger-gated"
+    },
+    {
+      "name": "ai-antispam-outreach-stream-joins",
+      "audience": "agent",
+      "entry": "cron ai-antispam-outreach-stream-joins",
+      "cadence": "daily 00:00 UTC"
+    },
+    {
+      "name": "ai-antispam-outreach-db-sync",
+      "audience": "agent",
+      "entry": "cron 7ddb69a4-7ec9-4140-9791-2d651cead4c4",
+      "cadence": "daily 09:00 MSK — ENABLED"
+    }
+  ],
+  "substrates_owned": [
+    "/root/ai-antispam - public repo alexeyleshchenko/ai-antispam (git via SSH alias github.com-alexey)",
+    "/root/ai-antispam-outreach - private repo leshchenko1979/ai-antispam-outreach",
+    "Postgres ai_spam_bot on apps - single writer outreach/lib/db.py",
+    "the bot container and MAX webhook route on apps"
+  ],
+  "announcements": [
+    {
+      "id": "bot-repo-canonical-account-and-deploy-home",
+      "text": "leshchenko1979 is the CANONICAL GitHub account for this factory (owner ruling 2026-09-25), and leshchenko1979/ai-antispam is the canonical repo: it hosts the production landing page ai-antispam.ru, publishes the image (ghcr.io/leshchenko1979/ai-antispam:main), and is where the deploy workflow is single-homed. The clone at /root/ai-antispam carries TWO remotes and pushes to BOTH, but only the leshchenko1979 push builds or deploys - a push to alexeyleshchenko/ai-antispam is skipped. The BOARD is alexeyleshchenko/ai-antispam and it is NOT where the image or the deploy live. A bare gh run from the clone resolves to leshchenko1979/ai-antispam, so pass --repo alexeyleshchenko/ai-antispam for board work.",
+      "severity": "warning",
+      "since": "2026-09-25",
+      "affects": [
+        "profile"
+      ],
+      "evidence": "owner ruling 2026-09-25 (canonical account, board unchanged); deploy.yml now pins image_repo to ghcr.io/leshchenko1979/ai-antispam instead of deriving it from github.repository_owner, and gates both jobs on github.repository == 'leshchenko1979/ai-antispam'; verified live runs 36185290979 (canonical: build-push success, deploy success) and 36185287619 (board: build-push skipped, deploy skipped); container on apps runs ghcr.io/leshchenko1979/ai-antispam:main, healthy, started 2026-09-25T20:23:39Z"
+    },
+    {
+      "id": "gh-pages-origin-ahead-not-diverged",
+      "text": "The two gh-pages refs are NOT diverged - origin/gh-pages is a strict FAST-FORWARD ahead of alexey/gh-pages (0 ahead / 1 behind): the extra commit is 02d743b 'Delete CNAME' (2026-09-11). The CNAME file is present at alexey/gh-pages's head and absent at origin's, yet ai-antispam.ru still serves because the Pages SETTING carries the domain, not the file. So: never force-push alexey/gh-pages over origin's (it would DROP that commit), and never enable Pages from gh-pages on alexeyleshchenko/ai-antispam - that repo's gh-pages still holds a CNAME for ai-antispam.ru, so two repos would claim one domain. Pages belongs to leshchenko1979/ai-antispam, which is where it is enabled and built.",
+      "severity": "warning",
+      "since": "2026-09-11",
+      "affects": [
+        "ai-antispam"
+      ],
+      "evidence": "git merge-base alexey/gh-pages origin/gh-pages = 9bcd36dc (alexey's own head); rev-list --left-right --count = 0 1. git ls-tree: CNAME present at alexey/gh-pages (blob b0f261c3), absent at origin/gh-pages. Mirror Pages API reports cname ai-antispam.ru / status built while its branch head carries no CNAME file - the setting outlives the file. Measured 2026-09-24. Corrected by ai-antispam HQ in its 2026-09-24 follow-up (Delegate inbox row 460, landed 2026-09-24T23:00:12Z)."
+    },
+    {
+      "id": "two-files-named-skill-md",
+      "text": "Two different files are named SKILL.md for this factory and they are not copies: /root/ai-antispam/SKILL.md (repo-backed, versioned with the code) and the profile router /root/.opencrabs/profiles/ops/skills/ai-antispam/SKILL.md (the law lanes actually load; it carries its own version field and moves independently of the repo file). Confirm which one you mean before editing - a change to the wrong one is invisible.",
+      "severity": "warning",
+      "since": "2026-09-17",
+      "affects": [
+        "ai-antispam"
+      ],
+      "evidence": "Repo SKILL.md first appears at cd2a3f8 (2026-09-17, self-audit kit adoption). Measured cost 2026-09-23: a peer lane's version claim and this lane's contradicted each other and BOTH were right - they named different files. Corrected by ai-antispam HQ in its 2026-09-24 follow-up (Delegate inbox row 460, landed 2026-09-24T23:00:12Z)."
+    }
+  ],
+  "lanes": [
+    {
+      "topic": "Outreach",
+      "thread_id": 10780,
+      "role": "outreach",
+      "announcements": []
+    },
+    {
+      "topic": "Triage",
+      "thread_id": 10781,
+      "role": "triage",
+      "announcements": []
+    },
+    {
+      "topic": "HQ",
+      "thread_id": 10782,
+      "role": "hq",
+      "announcements": []
+    },
+    {
+      "topic": "ai-antispam Landing lane",
+      "thread_id": 10783,
+      "role": "landing",
+      "announcements": []
+    },
+    {
+      "topic": "Bot lane — ai-antispam service (Bot topic)",
+      "thread_id": 10784,
+      "role": "bot",
+      "announcements": []
+    },
+    {
+      "topic": "MAX domain — lane acceptance &amp; verification",
+      "thread_id": 11156,
+      "role": null,
+      "announcements": []
+    }
+  ],
+  "status": "attested",
+  "attested_at": "2026-09-27T06:35:23Z"
+}
