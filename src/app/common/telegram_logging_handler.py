@@ -9,6 +9,13 @@ from aiogram import Bot
 
 _DEDUPE_CACHE_MAXLEN = 200
 
+# #66: a single failed send must not end log forwarding. Retry a bounded number
+# of times with exponential backoff (honouring Telegram's RetryAfter), then report
+# the drop at ERROR. The send task is supervised and restarted if it dies.
+_MAX_SEND_ATTEMPTS = 3
+_RETRY_BASE_DELAY = 1.0
+_RESTART_DELAY = 1.0
+
 
 class TelegramLogHandler(logging.Handler):
     """
@@ -45,6 +52,10 @@ class TelegramLogHandler(logging.Handler):
         self._text_last_sent_at: dict[str, float] = {}
         self._send_task: asyncio.Task | None = None
         self._shutdown_flag = False
+        # Bounded send retry + supervisor knobs (#66).
+        self._max_send_attempts = _MAX_SEND_ATTEMPTS
+        self._retry_base_delay = _RETRY_BASE_DELAY
+        self._restart_delay = _RESTART_DELAY
 
     def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """
@@ -53,7 +64,7 @@ class TelegramLogHandler(logging.Handler):
         with self._lock:
             self._loop = loop
             if self._send_task is None or self._send_task.done():
-                self._send_task = loop.create_task(self._process_queue())
+                self._send_task = loop.create_task(self._supervise_send_task())
 
     def emit(self, record: logging.LogRecord) -> None:
         # Skip logs emitted by this handler to prevent recursion
@@ -90,6 +101,65 @@ class TelegramLogHandler(logging.Handler):
 
             self._message_queue.append(text)
 
+    async def _supervise_send_task(self) -> None:
+        """
+        Run the send loop, restarting it if it dies unexpectedly (#66).
+
+        A send task that ends silently is worse than the error it failed to
+        deliver: "no notifications" becomes indistinguishable from "no errors".
+        """
+        log = logging.getLogger(__name__)
+        while not self._shutdown_flag:
+            try:
+                await self._process_queue()
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                if self._shutdown_flag:
+                    return
+                log.error(
+                    f"TelegramLogHandler send task died unexpectedly "
+                    f"({type(e).__name__}: {e}); restarting in {self._restart_delay}s",
+                    exc_info=e,
+                )
+                await asyncio.sleep(self._restart_delay)
+
+    async def _send_with_retry(self, text: str) -> bool:
+        """
+        Send one message, retrying a bounded number of times (#66).
+
+        Returns True if delivered. On final failure the drop is reported at
+        ERROR - naming the exception type, because `str(e)` is empty for
+        TimeoutError and friends, and an empty message is invisible.
+        """
+        log = logging.getLogger(__name__)
+        for attempt in range(1, self._max_send_attempts + 1):
+            try:
+                await self._send(text)
+                return True
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                delay = self._retry_base_delay * (2 ** (attempt - 1))
+                retry_after = getattr(e, "retry_after", None)
+                if isinstance(retry_after, (int, float)):
+                    delay = max(delay, float(retry_after))
+                if attempt < self._max_send_attempts:
+                    log.warning(
+                        f"TelegramLogHandler send attempt {attempt}/"
+                        f"{self._max_send_attempts} failed "
+                        f"({type(e).__name__}: {e}); retrying in {delay}s"
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    log.error(
+                        f"TelegramLogHandler dropped a log message after "
+                        f"{attempt} attempts ({type(e).__name__}: {e}) - "
+                        f"this notification never reached the owner"
+                    )
+        return False
+
     async def _process_queue(self) -> None:
         """Background task that processes the message queue."""
         while not self._shutdown_flag:
@@ -101,7 +171,7 @@ class TelegramLogHandler(logging.Handler):
                     text = self._message_queue.popleft()
 
             if text is not None:
-                await self._send(text)
+                await self._send_with_retry(text)
             else:
                 await asyncio.sleep(0.1)
 
@@ -114,14 +184,12 @@ class TelegramLogHandler(logging.Handler):
                     break
                 text = self._message_queue.popleft()
             # Send outside the lock so emit() isn't blocked while we await
-            try:
-                await self._send(text)
+            if await self._send_with_retry(text):
                 drained_count += 1
-            except Exception as e:
+            else:
                 drain_logger.warning(
                     f"TelegramLogHandler _process_queue drain stopped after {drained_count} "
-                    f"messages due to error: {e}",
-                    exc_info=e,
+                    f"messages: send could not be delivered"
                 )
                 break
 
@@ -158,14 +226,12 @@ class TelegramLogHandler(logging.Handler):
                 if not self._message_queue:
                     break
                 text = self._message_queue.popleft()
-            try:
-                await self._send(text)
+            if await self._send_with_retry(text):
                 drained_count += 1
-            except Exception as e:
+            else:
                 drain_logger.warning(
-                    f"TelegramLogHandler drain stopped early after {drained_count} messages "
-                    f"due to error: {e}",
-                    exc_info=e,
+                    f"TelegramLogHandler drain stopped early after {drained_count} messages: "
+                    f"send could not be delivered"
                 )
                 break
 
