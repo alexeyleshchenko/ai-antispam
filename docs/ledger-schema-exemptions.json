@@ -1,0 +1,25 @@
+{
+  "_note": "Factory data for tests/test_ledger_schema.py — the rows this factory ADMITS to the unauthorized-actor class. The governed class is exactly one: an `intake` row stamped by an actor the event does not authorize (SKILL.md section 4: intake is Triage's row). The four rows below were written 2026-09-24/26 by the Bot lane filing its own board items, BEFORE tools/ledger.py was migrated to the template basis on 2026-09-27 — the migrated tool now carries the matrix at the write path, and the fix for the class is the declaration surface shipped with it (agent-factories#157, membership is not authorization). The repair space is EMPTY for all four, measured: the rows are committed and pushed, append-only means a corrected row cannot remove the original (appending three authorized intake rows left the count at 3 of 3, rc=1), and re-stamping the leg from an authorized actor would FALSIFY the record by claiming a taking Triage never made. Each entry is printed as an `excused:` line on every run and the closing line distinguishes clean from excused, so this is visible debt, not forgiveness. Nothing is backfilled and no anchor moves.",
+  "exempt": [
+    {
+      "n": 15,
+      "reason": "Bot lane filed #41 as its own intake before the matrix had a write path; re-stamping would claim a taking Triage never made",
+      "proof": "agent-factories#156 (exemption surface ruled as factory data) + agent-factories#157 (membership is not authorization); local tracker #45"
+    },
+    {
+      "n": 26,
+      "reason": "Bot lane filed #42 as its own intake before the matrix had a write path; re-stamping would claim a taking Triage never made",
+      "proof": "agent-factories#156 + agent-factories#157; local tracker #45"
+    },
+    {
+      "n": 30,
+      "reason": "Bot lane filed #44 as its own intake before the matrix had a write path; re-stamping would claim a taking Triage never made",
+      "proof": "agent-factories#156 + agent-factories#157; local tracker #45"
+    },
+    {
+      "n": 35,
+      "reason": "Bot lane filed #46 as its own intake; the ordering rule and this factory's router bullet both landed AFTER the write, and the Bot lane has stamped actor=hq via HQ since",
+      "proof": "agent-factories#156 + agent-factories#157; local trackers #45 and #56"
+    }
+  ]
+}
