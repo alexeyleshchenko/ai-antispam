@@ -277,7 +277,35 @@ GATE_WALLS_SEC: dict[str, float] = {
     # a few seconds; the rest is interpreter + plugin startup under a cold cache),
     # so 30.0 is a 1.20x factor, not a margin -> 4x the measurement.
     "tests/test_ledger.py": 100.0,
+    # measured 15.07 / 15.70 / 17.52s wall over three consecutive runs (16 tests,
+    # 0.33s of actual test time -- the rest is interpreter + plugin startup), so
+    # 30.0 was a 1.71x factor on the SLOWEST run, not a margin -> 4x the median.
+    "tests/test_cron_thinness.py": 70.0,
 }
+
+
+def _gate_wall_key(cmd: list[str]) -> str:
+    """The command element a gate's wall is keyed on.
+
+    Was `cmd[-1]` until the pytest-form registrations landed: a command of the shape
+    `[python, -m, pytest, tests/x.py, -q]` ends in `-q`, so the lookup silently took
+    the DEPTH default and the gate's own declared wall never applied. Measured on
+    registering the cron gate: the audit printed "gate budget: -q uses the declared
+    default 30.0s", ran the gate under 30s, and reported a timeout at 30.19s for a
+    gate that completes in ~16s. A wall that never applies is not a budget.
+    """
+    for part in cmd:
+        if part in GATE_WALLS_SEC:
+            return part
+    for part in cmd:
+        if part.endswith(".py"):
+            return part
+    return cmd[-1]
+
+
+def _gate_wall(cmd: list[str]) -> float:
+    """The declared wall for a gate, keyed on the file it runs (never a flag)."""
+    return GATE_WALLS_SEC.get(_gate_wall_key(cmd), DEFAULT_GATE_WALL_SEC)
 
 
 def run_gate(cmd: list[str], cwd: Path, timeout_sec: float = DEFAULT_GATE_WALL_SEC) -> dict[str, Any]:
@@ -424,7 +452,16 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     # is permitted in it, so it reads rows handed to it and never the live table.
     # Runs as a GATE for the same reason as #9-#12: nothing under tests/ is reached by CI.
     if (repo_root / "tests/test_cron_thinness.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_cron_thinness.py"])
+        # INVOKED THROUGH PYTEST, NOT AS A BARE SCRIPT, and the reason is measured:
+        # the file defines 16 pytest test functions and carries NO `__main__`, so the
+        # script form executes zero checks and exits 0. Registered as a script it read
+        # 0.16s / rc=0 -- a green over a population it never examined, while the pytest
+        # form runs 16 checks in ~16s. A bare-script registration here is a vacuous
+        # pass, not a fast one. (Same class as the pytest-mode close-preflight gate;
+        # #64's per-gate wall makes the honest invocation affordable.)
+        gates_to_run.append(
+            [sys.executable, "-m", "pytest", "tests/test_cron_thinness.py", "-q"]
+        )
 
     # 14. The patrol RUNNER's own wiring, as its own row (#163, adoption round).
     # Registered separately from gate 13 because tests/gate_registry.py couples per FILE:
@@ -465,9 +502,9 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
 
     results = []
     for cmd in gates_to_run:
-        wall = GATE_WALLS_SEC.get(cmd[-1], DEFAULT_GATE_WALL_SEC)
+        wall = _gate_wall(cmd)
         if wall == DEFAULT_GATE_WALL_SEC:
-            print(f"gate budget: {cmd[-1]} uses the declared default {DEFAULT_GATE_WALL_SEC}s")
+            print(f"gate budget: {_gate_wall_key(cmd)} uses the declared default {DEFAULT_GATE_WALL_SEC}s")
         results.append(run_gate(cmd, repo_root, timeout_sec=wall))
     return results
 
