@@ -1,0 +1,57 @@
+{
+  "_note": "This factory OWN product declaration. Not shipped by the template: a new factory fills its own during onboarding (see docs/processes.md, subprocess 3). The skeleton lives at TEMPLATE/docs/products.example.json in the kit. Every declared artifact path must EXIST in this repo — tools/roadmap.py checks existence, so an aspirational path reds the audit.",
+  "products": [
+    {
+      "id": "moderation",
+      "name": "AI Spam Moderation (Telegram + MAX)",
+      "process": "Process 1: Inbound Triage & Moderation",
+      "owner": "bot",
+      "client": "Channel owners and their subscribers",
+      "client_value": "Spam comments deleted and senders banned within seconds of posting, with no false positive on a legitimate comment",
+      "artifacts": [
+        "src/app/handlers/message",
+        ".github/workflows/deploy.yml"
+      ],
+      "cadence": "Continuous (event-driven Telegram and MAX webhooks)",
+      "pacemaker_job": "ai-antispam-bot-service-health",
+      "last_receipt": "959 verdicts / 917 decided / 42 failed / 0 pending (measured 2026-09-28 06:3xZ, apps Postgres); fallback pool replaced 2026-09-25 after nex-agi/nex-n2.5-mini:free was withdrawn upstream"
+    },
+    {
+      "id": "outreach",
+      "name": "Outreach Campaign — channel-owner recruitment",
+      "process": "Process 2: Outreach Campaign & Lead Triage",
+      "owner": "outreach",
+      "client": "Factory owner (the operator)",
+      "client_value": "Qualified channel-owner leads and verified pitch dispatches, with reply triage that never re-contacts a thread the owner already answered",
+      "artifacts": [
+        "evidence/ledger.jsonl"
+      ],
+      "cadence": "Daily (watch-poll every 6h; db-sync 09:00 MSK; mining Mon/Wed/Fri 06:00 UTC)",
+      "pacemaker_job": "ai-antispam-outreach-db-sync",
+      "last_receipt": "campaign #21 (gapfill page reachability) filed and claimed 2026-09-28, ledger n=84/n=85. NOTE: the campaign's code and data live in the sibling repo /root/ai-antispam-outreach; the path declared here is this repo's own ledger trail, which is what the roadmap gate can verify"
+    },
+    {
+      "id": "self_audit",
+      "name": "Daily Conformance Audit & Ledger",
+      "process": "Process 3: Internal Self-Audit & Conformance",
+      "owner": "triage",
+      "client": "Factory owner and the fleet meta-auditor",
+      "client_value": "A daily, independently verifiable statement of whether this factory's own invariants still hold, with every gate's exit code on the record",
+      "artifacts": [
+        "evidence/ledger.jsonl",
+        "evidence/scores",
+        "tools/audit.py"
+      ],
+      "cadence": "Daily (08:50 MSK)",
+      "pacemaker_job": "ai-antispam-self-audit-daily",
+      "last_receipt": "evidence/scores/2026-09-28-self-audit.md — 14 of 15 gates PASS (roadmap gate excluded itself until this declaration existed)"
+    }
+  ],
+  "growth_status": {
+    "Stage 0": "COMPLETED",
+    "Stage 1": "COMPLETED",
+    "Stage 2": "COMPLETED",
+    "Stage 3": "ACTIVE / PILOTED",
+    "Stage 4": "NOT STARTED"
+  }
+}
