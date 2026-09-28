@@ -132,6 +132,26 @@ async def send_admin_dm(admin_id: int, text: str, log_context: str = "message") 
 
 
 @cache
+def describe_exception(exc: BaseException) -> str:
+    """A one-line token that ALWAYS identifies the failure (#54).
+
+    `str(exc)` is EMPTY for a whole class of failures — `TimeoutError`,
+    `asyncio.TimeoutError`, `asyncio.CancelledError`, `httpx.ReadTimeout`,
+    `httpx.ConnectError`, and any exception raised with no arguments. A log line
+    built from it therefore renders as `failed: ` with nothing after the colon,
+    which is indistinguishable from a defect in the logging itself.
+
+    Measured 2026-09-27: five classifier failures in one window all logged
+    `Gateway spam classification failed: ,` — the timeout was invisible, and
+    establishing it took timing analysis instead of a log read.
+
+    The TYPE is always present because it is never empty; the message is appended
+    only when it carries one, so a `<no message>` marker is never needed.
+    """
+    message = str(exc).strip()
+    return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+
+
 def load_config() -> dict[str, Any]:
     """Load config from config.yaml."""
     with open("config.yaml", "r", encoding="utf-8") as f:

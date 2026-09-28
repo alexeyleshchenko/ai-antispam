@@ -20,6 +20,7 @@ from .common.llm_budget import (
     get_llm_route_timeout,
     get_openrouter_models,
 )
+from .common.utils import describe_exception
 
 logger = logging.getLogger(__name__)
 
@@ -319,7 +320,9 @@ async def derive_topic_summary(
         agents = _get_openrouter_topic_agents()
     except Exception as e:  # noqa: BLE001
         logfire.exception("topic_derivation_openrouter_pool_failure")
-        logger.error(f"Failed to build OpenRouter topic agent pool: {e}")
+        logger.error(
+            "Failed to build OpenRouter topic agent pool: %s", describe_exception(e)
+        )
         agents = []
     num_models = len(agents)
 
@@ -336,7 +339,10 @@ async def derive_topic_summary(
         except Exception as e:  # noqa: BLE001
             logfire.exception("topic_derivation_openrouter_failure")
             logger.warning(
-                f"OpenRouter topic agent {attempt + 1}/{num_models} failed: {e}"
+                "OpenRouter topic agent %d/%d failed: %s",
+                attempt + 1,
+                num_models,
+                describe_exception(e),
             )
             _next_openrouter_topic_agent()
             continue
@@ -353,7 +359,7 @@ async def derive_topic_summary(
         return result.output
     except Exception as e:  # noqa: BLE001
         logfire.exception("topic_derivation_gateway_failure")
-        logger.warning(f"Gateway topic derivation failed: {e}")
+        logger.warning("Gateway topic derivation failed: %s", describe_exception(e))
 
     logger.error("All topic derivation agents failed")
     return None

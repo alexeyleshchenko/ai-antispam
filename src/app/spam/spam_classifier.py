@@ -13,6 +13,7 @@ from ..agents import (
     get_openrouter_spam_agent,
 )
 from ..common.llm_budget import get_llm_gateway_timeout, get_llm_per_attempt_timeout
+from ..common.utils import describe_exception
 from ..database import get_admin
 from ..i18n import normalize_lang
 from ..types import SpamClassificationContext
@@ -74,7 +75,8 @@ async def is_spam(
     except Exception as e:  # noqa: BLE001
         with logfire.span("spam_classifier_gateway_failure"):
             logger.warning(
-                f"Gateway spam classification failed: {e}, trying OpenRouter"
+                "Gateway spam classification failed: %s, trying OpenRouter",
+                describe_exception(e),
             )
 
     # OpenRouter pool with rotation
@@ -102,7 +104,10 @@ async def is_spam(
                 return is_spam_result, confidence_result, reason_result
             except Exception as e:  # noqa: BLE001
                 logger.warning(
-                    f"OpenRouter agent {attempt + 1}/{num_models} failed: {e}"
+                    "OpenRouter agent %d/%d failed: %s",
+                    attempt + 1,
+                    num_models,
+                    describe_exception(e),
                 )
                 _next_openrouter_agent()
                 continue
