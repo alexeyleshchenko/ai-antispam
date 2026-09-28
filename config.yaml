@@ -36,11 +36,27 @@ llm:
   budget_seconds: 45           # total classifier LLM budget; reserve 10s for the webhook
   gateway_timeout_seconds: 15  # primary gateway leg; classifier-only budget
   route_timeout_seconds: 30    # non-classification LLM legs (topic derivation, admin DM)
-  # Per-attempt budget is DERIVED: (budget - gateway) / len(models).
-  # The gateway leg runs p50 3.3s / p90 5.2s / max 11.8s over 20 calls, so 15s
-  # covers its real ceiling. Two models behind it give 15.0s per attempt; adding
-  # a third would cut every attempt to 10.0s, which the slowest survivor's
-  # measured latency does not fit - the guard refuses it.
+  # Per-attempt budget is DERIVED: (budget - gateway) / len(models) = 15.0s.
+  #
+  # The gateway leg stays at 15s because it is bounded from BOTH sides:
+  #   - tests/test_classifier_fallback_budget.py pins per_attempt >= 15s, since
+  #     a starved OpenRouter tier silently killed the fallback (#44). Raising
+  #     this leg cuts that budget, so 15s is the ceiling.
+  #   - the gateway route "ai-antispam" must be able to fail over INSIDE this
+  #     leg, or the client cancels mid-route and no later step is reachable.
+  #
+  # 2026-09-28 outage: the route's first step was inferhub, which hung to 15s
+  # and then errored. Our 15s leg cancelled the request at the same instant, so
+  # the gateway could never reach its own later steps; every classification
+  # either burned the full 45s chain or failed. Fixed on the route side:
+  #   inferhub/ali-deepseek-v4-flash-0731  60s timeout then errors -> REMOVED
+  #   groq/openai/gpt-oss-120b             0.6 / 9.8 / 7.1s   -> step 0, 9s
+  #   minimax/MiniMax-M2.7                 8.3 / 8.3 / 11.1s  -> step 1, 12s
+  # A 429 rate-limit on groq fails in ~0.13s, leaving the whole leg to minimax,
+  # so both providers are reachable within 15s on the realistic paths.
+  # (Measured at the real 7.8k-token classifier payload.)
+  # The old "p50 3.3s / max 11.8s" note here described a pre-outage route and
+  # was falsified by that measurement - do not restore it.
   #
   # Model choice is MEASURED, not assumed. At production parity on 2026-09-25
   # (deployed container, the app's own prompt builder, owner-scoped corpus,
