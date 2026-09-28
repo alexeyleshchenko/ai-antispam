@@ -35,6 +35,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          # Full history, and it is REQUIRED, not a convenience. Two gates in
+          # the suite resolve a revision named in a ledger row against this
+          # clone (`test_close_row_revision`, `test_close_row_revision`'s
+          # existence leg), and the ledger rows name commits that are ancestors
+          # of HEAD rather than HEAD itself. The default depth-1 checkout holds
+          # exactly ONE commit, so every such reference is ABSENT and the gate
+          # reds on rows that are perfectly valid — measured: rows n=76, n=79,
+          # n=82 and n=88 all resolve in a full clone at the same sha and none
+          # resolve at depth 1. That red blocks the whole deploy path.
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
