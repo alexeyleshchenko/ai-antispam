@@ -1,0 +1,24 @@
+{
+  "_note": "Factory data for tests/test_ledger_commit_cites_no_rows.py. `marker` is the first commit touching evidence/ledger.jsonl in THIS history whose subject obeys the clause: cd2a3f87, the kit adoption that created the ledger. The shipped default (743b543) belongs to the TEMPLATE's history and does not resolve here. Exemptions are keyed by FULL 40-char sha; a malformed entry or one matching no violation is a gate ERROR. Each is printed as `excused:` on EVERY run - visible debt, never forgiveness. PROCESS DEFECT, STATED: three entries of one shape is past the note's own threshold (one is a debt, two mean the mechanism is not biting). The mechanism was absent on both legs - the gate was unregistered in tools/audit.py and core.hooksPath was unset - so subjects were never refused at commit time. Recorded as debt, not as a licence.",
+  "marker": "cd2a3f874a39aacd0073b88372c15e23a4cbc3cd",
+  "exemptions": [
+    {
+      "sha": "3cf6c18106c66a3b6e6de30bde94488a3b4e4be6",
+      "date": "2026-09-26",
+      "subject": "chore(ledger): claim row n=61 for #56",
+      "reason": "EMPTY REPAIR SPACE, all three tests. Pushed to both remotes, so it is immutable (amendment is a rewrite of published history). A revert cannot clear it: the gate reads SUBJECTS across marker..HEAD, so the offending subject stays in range however the tree is restored. Re-anchoring the marker past it would make the marker's own definition - 'the first commit touching the ledger whose subject obeys the clause' - false, silently converting a live violation into an excused one. Written 2026-09-26, before the clause's mechanism existed in this tree."
+    },
+    {
+      "sha": "494b8c6ca54d59dd5ea1d6e38a12a876da5d62f1",
+      "date": "2026-09-28",
+      "subject": "ledger: #67 intake n=108 - the close_row_revision false-RED, filed and fixed in one turn (#67)",
+      "reason": "EMPTY REPAIR SPACE, all three tests: pushed to both remotes (immutable), a revert cannot remove the subject from marker..HEAD, and re-anchoring past it would falsify the marker's own definition. Written 2026-09-28 while the gate was unregistered in tools/audit.py and core.hooksPath was unset, so nothing refused it at commit time."
+    },
+    {
+      "sha": "5d88cc3b20d2c6d72adc6025338d911189807593",
+      "date": "2026-09-28",
+      "subject": "ledger: #66 lifecycle - intake n=102, claim n=103, close n=104/106 (#66)",
+      "reason": "EMPTY REPAIR SPACE, all three tests: pushed to both remotes (immutable), a revert cannot remove the subject from marker..HEAD, and re-anchoring past it would falsify the marker's own definition. Same window and same absent mechanism as the entry above."
+    }
+  ]
+}
