@@ -66,6 +66,7 @@ Exit: 0 clean, fully excused, or skipped-with-reason; non-zero on any post-bound
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -119,6 +120,26 @@ RUN_READ_KEY = "close_row_revision_run_read"
 # START with it, so the count and the lines it counts come from ONE constant rather
 # than from a second derivation of the predicate that produced them.
 PROSE_EXCUSED_MARKER = "declares its revision in PROSE only"
+
+# The ledger carries TWO subject namespaces (SKILL.md FACTORY RULES): a service-board
+# item is a bare `#N` whose receipts live in THIS repository, while a campaign item is
+# a descriptive stem whose artifacts live in the CAMPAIGN repository
+# (leshchenko1979/ai-antispam-outreach). The existence leg resolves a declared
+# revision against THIS repo's object database, so it can only judge rows whose
+# receipts this repo carries. Measured 2026-09-28: n=95 (subject
+# `campaign-gapfill-page-reachability`) declares head=fce72c3, a commit on the
+# campaign repo that no clone of this repo can carry -- a false RED that blocked
+# every canonical deploy. So the existence leg's population is the SERVICE-BOARD
+# rows, and the foreign-namespace rows are PRINTED as their own class on every run
+# rather than silently dropped.
+_SERVICE_BOARD_SUBJECT = re.compile(r"^#\d+$")
+FOREIGN_NAMESPACE_MARKER = "foreign-namespace:"
+RETIRED_PRINT_MARKER = "retired:"
+
+
+def _count_prefix(lines: list[str], prefix: str) -> int:
+    """Count the printed lines starting with `prefix` -- one derivation, one place."""
+    return sum(1 for line in lines if line.startswith(prefix))
 
 # The DECLARED RETIREMENT surface: this gate's own factory data, read from the tree it
 # judges and never inline in the gate — which is paired byte-identically into TEMPLATE/,
@@ -281,6 +302,16 @@ def _is_git_work_tree(repo: Path) -> bool:
     )
 
 
+def _is_service_board_subject(subject: object) -> bool:
+    """True when the subject is a bare service-board `#N` reference.
+
+    The ledger holds two namespaces and only one of them resolves here. A campaign
+    stem names a work unit whose artifacts live in the campaign repository, so its
+    `head=` is not a revision of this repo and the existence leg must not judge it.
+    """
+    return bool(_SERVICE_BOARD_SUBJECT.match(str(subject or "")))
+
+
 def close_row_revision_existence_problems(
     population: list[dict], repo: Path, retired_values: set[str]
 ) -> tuple[list[str], int, str | None]:
@@ -427,10 +458,27 @@ def evaluate(repo: Path) -> tuple[str, str, list[str], list[str], int, list[str]
     problems = problems + retirement_read_problems + retirement_issues
 
     population = post_boundary_rows(rows, boundary, "close")
+
+    # The existence leg judges only rows whose receipts THIS repo carries. A foreign
+    # namespace's revision is legitimately unresolvable here, so handing it to the
+    # leg would manufacture a RED for a row that is TRUE.
+    service_population = [
+        row for row in population if _is_service_board_subject(row.get("subject"))
+    ]
+    foreign_population = [
+        row for row in population if not _is_service_board_subject(row.get("subject"))
+    ]
     existence_problems, checked, leg_reason = close_row_revision_existence_problems(
-        population, repo, set(retired_values)
+        service_population, repo, set(retired_values)
     )
     problems = problems + existence_problems
+    prints = prints + [
+        f"{FOREIGN_NAMESPACE_MARKER} n={row.get('n')} "
+        f"subject={row.get('subject')!r} -- its receipts live in another "
+        f"repository, so this repo's object database is not the database its "
+        f"revision resolves against"
+        for row in foreign_population
+    ]
 
     if problems:
         return "fail", "", problems, excused, 0, prints
@@ -476,8 +524,11 @@ def test_live_close_rows_declare_the_revision_they_measured() -> None:
     prose_excused = [e for e in excused if e.startswith(PROSE_EXCUSED_MARKER)]
     print(
         f"close-row revision gate: {checked} post-boundary close row(s) declared a "
-        f"revision IN THE CANONICAL RUN and every one RESOLVES; {len(prints)} retired "
-        f"by declaration; {len(excused) - len(prose_excused)} excused (pre-boundary); "
+        f"revision IN THE CANONICAL RUN and every one RESOLVES; "
+        f"{_count_prefix(prints, RETIRED_PRINT_MARKER)} retired by declaration; "
+        f"{_count_prefix(prints, FOREIGN_NAMESPACE_MARKER)} foreign-namespace "
+        f"(existence leg not applicable -- receipts in another repository); "
+        f"{len(excused) - len(prose_excused)} excused (pre-boundary); "
         f"{len(prose_excused)} excused by the run-read boundary ({RUN_READ_KEY}) and "
         f"named above"
     )
@@ -1010,8 +1061,11 @@ def main() -> int:
         print(f"  {line}")
     print(
         f"close-row revision gate: clean — {checked} post-boundary close row(s) declared "
-        f"a revision IN THE CANONICAL RUN and every one RESOLVES; {len(prints)} retired "
-        f"by declaration; {len(excused) - len(prose_excused)} excused (pre-boundary); "
+        f"a revision IN THE CANONICAL RUN and every one RESOLVES; "
+        f"{_count_prefix(prints, RETIRED_PRINT_MARKER)} retired by declaration; "
+        f"{_count_prefix(prints, FOREIGN_NAMESPACE_MARKER)} foreign-namespace "
+        f"(existence leg not applicable -- receipts in another repository); "
+        f"{len(excused) - len(prose_excused)} excused (pre-boundary); "
         f"{len(prose_excused)} excused by the run-read boundary ({RUN_READ_KEY}) and "
         f"named above"
     )
