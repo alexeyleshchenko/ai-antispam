@@ -1,0 +1,9 @@
+{
+  "comment": "ai-antispam's own lanes and the events each may write (#193). registry/factories/ai-antispam.json declares this factory's lane roles; `hq` and `triage` are in the core matrix, and the three below are the factory's own. They are the same KIND of lane -- take a unit, settle it, report -- so the set is uniform on purpose; a differentiated one would encode a distinction no measurement supports. MEMBERSHIP AND AUTHORIZATION ARE BOTH REQUIRED: `actors` grants membership and `by_event` grants authorization, and a lane declared here for membership but absent from `by_event` resolves and is then refused BY NAME. Measured 2026-09-28: before this file existed, two of this factory's five lanes resolved through the fragment and were then refused at append (`bot`, `outreach`), so migrating tools/ledger.py to the template basis left them unable to write a ledger row at all. NOT GRANTED, each for a stated reason: `intake` and `dispatch` are Triage's rows (SKILL.md section 4), so a lane that files a board item still owes Triage its intake leg -- the four unauthorized intake rows the schema gate reds on are that defect (agent-factories#156), never a licence; `ruling` is the process owner's, `score` is Surveys' measurement duty, and `genesis` is bootstrap-only.",
+  "actors": ["bot", "outreach", "landing"],
+  "by_event": {
+    "claim": ["bot", "outreach", "landing"],
+    "close": ["bot", "outreach", "landing"],
+    "run": ["bot", "outreach", "landing"]
+  }
+}
