@@ -288,11 +288,20 @@ async def cleanup_stale_pending_verdicts(
 ) -> int:
     """Delete `pending` rows older than `minutes`. Returns the deleted count.
 
-    A pending row is DELETED rather than marked: the detached task is bounded at
-    roughly the classification budget plus the session-middleware retries inside
-    moderation, so 15 minutes is well beyond the maximum lifetime. Deleting
-    restores the `absent` path, so a later delivery re-classifies - whereas
-    leaving it would make every redelivery answer 503 forever.
+    A pending row is DELETED rather than marked: the detached task is bounded
+    well below this threshold, so a row past it cannot have a live owner.
+    Deletion restores the `absent` path, so a later delivery re-classifies -
+    whereas leaving it would make every redelivery answer 503 forever.
+
+    MEASURED BOUND, not an impression (issue #48). Worst case = the
+    classification budget (45 s) + the moderation path's Telegram operations,
+    each capped by `stop_after_attempt(4)` giving 3 waits at the flood-control
+    cap of 30 s = 90 s per operation; three operations (delete, ban, admin DM)
+    = 315 s = 5.25 min. Against the 900 s default that is a **2.86x** margin -
+    NOT the "~10x" this docstring previously claimed. So if the retry attempts
+    rise, or another Telegram operation joins the moderation path, RE-MEASURE
+    rather than assume headroom: the cadence in `scheduled_tasks` is derived
+    from this threshold, and the safety argument rests on that margin.
     """
     cutoff = datetime.now(UTC) - timedelta(minutes=minutes)
     pool = await get_pool()

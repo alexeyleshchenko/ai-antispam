@@ -5,9 +5,10 @@ Covers the properties the store exists for:
 - exactly ONE caller wins the classification claim, even when two arrive;
 - exactly ONE caller wins the moderation claim, however many deliveries arrive;
 - the DDL is idempotent;
-- both cleanup paths are wired into the scheduled jobs.
+- each cleanup path runs on the cadence its own predicate needs.
 """
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -151,10 +152,18 @@ async def test_cleanup_stale_pending_spares_decided(patched_db_conn, clean_db):
     assert await claim_or_read(CHAT_ID, MESSAGE_ID + 1) is not None
 
 @pytest.mark.asyncio
-async def test_both_cleanups_are_wired_into_scheduled_jobs(
+async def test_the_two_cleanups_run_on_their_own_cadences(
     patched_db_conn, clean_db, monkeypatch
 ):
-    """The store is only reaped if the scheduled job actually calls the cleanups."""
+    """The store is only reaped if something actually calls each cleanup.
+
+    The two cleanups have DIFFERENT timescales and are deliberately not in the
+    same loop (issue #48). The TTL sweep has a 7-day horizon, so the daily
+    bundle fits it. The stale-pending reaper's predicate is 15 minutes, and an
+    86400-second cadence against a 900-second threshold is the 96x mismatch
+    that let a restart-orphaned row answer 503 for a day - so it is asserted
+    HERE as absent from the bundle and present in its own loop.
+    """
     calls: list[str] = []
 
     async def _spy_old(days):
@@ -170,6 +179,21 @@ async def test_both_cleanups_are_wired_into_scheduled_jobs(
     await scheduled_tasks.run_scheduled_jobs()
 
     assert f"old:{DEFAULT_VERDICT_TTL_DAYS}" in calls
+    assert f"stale:{DEFAULT_PENDING_STALE_MINUTES}" not in calls, (
+        "the stale reaper is back in the daily bundle: its 15-minute threshold "
+        "is then enforced once a day (issue #48)"
+    )
+
+    # And the dedicated loop does call it, on its own cadence.
+    calls.clear()
+
+    async def _cancel_after_first_sleep(_seconds):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(scheduled_tasks.asyncio, "sleep", _cancel_after_first_sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await scheduled_tasks.stale_pending_reaper_loop()
+
     assert f"stale:{DEFAULT_PENDING_STALE_MINUTES}" in calls
 
 def test_ttl_defaults_match_config_keys():

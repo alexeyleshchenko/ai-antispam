@@ -20,7 +20,7 @@ from aiogram.dispatcher.event.bases import UNHANDLED
 from aiohttp import web
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 
-from .background_jobs import scheduled_jobs_loop
+from .background_jobs import scheduled_jobs_loop, stale_pending_reaper_loop
 from .bot_commands import setup_bot_commands
 from .common.bot import bot
 from .common.llm_budget import WEBHOOK_RESERVE_SECONDS, validate_llm_config
@@ -350,6 +350,7 @@ async def _on_startup_setup_bot(app: web.Application) -> None:
 
 
 _scheduled_jobs_task: asyncio.Task | None = None
+_stale_pending_reaper_task: asyncio.Task | None = None
 
 
 async def _on_startup_scheduled_jobs(app: web.Application) -> None:
@@ -357,6 +358,20 @@ async def _on_startup_scheduled_jobs(app: web.Application) -> None:
     global _scheduled_jobs_task
     _scheduled_jobs_task = asyncio.create_task(scheduled_jobs_loop())
     logger.info("Scheduled jobs loop started")
+
+
+async def _on_startup_stale_pending_reaper(app: web.Application) -> None:
+    """Start the stale-pending reaper on its own, shorter cadence (issue #48).
+
+    Separate from the daily bundle because the two have different timescales:
+    the bundle carries genuinely daily work (one job in it sends admin DMs), so
+    shortening THAT loop would notify customers every few minutes. This loop
+    reaps on a cadence derived from its own staleness threshold, and reaps
+    before its first sleep so a restart is covered immediately.
+    """
+    global _stale_pending_reaper_task
+    _stale_pending_reaper_task = asyncio.create_task(stale_pending_reaper_loop())
+    logger.info("Stale pending reaper loop started")
 
 
 async def _on_startup_seed_protected_channels(app: web.Application) -> None:
@@ -383,6 +398,11 @@ async def _shutdown(app: web.Application) -> None:
         _scheduled_jobs_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await _scheduled_jobs_task
+
+    if _stale_pending_reaper_task and not _stale_pending_reaper_task.done():
+        _stale_pending_reaper_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await _stale_pending_reaper_task
 
     # Stop TelegramLogHandler before closing the bot session,
     # so that queued messages can still be sent before the connector is closed.
@@ -413,6 +433,7 @@ app.on_startup.append(_on_startup_validate_config)
 app.on_startup.append(_on_startup_ensure_verdict_table)
 app.on_startup.append(_on_startup_setup_bot)
 app.on_startup.append(_on_startup_scheduled_jobs)
+app.on_startup.append(_on_startup_stale_pending_reaper)
 app.on_startup.append(_on_startup_seed_protected_channels)
 app.on_startup.append(_on_startup_log_server_started)
 app.on_shutdown.append(_shutdown)
