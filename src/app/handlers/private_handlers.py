@@ -18,7 +18,7 @@ from ..agents import (
     get_openrouter_chat_agent,
 )
 from ..common.bot import bot
-from ..common.llm_budget import get_llm_route_timeout
+from ..common.llm_budget import get_llm_gateway_timeout, get_llm_per_attempt_timeout
 from ..common.telegram_errors import is_message_not_found_error
 from ..common.utils import sanitize_llm_html
 from ..database import (
@@ -255,55 +255,95 @@ async def handle_private_message(message: types.Message) -> str:
     system_prompt = _build_system_prompt(prd_text, formatted_examples)
     user_message_text = _build_conversation_text(message_history, admin_message)
 
-    llm_timeout = get_llm_route_timeout()
-    model_settings = ModelSettings(timeout=llm_timeout)
+    # Bound every leg with the same validated budget the classifier path uses:
+    # gateway_timeout + N * per_attempt == llm.budget_seconds, and
+    # validate_llm_config() refuses any config whose budget plus reserve does
+    # not fit system.webhook_timeout. Unbounded legs here let one update run
+    # past the webhook timeout, which answers 503 and redelivers the update
+    # straight back into the same failure.
+    gateway_timeout = get_llm_gateway_timeout()
+    per_attempt_timeout = get_llm_per_attempt_timeout()
+    num_openrouter = len(_get_openrouter_chat_agents())
+
     last_error = None
 
     # Try gateway first
     try:
         chat_agent = get_chat_agent()
-        return await _try_provider_with_retries(
-            chat_agent,
-            user_message_text=user_message_text,
-            system_prompt=system_prompt,
-            model_settings=model_settings,
-            admin_message=admin_message,
-            admin_id=admin_id,
-            message=message,
-        )
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:  # noqa: BLE001
-        last_error = e
-        logger.warning(f"Gateway chat failed: {e}")
-
-    # OpenRouter pool with rotation
-    num_openrouter = len(_get_openrouter_chat_agents())
-
-    for i in range(num_openrouter):
-        chat_agent = get_openrouter_chat_agent()
-        provider_label = (
-            f"openrouter-{chat_agent.name}"
-            if hasattr(chat_agent, "name")
-            else f"openrouter-{i}"
-        )
-
-        try:
-            return await _try_provider_with_retries(
+        # Apply timeout to the whole provider attempt (including internal retries)
+        return await asyncio.wait_for(
+            _try_provider_with_retries(
                 chat_agent,
                 user_message_text=user_message_text,
                 system_prompt=system_prompt,
-                model_settings=model_settings,
+                model_settings=ModelSettings(timeout=gateway_timeout),
                 admin_message=admin_message,
                 admin_id=admin_id,
                 message=message,
+            ),
+            timeout=gateway_timeout,
+        )
+    except asyncio.CancelledError:
+        raise
+    except TelegramBadRequest as e:
+        # Terminal: no provider can fix a bad reply target such as Telegram's
+        # "message to be replied not found", so rotating the pool only burns
+        # the budget discovering that. Propagate it - the dispatcher turns it
+        # into a user-visible outcome rather than a silent provider failure.
+        logger.warning(
+            "Gateway chat failed (%s): %s", type(e).__name__, str(e) or "<no message>"
+        )
+        raise
+    except Exception as e:  # noqa: BLE001
+        last_error = e
+        logger.warning(
+            "Gateway chat failed (%s): %s", type(e).__name__, str(e) or "<no message>"
+        )
+
+    # OpenRouter pool with rotation
+    if num_openrouter > 0:
+        for i in range(num_openrouter):
+            chat_agent = get_openrouter_chat_agent()
+            provider_label = (
+                f"openrouter-{chat_agent.name}"
+                if hasattr(chat_agent, "name")
+                else f"openrouter-{i}"
             )
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:  # noqa: BLE001
-            last_error = e
-            logger.warning(f"{provider_label} chat agent failed: {e}")
-            _next_openrouter_chat_agent()
+
+            try:
+                return await asyncio.wait_for(
+                    _try_provider_with_retries(
+                        chat_agent,
+                        user_message_text=user_message_text,
+                        system_prompt=system_prompt,
+                        model_settings=ModelSettings(timeout=per_attempt_timeout),
+                        admin_message=admin_message,
+                        admin_id=admin_id,
+                        message=message,
+                    ),
+                    timeout=per_attempt_timeout,
+                )
+            except asyncio.CancelledError:
+                raise
+            except TelegramBadRequest as e:
+                # Terminal, as in the gateway branch above: do not advance the
+                # pool, because no provider can fix a bad reply target.
+                logger.warning(
+                    "%s chat agent failed (%s): %s",
+                    provider_label,
+                    type(e).__name__,
+                    str(e) or "<no message>",
+                )
+                raise
+            except Exception as e:  # noqa: BLE001
+                last_error = e
+                logger.warning(
+                    "%s chat agent failed (%s): %s",
+                    provider_label,
+                    type(e).__name__,
+                    str(e) or "<no message>",
+                )
+                _next_openrouter_chat_agent()
 
     raise RuntimeError(f"All chat providers failed. Last error: {last_error}")
 
