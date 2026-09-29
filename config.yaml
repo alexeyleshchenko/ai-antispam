@@ -85,9 +85,29 @@ llm:
   # write it in the admins' language is unusable however fast it is. It is
   # pinned in BANNED_MODELS so a later config edit cannot quietly re-add it.
   # See docs/memos/2026-09-25-fallback-pool-language-and-accuracy.md
+  #
+  # 2026-09-29: the tier's PROVIDER was replaced, not its shape. OpenRouter's
+  # free models returned 429 (free-models-per-day cap: limit 1000 / remaining 0)
+  # AND every paid model returned 404 "Model blocked by guardrail" - 10 probed,
+  # all blocked. So this leg was 0% available and every gateway timeout became a
+  # lost message. The endpoint now points at inferhub (FALLBACK_API_BASE, set in
+  # docker-compose.yml; credential FALLBACK_API_KEY in .env) and the ids below
+  # are inferhub aliases.
+  #
+  # Measured 2026-09-29 at production parity - the real 27,743-char prompt with
+  # the real production spam message, 6 calls each:
+  #   ag/gemini-3.7-flash-high   p50 7.50s  max 10.66s  0/6 over the 15s leg
+  #   cb/deepseek-v4.1-flash     p50 7.94s  max 12.46s  0/6 over the 15s leg
+  #   ag/gemini-3.8-flash-high   p50 7.74s  max 12.59s  0/6 over the 15s leg
+  #   cp/zai/glm-5.3-flash       p50 8.61s  max 12.77s  0/6 over the 15s leg
+  #   cp/cline-pass/deepseek-v4.1-flash p50 10.11s max 20.08s  1/6 OVER - rejected
+  #   ali/deepseek-v4-flash-0731       21.6s+ on every call    - rejected
+  #   cp/cline-pass/deepseek-v4-flash  22.5-31.5s on every call - rejected
+  # The pair deliberately keeps TWO provider prefixes (ag/gemini, cb/deepseek)
+  # so one upstream outage cannot empty the pool.
   openrouter_models:
-    - dots-studio/dots-3-note-preview:free
-    - nvidia/nemotron-3-super-120b-a12b:free
+    - ag/gemini-3.7-flash-high
+    - cb/deepseek-v4.1-flash
 
 spam:
   high_confidence_threshold: 90
