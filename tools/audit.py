@@ -273,10 +273,13 @@ def parse_rework(rework_path: Path, closed_tasks: int) -> dict[str, Any]:
 # an exempt-by-silence surface (ai-antispam#64).
 DEFAULT_GATE_WALL_SEC = 30.0
 GATE_WALLS_SEC: dict[str, float] = {
-    # measured 24.99s wall on an unloaded box for the ledger gate (its own work is
-    # a few seconds; the rest is interpreter + plugin startup under a cold cache),
-    # so 30.0 is a 1.20x factor, not a margin -> 4x the measurement.
-    "tests/test_ledger.py": 100.0,
+    # measured 40 / 60 / 87s wall over three consecutive runs on 2026-09-29 (its own
+    # work is a few seconds; the rest is interpreter + plugin startup plus the
+    # worktree-fork probe's two driven checkouts, which are load-sensitive). 100.0 was
+    # a 1.15x factor on the SLOWEST of those -- not a margin -- and the gate duly
+    # reported a 100.12s "failure" that was a TIMEOUT, hiding a passing gate behind a
+    # red audit. 350.0 is 4.0x the slowest measurement, the house precedent.
+    "tests/test_ledger.py": 350.0,
     # measured 15.07 / 15.70 / 17.52s wall over three consecutive runs (16 tests,
     # 0.33s of actual test time -- the rest is interpreter + plugin startup), so
     # 30.0 was a 1.71x factor on the SLOWEST run, not a margin -> 4x the median.
