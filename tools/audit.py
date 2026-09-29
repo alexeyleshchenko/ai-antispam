@@ -281,6 +281,10 @@ GATE_WALLS_SEC: dict[str, float] = {
     # 0.33s of actual test time -- the rest is interpreter + plugin startup), so
     # 30.0 was a 1.71x factor on the SLOWEST run, not a margin -> 4x the median.
     "tests/test_cron_thinness.py": 70.0,
+    # measured 0.66 / 0.33 / 0.31s wall over three consecutive runs (script-mode, stdlib
+    # only, so the cost is interpreter startup). 5.0 is a 7.6x factor on the SLOWEST run
+    # -- a margin rather than a coincidence, and still far below the 30.0 default.
+    "tests/test_ledger_commit_cites_no_rows.py": 5.0,
 }
 
 
@@ -482,6 +486,18 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     # (GATE_WALLS_SEC above) rather than inheriting a wall it does not fit.
     if (repo_root / "tests/test_ledger.py").is_file():
         gates_to_run.append([sys.executable, "tests/test_ledger.py"])
+
+    # The commit-citation clause. SCRIPT-MODE (0 test functions collected, `__main__` present),
+    # so a script registration is the honest form -- and unlike the cron gate this one is NOT
+    # vacuous: it prints "examined N commit(s)" and exits 1 on an unexcused violation.
+    #
+    # It read RED here until 2026-09-28, and the fix was two-part: the gate now takes its MARKER
+    # from factory data (the kit's own sha does not resolve in this history), and the three
+    # pushed subjects in cd2a3f87..HEAD are admitted as exemptions with their empty-repair-space
+    # proofs. Registering it is what makes those exemptions PRINTED on every audit -- visible
+    # debt rather than a silent pass.
+    if (repo_root / "tests/test_ledger_commit_cites_no_rows.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_ledger_commit_cites_no_rows.py"])
 
     # tests/test_ledger_close_preflight.py is DELIBERATELY NOT registered here, and the reason is
     # measured rather than a preference -- it is registered where it already runs.
