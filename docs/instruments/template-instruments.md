@@ -111,19 +111,34 @@ The declared set lives in the law file's **§2**, as numbered rows pairing the m
 template counterpart, so a reader derives it without a second list to drift. That placement is a
 **coordinate**, and a machine reader that assumes it must report when the coordinate is empty instead
 of returning a shorter set. **A reading is superseded beside its predecessor, never over it.**
-Measured 2026-09-27 at 19:5xZ: a census requiring the paired-row form in §2 published two instruments
-and **refused three** — `kit.md`'s §2 is a one-sided table, `ledger.md`'s §2 is the write-path identity
-law, `open-questions.md`'s §2 is the lane-side contract. Three refusals, three different objects, none
-an omission.
+**A count in this clause goes stale in hours, so the PROPERTY is the law and every count is a dated
+example.** The property: a doc whose §2 carries no parsed paired row is **REFUSED**, and the refusal
+is the correct failure mode — the repair is that doc's own lane writing its declared set at the
+coordinate, never the frame homing an exception. Measured over the five `docs/instruments/*.md` with
+`python3 tools/instrument_census.py <slug> --out <path>`, three readings in one evening, each correct
+for its instant:
 
-**Superseded at 2026-09-27T20:11:01Z — the refusing set is ONE.** `ledger.md` filled its coordinate at
-`4dbe5c1` and `open-questions.md` at `5daf6ee`, each by writing its declared set as numbered paired
-rows at the coordinate the census parses, so the census now publishes four and refuses only `kit.md`.
-Predicate: `python3 tools/instrument_census.py <slug> --out <path>`, run over all five law files;
-scope: the five `docs/instruments/*.md`; instant above. The finding was the THREE DIFFERENT OBJECTS:
-each lane corrected its own §2 rather than the frame homing an exception, and `ledger.md`'s correction
-also moved its §3 to keep the write-path law in the same section — after measuring that §9 is the only
-section number that file cites outward.
+| Instant | Published | Refused |
+|---|---|---|
+| 2026-09-27T19:5xZ | 2 | **3** — `kit.md`, `ledger.md`, `open-questions.md` |
+| 2026-09-27T20:11:01Z | 4 | **1** — `kit.md` |
+| 2026-09-27T21:4xZ | **5** | **0** |
+
+Three refusals, three different objects, none an omission: `kit.md`'s §2 was a one-sided table,
+`ledger.md`'s §2 was the write-path identity law, `open-questions.md`'s §2 was the lane-side contract.
+Each lane corrected its OWN §2 rather than the frame homing an exception — `ledger.md` filled its set
+at `4dbe5c1`, `open-questions.md` at `5daf6ee`, `kit.md` at `60be1b2`. `ledger.md` also moved its §3
+to keep the write-path law in the same section, after measuring that §9 is the only section number
+that file cites outward. `kit.md`'s repair is the one that shows why a naive fix would have been
+wrong: its five root-side executables have no TEMPLATE counterpart at all, so pairing each to itself
+would have put five undeliverable paths into the declared set and scored every member short by five
+for a state that is correct by design — the not-applicable-wearing-a-shortfall shape, five times over.
+
+**That trajectory is the lesson, and it is why this clause states a property rather than a count:**
+the same sentence needed correcting three times in one evening, and each correction was a fresh count
+that the next lane's honest work invalidated. A count that moves while nothing is wrong is not a
+reading of the law — it is a reading of the lanes' PROGRESS, and it belongs in a dated artifact, never
+in always-loaded text.
 
 **An aggregate reports the inputs it refused, by PATH, in the artifact a reader meets.** A short list
 and a wrong list are otherwise indistinguishable, and a refusal nobody reads is a silent coverage
@@ -238,7 +253,7 @@ mechanism that reads it — never against a hand-written example of the URL.
    files are byte-identical between `TEMPLATE/` and the donor, so nothing needs porting and scoping
    a port would be work with nothing to do.
 
-### 5.1 The six promotion criteria
+### 5.1 The seven promotion criteria
 
 Each rests on evidence already in hand:
 
@@ -262,6 +277,18 @@ Each rests on evidence already in hand:
    artifact reports each term's senses and every collision it found. This is a criterion and not
    advice: the first vocabulary review, run over the kit's own classes, found **two false claims in
    `ONTOLOGY.md` itself**.
+7. **Enumeration** — a numeric claim in the instrument's law is one of three kinds and no other: a
+   **parameter the law sets** (nothing external moves it), a **contract a gate reads** (drift is
+   loud, because something compares it), or a **dated reading** carrying its predicate and scope. A
+   count that nothing reads and nothing dates is a claim of **currency**, and currency is the one
+   thing a number cannot carry — it goes stale silently, in the direction that looks current.
+   Prefer the **property** over the count wherever both can be stated: "every probe is named" cannot
+   go stale, "22 probes" can. Measured cost of getting this wrong, in this file: §1.5's refusing-set
+   count moved 3 → 1 → 0 inside one evening and needed correcting twice, and §7.6's 12-vs-11
+   specimen was invalidated the same day by the ruling it prompted. Lens A check 5 (Enumeration
+   Consistency) is the review instrument, scoped by `review-lenses.md` to role cards, process
+   registers, process law **and instrument law docs** (`docs/instruments/*.md`); this is the
+   promotion criterion it serves.
 
 **Criterion 3 is gateable and the shape already exists** (`close_row_revision` is a declared
 invariant with a boundary instant, read through `tests/ledger_boundary.py`); the gate lands with the
@@ -273,14 +300,24 @@ forbid.
 - **Code and law** — read both, **by a subagent scoped to the template's copy and law** (the
   adversarial-isolation requirement is `review-lenses.md`'s and is cited, not restated here); name
   every assumption the member's tree made that the template does not; produce either a landed fix or
-  a **recorded non-fix with its reason**. The member already reviewed its own copy; re-reviewing that
-  is duplicated work.
+  a **recorded non-fix whose reason names its disposition class** — `declared-fork`, `factory-specific`
+  or `out-of-scope-here` (below). The member already reviewed its own copy; re-reviewing that is
+  duplicated work.
 - **Vocabulary** — read the identifiers and prose against `ONTOLOGY.md`. **Not optional, and
   measured:** `questions` was promoted into the template and shipped with **zero gates** — nothing
   named `test_*questions*` exists, and its only `tools/audit.py` appearance is the English word in
   three comments. Its verification is a `selftest` no gate invokes, so a green selftest is not
   evidence anything ran it. One review would have caught it; the vocabulary review would have caught
   it twice.
+
+**A finding is DISPOSITIONED, not completed — the completeness bar does not come with the promotion.**
+Duty 4/6's rule is that every ACCEPTed finding names a landed home and the partition sums to the
+census count, because a cycle that records findings and remediates none is theatre (`c24`: 79
+findings, 24 converged, 17 silently dropped). A promotion finding is often *"this is
+factory-specific — declare it"*, where **fix** is the wrong verb, so that bar would force either a
+false fix or a silent drop. What a promotion review inherits is the **disposition discipline**: every
+finding carries a class, and a non-fix names which one. **Authority:** owner ruling on the
+open-questions register, set `meta-factory`, **q10**, answered 2026-09-28.
 
 **The ontology-quality requirement binds the FILE, not only the review:** a per-instrument law file
 states, for every term it uses, either the canonical `ONTOLOGY.md` row it resolves to or the row it
@@ -487,6 +524,37 @@ Two rules for a reader:
   touching it is the boundary §7.3 draws. Reading the divergence, or landing one's own change from a
   worktree, is the shape that leaves the tree alone.
 
+### 6.3 A law doc may be home-factory-only — and the reload leg is NOT waived with the pair
+
+**The three legs above describe the SHIPPED class.** An instrument that exists only in this factory —
+one `TEMPLATE/` bootstraps nothing from, because a new factory has no such register to govern — may
+carry a law doc with **no `TEMPLATE/` half and no manifest entry**. Asking for a pair there would put
+an undeliverable path into the shipped set, which is the same error as scoring a member short for a
+state that is correct by design (§1.1).
+
+**The reload leg survives the exemption.** A law doc that binds lanes has to outlive a compaction, and
+the reload path is what carries it across — so a home-factory-only doc carries its own link at the same
+drop point, pointing at its **actual home** and skipping `TEMPLATE/`:
+
+    skills/meta-factory/<instrument>.md -> ../../docs/instruments/<instrument>.md
+
+Measured twice, and the second reading is why the figure is not the claim: the relative form
+resolves through the containing skill directory — itself a symlink into this repo — and reads the
+root half **in full** (12 375 B at 2026-09-28T18:25Z; **13 140 B** fourteen minutes later, when the
+specimen's own §2 grew). The property is *the link yields the whole file, never a truncated head*,
+and a byte count here is the decoration §5.1.7 forbids carrying as the claim. So the leg is
+available to a doc that ships nowhere.
+
+**And a reload leg is verified in the MEMBER's tree, never in a worktree.** `instrument_census`
+resolves each member's repo from its own fragment, so a link that exists only in a worktree reads
+**absent** — correctly, because the member's tree has not advanced. The leg can only be confirmed
+once it has landed where a lane would actually read it.
+
+**And the class is DECLARED, never inferred.** A reader meeting a law doc with no `TEMPLATE/` half
+cannot tell a deliberate home-factory-only instrument from a promotion that stopped halfway. The doc
+states the class and its reason **in its own text** — §7.2's declared-state discipline, applied to a
+distribution class rather than to a member's adoption.
+
 ## 7. The version identifier and the deferred state
 
 **These two are defined here, once, because they are cross-instrument: an owner coining their own
@@ -554,6 +622,17 @@ every entry's committed blob must equal the committed manifest, which is a diffe
 owns. **A generated artifact is a function of the COMMITTED tree; a manifest built from anything else
 describes a tree that does not exist.**
 
+**The shared checkout is a third population, and it can lag the commit.** A lane that authors in a
+worktree advances HEAD without advancing the shared checkout, so the checkout's working copies can sit
+at an older revision than the manifest describes — a `--check` run there then reports a path DRIFTED
+that nobody touched, and a GREEN run there says nothing about HEAD. Measured 2026-09-27: both halves
+of this file were authored in worktrees, and the shared checkout's copies lacked §7.6 while the
+manifest at the commit recorded its digest. Read `git rev-parse HEAD origin/main` beside any gate
+result taken from a shared tree. The companion discipline: **bringing a path in the shared checkout up
+to HEAD is a WRITE to another lane's working copy**, so verify that path is clean before the sync, sync
+committed content only, and name what was synced — the sync restores a revision, it never carries an
+edit.
+
 ### 7.4 A law file cannot publish its own version — the self-reference regress
 
 **A law doc that is itself a manifest path cannot state the current version of itself, and that is a
@@ -590,6 +669,80 @@ not two readings; it is one reading of a moving object.
 (`tools/registry.py:350`), so nothing defines what it counts — every divergent path, or genuine lags
 only, excluding a member's declared forks? The count is a measurement; the classification is the
 member's reading. State both, or the number is unreproducible behind a judgement call.
+
+**The STANDARD must be committed; a live SUBJECT owes its axis.** Two different things read a tree,
+and only one of them is forbidden above. A predicate whose **standard** is a committed revision —
+"is this member byte-identical to the TEMPLATE half" — must read that revision, because a shared
+tree's working copy puts a peer's in-flight edit into the standard itself; that is the specimen
+above. A predicate whose **subject** is a live tree — "is this path present on this member's disk" —
+measures a legitimate object, and the census's `held` leg is exactly that: `os.path.isfile`
+(`tools/instrument_census.py`). What such a figure owes is its axis, stated in the artifact that
+carries it, plus one prohibition: it may never be quoted as a fact about the **repository**.
+
+Measured 2026-09-27 and the difference is material: `inferhub-watch` reads **held 11/11** while its
+own `HEAD` carries **6 of 11** — five paths (the patrol pair, `tools/registry.py`, both board gates)
+are untracked. So *held* and *runnable from a clone* are different readings, and a member can read
+held-complete over a commit that cannot run the instrument at all. A census figure that does not name
+this axis is the same defect as a count without its predicate: not wrong, but quoted as something it
+is not.
+
+**The two readings are not merely different in strictness — on one row they point in OPPOSITE
+directions, and that state is actionable.** Measured 2026-09-27 on `infra-factory`, predicate member
+bytes vs `git show HEAD:TEMPLATE/<path>`: row 8's gate is **identical on disk** (`e3fd9f1a…` both
+sides — the member did repair it) while the member's **own HEAD** carries `49ed31df…` and the path
+reads `M`. So the on-disk reading **flatters** (10/11, and cannot see that the repair is invisible to
+every consumer) while the committed reading **punishes** (9/11, and cannot see that the operator
+already fixed it) — and the member is in a state neither describes. *"The member repaired it"* and
+*"a clone has the repair"* are different facts, and only the second survives a fresh checkout. The
+remedy is therefore a **COMMIT, not a re-copy** — a distinguishable state rather than a lag, and the
+reason a census owes its axis even when both readings are individually correct.
+
+**Resolve the population from the member's own declaration, never from a naming convention.**
+Measured the same day: a probe resolved each member repo as `/root/<slug>`, which is wrong for
+`infra-factory` (`/root/vds-servers`, per its own registry fragment), and returned a clean *"all
+eleven absent"* for a directory that **never existed** — a verdict indistinguishable from a member
+that adopted nothing. The member's fragment names its repo; the slug is a label, not a path.
+
+### 7.6 Which half is the gate — a shipped pair has ONE fleet gate, and the other half's green is vacuous
+
+A byte-identical pair ships **two copies of one test**. Each copy resolves its tree root from its own
+`__file__` (`REPO = Path(__file__).resolve().parent.parent`), so the `TEMPLATE/` half looks for
+`TEMPLATE/` **inside** `TEMPLATE/` — a population that does not exist there. Measured 2026-09-27 on
+`tests/test_docs_sync.py`: the root-side copy reads *"docs in sync: 38 shared document(s)
+byte-identical"* (rc=0) while the TEMPLATE-side copy reads *"no TEMPLATE/docs tree — nothing to pair"*
+(**also rc=0**). A green from the half whose population is empty is not a weaker verdict; it is a
+verdict about nothing — and this one prints no failure to prompt a second look.
+
+Three behaviours were measured among the paired tests' template-side copies, and only one is honest:
+
+| template-side behaviour | specimen | rc |
+|---|---|---|
+| **vacuous pass** — empty population, named in the output | `test_docs_sync.py` | 0 |
+| **loud failure** | `test_kit_pin.py`, `test_ontology.py` | 1 |
+| **green over a DIFFERENT population** — the sharpest | `test_single_writer.py` | 0 |
+
+The third is the one a reader cannot catch. Both halves read *"single-writer state clean"* and exit 0,
+while the root side audits **14** declared surfaces (parsed from `skills/meta-factory/SKILL.md`) and the
+TEMPLATE side audits **11** (parsed from `TEMPLATE/SKILL.md.tmpl`). Identical code, a **different
+standard**, both green — so the two verdicts are not one check run twice, and neither says so.
+
+**And the difference is not one row.** **Eleven** surfaces are shared; **three** are declared only by
+the meta-factory (`evidence/*.md`, `evidence/subprocesses/*.jsonl`, the questions register) and
+**none** only by the template. The `registry/` surfaces (`registry/fleet.json`,
+`registry/index.json`, `docs/factory-registry.md`) were **template-only** until the ruling this
+specimen prompted declared them here (`b51e4f0`, 2026-09-27) — which is what moved the root half
+from 12 audited surfaces to 14 and closed the asymmetry. Three of the remaining differences are pure naming — the same surface
+rendered with a literal repo slug versus `{{REPO}}`, `skills/meta-factory/SKILL.md` versus *"this
+law"*, `docs/processes.md` versus `processes.md` — which is why a raw `comm` over the two tables
+over-reports the gap. The substantive shape is **one-directional**: the root half audits **three**
+surfaces the template's law does not cover, and the template half audits **nothing** the root does
+not — so a green from the template half is silent about those three, and it is the weaker reading of
+the pair.
+
+**The rule:** for a shipped pair, exactly one half is the fleet gate — the half whose `REPO` resolves
+to the repository root — and it is the only half whose verdict may be quoted. A green from the other
+half is a reading of a different population, and must be named as such rather than reported as the
+gate's result. When a gate's verdict is cited, cite the half it came from.
 
 ## 8. Ownership and scope
 

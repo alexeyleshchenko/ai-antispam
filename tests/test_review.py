@@ -275,15 +275,12 @@ def test_legacy_state_is_refused_and_migrated_explicitly(tmp_path: Path) -> None
 def test_close_sets_both_durations(tmp_path: Path) -> None:
     """`close` writes an explicit terminal state and TWO distinct durations."""
     cycle_id = "test-close-01"
-    cycle_dir = REPO_ROOT / "reviews" / cycle_id
+    # A COMPLETED close now requires the census to be complete as well as the plan
+    # accounted for, so the fixture runs or waives every lens. This test's subject
+    # is the two DURATIONS, which a complete census makes real rather than moot.
+    cycle_dir = _lens_clean_cycle(cycle_id)
     cmd_base = [sys.executable, str(REPO_ROOT / "tools" / "review.py")]
     try:
-        res = subprocess.run(cmd_base + ["init", cycle_id], cwd=REPO_ROOT,
-                             capture_output=True, text=True)
-        assert res.returncode == 0, res.stderr
-        res = subprocess.run(cmd_base + ["record", cycle_id, "A", "# Lens A\nfinding\n"],
-                             cwd=REPO_ROOT, capture_output=True, text=True)
-        assert res.returncode == 0, res.stderr
 
         # Before close: null, never absent.
         state = json.loads((cycle_dir / "state.json").read_text())
@@ -477,6 +474,38 @@ def test_intake_receipts_validate_against_the_schema() -> None:
         if cycle_dir.exists():
             shutil.rmtree(cycle_dir)
 
+def test_intake_dates_the_mandated_instant_form() -> None:
+    """An ISO-8601 instant reads DATED — the form this fleet publishes readings in.
+
+    The dating token's trailing guard was `\\b`, which cannot match between the final
+    digit of `2026-09-27` and the following `T` because both are word characters. The
+    mandated instant form therefore read UNDATED while a bare date read DATED, so every
+    adopter who followed the dating discipline had its evidence flagged. The guard is
+    `(?!\\d)`: it admits the `T` form and still refuses a partial digit run.
+    """
+    cycle_id = "test-intake-instant"
+    cycle_dir = _fresh_cycle(cycle_id)
+    try:
+        proposals = cycle_dir / "proposals"
+        proposals.mkdir(parents=True, exist_ok=True)
+        (proposals / "i1.md").write_text(
+            "ADD a rule in docs/x.md#4 BECAUSE it was missing at 2026-09-27T21:26Z.\n",
+            encoding="utf-8")
+        (proposals / "i2.md").write_text(
+            "ADD a rule in docs/y.md#5 BECAUSE the run at 2026-09-271 was broken.\n",
+            encoding="utf-8")
+        res = subprocess.run([sys.executable, str(REPO_ROOT / "tools" / "review.py"),
+                              "intake", cycle_id, "--record"],
+                             cwd=REPO_ROOT, capture_output=True, text=True)
+        assert res.returncode == 0, res.stdout + res.stderr
+        state = json.loads((cycle_dir / "state.json").read_text(encoding="utf-8"))
+        dated = {r["id"]: r["dated"] for r in state["proposals"]}
+        assert dated["i1"] is True, "the ISO-8601 instant form must read DATED"
+        assert dated["i2"] is False, "a partial digit run must stay UNDATED"
+    finally:
+        if cycle_dir.exists():
+            shutil.rmtree(cycle_dir)
+
 def test_shipped_executable_carries_no_donor_tokens() -> None:
     """The shipped executable names no donor surface.
 
@@ -531,7 +560,9 @@ def test_frozen_cycle_refuses_a_live_channel_read() -> None:
     say the reader means today's bytes, and it must SAY SO rather than pass.
     """
     cycle_id = "test-frozen-refusal"
-    cycle_dir = _fresh_cycle(cycle_id)
+    # Same reason as test_close_sets_both_durations: its subject is the FREEZE and
+    # the live-read refusal, and reaching COMPLETED now requires a complete census.
+    cycle_dir = _lens_clean_cycle(cycle_id)
     try:
         cmd_base = [sys.executable, str(REPO_ROOT / "tools" / "review.py")]
         proposals = cycle_dir / "proposals"
@@ -792,6 +823,256 @@ def test_the_donor_lens_key_rename_is_mapped_and_named(tmp_path: Path) -> None:
         if cycle_dir.exists():
             shutil.rmtree(cycle_dir)
 
+def _lens_clean_cycle(cycle_id: str) -> Path:
+    """A cycle whose LENS half already passes verify, so a plan gap is the only thing left to fail.
+
+    Records lens A with a real report and waives every other catalogued lens with
+    a named reason. The point of the helper is separation: an assertion about the
+    codification plan must not be able to pass or fail on the census half.
+    """
+    cycle_dir = _fresh_cycle(cycle_id)
+    cmd_base = [sys.executable, str(REPO_ROOT / "tools" / "review.py")]
+    res = subprocess.run(cmd_base + ["record", cycle_id, "A", "# Lens A\n\nA finding worth landing.\n"],
+                         cwd=REPO_ROOT, capture_output=True, text=True)
+    assert res.returncode == 0, res.stdout + res.stderr
+    state = json.loads((cycle_dir / "state.json").read_text(encoding="utf-8"))
+    for lens in state["lenses"]:
+        if lens == "A":
+            continue
+        res = subprocess.run(cmd_base + ["waive", cycle_id, lens, "--reason", "test waiver"],
+                             cwd=REPO_ROOT, capture_output=True, text=True)
+        assert res.returncode == 0, res.stdout + res.stderr
+    res = subprocess.run(cmd_base + ["verify", cycle_id], cwd=REPO_ROOT,
+                         capture_output=True, text=True)
+    assert res.returncode == 0, res.stdout + res.stderr
+    return cycle_dir
+
+
+def _set_plan(cycle_dir: Path, plan: list) -> None:
+    f = cycle_dir / "state.json"
+    state = json.loads(f.read_text(encoding="utf-8"))
+    state["codification_plan"] = plan
+    f.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+
+def test_an_unlanded_accepted_finding_cannot_complete_the_cycle() -> None:
+    """The schema's own sentence, enforced: an accepted finding with no landed home is a FAILURE.
+
+    Declared at `codification_plan` in the schema since the engine shipped, and
+    read by nothing until this arm existed — so a cycle could report COMPLETED
+    over a finding that went nowhere. That is the defeated-guard class: the
+    contract was written down, measured, and never carried by a mechanism.
+    """
+    cycle_id = "test-plan-unlanded"
+    cycle_dir = _lens_clean_cycle(cycle_id)
+    try:
+        cmd_base = [sys.executable, str(REPO_ROOT / "tools" / "review.py")]
+        _set_plan(cycle_dir, [{"finding": "the plan carrier is untested",
+                               "disposition": "landed", "home": None}])
+
+        # (1) verify FAILS and NAMES the finding — a bare count is not a refusal.
+        res = subprocess.run(cmd_base + ["verify", cycle_id], cwd=REPO_ROOT,
+                             capture_output=True, text=True)
+        assert res.returncode == 1, res.stdout
+        assert "UNLANDED" in res.stdout, res.stdout
+        assert "the plan carrier is untested" in res.stdout, res.stdout
+
+        # (2) A success close is REFUSED.
+        res = subprocess.run(cmd_base + ["close", cycle_id, "--status", "COMPLETED"],
+                             cwd=REPO_ROOT, capture_output=True, text=True)
+        assert res.returncode == 1, res.stdout + res.stderr
+        assert "cannot close COMPLETED" in res.stderr, res.stderr
+
+        # (3) ABANDONED stays legal. Refusing it would trap a cycle that cannot
+        # complete in IN_PROGRESS forever, which is worse than the pass it prevents.
+        res = subprocess.run(cmd_base + ["close", cycle_id, "--status", "ABANDONED"],
+                             cwd=REPO_ROOT, capture_output=True, text=True)
+        assert res.returncode == 0, res.stdout + res.stderr
+    finally:
+        if cycle_dir.exists():
+            shutil.rmtree(cycle_dir)
+
+
+def test_a_landed_finding_and_a_recorded_non_fix_are_lawful() -> None:
+    """The three dispositions the schema enumerates, each with its carrier, all pass.
+
+    `rejected` with a reason is the recorded non-fix and stays legal — that is the
+    narrower reading of the open owner question F5, and this arm is where that
+    reading is pinned rather than left to prose. `routed` owes a home too: a route
+    with no destination is indistinguishable from a drop.
+    """
+    cycle_id = "test-plan-lawful"
+    cycle_dir = _lens_clean_cycle(cycle_id)
+    try:
+        cmd_base = [sys.executable, str(REPO_ROOT / "tools" / "review.py")]
+        lawful = [
+            {"finding": "landed here", "disposition": "landed",
+             "home": "docs/instruments/review-rotation.md §7 (self-probe and non-vacuity)"},
+            {"finding": "routed onward", "disposition": "routed",
+             "home": "session 4515ea72 (Instruments methodology)"},
+            {"finding": "not adopted", "disposition": "rejected",
+             "reason": "covered by an existing clause; restating it would split the rule"},
+        ]
+        _set_plan(cycle_dir, lawful)
+        res = subprocess.run(cmd_base + ["verify", cycle_id], cwd=REPO_ROOT,
+                             capture_output=True, text=True)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "3 accepted finding(s), all accounted for" in res.stdout, res.stdout
+
+        # A routed finding WITHOUT its destination is the same gap as an unlanded
+        # one — the obligation travels with the disposition, not with the wording.
+        _set_plan(cycle_dir, [dict(lawful[1], home=None)])
+        res = subprocess.run(cmd_base + ["verify", cycle_id], cwd=REPO_ROOT,
+                             capture_output=True, text=True)
+        assert res.returncode == 1, res.stdout
+        assert "routed" in res.stdout and "owes a home" in res.stdout, res.stdout
+
+        # A rejected finding without its reason is not a recorded non-fix, it is a
+        # silent one.
+        _set_plan(cycle_dir, [dict(lawful[2], reason=None)])
+        res = subprocess.run(cmd_base + ["verify", cycle_id], cwd=REPO_ROOT,
+                             capture_output=True, text=True)
+        assert res.returncode == 1, res.stdout
+        assert "owes a reason" in res.stdout, res.stdout
+
+        # An unclassified disposition is a gap, never a default.
+        _set_plan(cycle_dir, [{"finding": "maybe", "disposition": "deferred-to-later"}])
+        res = subprocess.run(cmd_base + ["verify", cycle_id], cwd=REPO_ROOT,
+                             capture_output=True, text=True)
+        assert res.returncode == 1, res.stdout
+        assert "is not one of" in res.stdout, res.stdout
+    finally:
+        if cycle_dir.exists():
+            shutil.rmtree(cycle_dir)
+
+
+def test_an_empty_plan_is_not_a_gap() -> None:
+    """A cycle that accepted no findings owes no landing — the gate must not invent one.
+
+    This is the arm that keeps the enforcement honest in the other direction: a
+    check that fails on an absent plan would read every clean cycle as broken,
+    and a gate that cannot pass is not a gate.
+    """
+    cycle_id = "test-plan-empty"
+    cycle_dir = _lens_clean_cycle(cycle_id)
+    try:
+        cmd_base = [sys.executable, str(REPO_ROOT / "tools" / "review.py")]
+        for plan in ([], None):
+            _set_plan(cycle_dir, plan if plan is not None else [])
+            res = subprocess.run(cmd_base + ["verify", cycle_id], cwd=REPO_ROOT,
+                                 capture_output=True, text=True)
+            assert res.returncode == 0, f"plan={plan!r} -> {res.stdout}{res.stderr}"
+        res = subprocess.run(cmd_base + ["close", cycle_id, "--status", "COMPLETED"],
+                             cwd=REPO_ROOT, capture_output=True, text=True)
+        assert res.returncode == 0, res.stdout + res.stderr
+    finally:
+        if cycle_dir.exists():
+            shutil.rmtree(cycle_dir)
+
+
+def test_codify_records_a_finding_and_refuses_a_carrier_less_one() -> None:
+    """The WRITER the enforcement needs — without it the gate watches an empty field.
+
+    `codification_plan` had a reader (verify, close) and no writer at all, so the
+    field stayed at the empty list `_empty_state` seeds and a carrier check over it
+    would have read green forever. This arm pins both halves: the refusal happens
+    at WRITE time (where the operator still has the finding in hand) and the
+    lawful form records a plan entry that verify then accepts.
+    """
+    cycle_id = "test-codify-writer"
+    cycle_dir = _lens_clean_cycle(cycle_id)
+    try:
+        cmd_base = [sys.executable, str(REPO_ROOT / "tools" / "review.py")]
+
+        res = subprocess.run(cmd_base + ["codify", cycle_id, "--finding", "F1", "--disposition", "landed"],
+                             cwd=REPO_ROOT, capture_output=True, text=True)
+        assert res.returncode == 2, res.stdout + res.stderr
+        assert "owes a home" in res.stderr, res.stderr
+
+        res = subprocess.run(cmd_base + ["codify", cycle_id, "--finding", "F1", "--disposition", "rejected",
+                                         "--home", "somewhere"],
+                             cwd=REPO_ROOT, capture_output=True, text=True)
+        assert res.returncode == 2, res.stdout + res.stderr
+        assert "owes a reason" in res.stderr, res.stderr
+
+        res = subprocess.run(cmd_base + ["codify", cycle_id, "--finding", "   ", "--disposition", "rejected",
+                                         "--reason", "no"],
+                             cwd=REPO_ROOT, capture_output=True, text=True)
+        assert res.returncode == 2, res.stdout + res.stderr
+        assert "cannot be empty" in res.stderr, res.stderr
+
+        for disp, flag, val in (("landed", "--home", "docs/x.md §1"),
+                                ("routed", "--home", "session 4515ea72"),
+                                ("rejected", "--reason", "covered by an existing clause")):
+            res = subprocess.run(cmd_base + ["codify", cycle_id, "--finding", f"F-{disp}",
+                                             "--disposition", disp, flag, val],
+                                 cwd=REPO_ROOT, capture_output=True, text=True)
+            assert res.returncode == 0, res.stdout + res.stderr
+        state = json.loads((cycle_dir / "state.json").read_text(encoding="utf-8"))
+        assert len(state["codification_plan"]) == 3, state["codification_plan"]
+        assert "codification_log" not in state, "a second home for findings is the two-homes defect"
+
+        res = subprocess.run(cmd_base + ["verify", cycle_id], cwd=REPO_ROOT,
+                             capture_output=True, text=True)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "3 accepted finding(s), all accounted for" in res.stdout, res.stdout
+
+        res = subprocess.run(cmd_base + ["close", cycle_id, "--status", "COMPLETED"],
+                             cwd=REPO_ROOT, capture_output=True, text=True)
+        assert res.returncode == 0, res.stdout + res.stderr
+        res = subprocess.run(cmd_base + ["codify", cycle_id, "--finding", "late", "--disposition",
+                                         "rejected", "--reason", "too late"],
+                             cwd=REPO_ROOT, capture_output=True, text=True)
+        assert res.returncode == 2, res.stdout + res.stderr
+        assert "FROZEN" in res.stderr, res.stderr
+    finally:
+        if cycle_dir.exists():
+            shutil.rmtree(cycle_dir)
+
+
+def test_close_completed_is_refused_while_the_census_is_incomplete() -> None:
+    """The completion formula the donor's own law names: a census, not a timestamp.
+
+    Measured before this arm existed: a cycle with all 14 lenses PENDING closed
+    COMPLETED (rc=0) and froze — `verify` failed while `close` returned success,
+    so the census apparatus was advisory. This is the worse of the two
+    completion gaps because it needs no mistake: a lane that never ran the
+    review reached the same terminal state as one that ran it clean.
+    """
+    cycle_id = "test-census-gate"
+    cycle_dir = _fresh_cycle(cycle_id)
+    try:
+        cmd_base = [sys.executable, str(REPO_ROOT / "tools" / "review.py")]
+
+        # A cycle with nothing run cannot be COMPLETED...
+        res = subprocess.run(cmd_base + ["close", cycle_id, "--status", "COMPLETED"],
+                             cwd=REPO_ROOT, capture_output=True, text=True)
+        assert res.returncode == 1, res.stdout + res.stderr
+        assert "neither run nor explicitly waived" in res.stderr, res.stderr
+        state = json.loads((cycle_dir / "state.json").read_text(encoding="utf-8"))
+        assert state["status"] == "IN_PROGRESS", "a refused close must not have moved the status"
+
+        # ...but a WAIVED lens with no reason is a gap too, never a pass.
+        res = subprocess.run(cmd_base + ["waive", cycle_id, "A", "--reason", "x"],
+                             cwd=REPO_ROOT, capture_output=True, text=True)
+        assert res.returncode == 0, res.stdout + res.stderr
+        state = json.loads((cycle_dir / "state.json").read_text(encoding="utf-8"))
+        state["lenses"]["B"] = {"status": "WAIVED", "reason": "   "}
+        (cycle_dir / "state.json").write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+        res = subprocess.run(cmd_base + ["close", cycle_id, "--status", "COMPLETED"],
+                             cwd=REPO_ROOT, capture_output=True, text=True)
+        assert res.returncode == 1, res.stdout + res.stderr
+        assert "waived with no reason" in res.stderr, res.stderr
+
+        # ABANDONED stays legal, so a cycle that cannot complete is not trapped.
+        res = subprocess.run(cmd_base + ["close", cycle_id, "--status", "ABANDONED"],
+                             cwd=REPO_ROOT, capture_output=True, text=True)
+        assert res.returncode == 0, res.stdout + res.stderr
+    finally:
+        if cycle_dir.exists():
+            shutil.rmtree(cycle_dir)
+
+
 if __name__ == "__main__":
     test_review_lifecycle(Path("/tmp"))
     test_schema_artifact_is_generated()
@@ -804,6 +1085,7 @@ if __name__ == "__main__":
     test_intake_names_empty_and_incomplete()
     test_intake_refuses_a_declared_channel_that_is_absent(Path("/tmp"))
     test_intake_receipts_validate_against_the_schema()
+    test_intake_dates_the_mandated_instant_form()
     test_shipped_executable_carries_no_donor_tokens()
     test_step0_recovery_reads_state_alone_and_records_durable_evidence()
     test_frozen_cycle_refuses_a_live_channel_read()
@@ -813,4 +1095,9 @@ if __name__ == "__main__":
     test_migration_reports_values_it_cannot_map(Path("/tmp"))
     test_a_migrated_record_renders_without_a_recorded_digest(Path("/tmp"))
     test_the_donor_lens_key_rename_is_mapped_and_named(Path("/tmp"))
+    test_an_unlanded_accepted_finding_cannot_complete_the_cycle()
+    test_a_landed_finding_and_a_recorded_non_fix_are_lawful()
+    test_an_empty_plan_is_not_a_gap()
+    test_codify_records_a_finding_and_refuses_a_carrier_less_one()
+    test_close_completed_is_refused_while_the_census_is_incomplete()
     print("ALL TESTS PASSED")

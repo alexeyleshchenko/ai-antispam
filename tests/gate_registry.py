@@ -502,16 +502,6 @@ REQUIRED_GATES: tuple[str, ...] = (
     "test_hq_delegation.py",
     "test_hygiene_inflight.py",
     "test_hygiene_namespace.py",
-    # Added with its registration (issue #46). REQUIRED is the correct grain and OPTIONAL
-    # is not, and the deciding fact is the same one that put the score-run pair
-    # (`test_score_gate_recorded.py`) in this tuple: its boundary is FORWARD-ONLY. The rule
-    # governs rows written at or after the instant a factory declares, nothing is ever
-    # backfilled, and a ledger row is immutable — so a factory that ships the gate OPTIONAL
-    # and omits it writes its next synthesis run ungoverned and can never repair that,
-    # because the record it did not take is the one thing that cannot be reconstructed.
-    # It is byte-paired with a TEMPLATE copy, so the manifest grain is what keeps a factory
-    # from dropping the runner and keeping the file.
-    "test_insights_gate_recorded.py",
     # Added with plan 2646d31a task 8 (2026-09-25). This is the MEMBER-side half of drift:
     # `test_kit_manifest.py` measures what every member has ported (ours), while this one
     # lets a factory judge ITSELF against the pin IT vendored — so a member's verdict moves
@@ -529,7 +519,24 @@ REQUIRED_GATES: tuple[str, ...] = (
     "test_law_structure.py",
     "test_ledger.py",
     "test_ledger_close_preflight.py",
+    # Added with its registration (board #137 half 2). REQUIRED is the correct grain: the
+    # gate drives THROWAWAY ledgers under a temp directory through `OC_LEDGER_PATH` — no
+    # live ledger, no fleet manifest, no box-local fixture — so it passes in a bootstrapped
+    # factory exactly as it does here. It is byte-paired with a TEMPLATE copy, so the
+    # manifest grain is what keeps a factory from dropping the runner and keeping the file.
+    # The leg it guards is the CLAIM half of the pre-flight: a claim whose subject has no
+    # intake anywhere was invisible to a close-keyed reading until the close failed.
+    "test_ledger_claim_preflight.py",
     "test_ledger_commit_cites_no_rows.py",
+    # Added with its registration (board #137). REQUIRED is the correct grain: the gate
+    # parses the ledger header's own declaration and compares it to the file's ACTUAL
+    # intra-repo imports, driving four constructed sources so it bites for each reason it
+    # names — no live board, no fleet manifest, no box-local fixture — so it passes in a
+    # bootstrapped factory exactly as it does here. It is byte-paired with a TEMPLATE copy,
+    # so the manifest grain is what keeps a factory from dropping the runner and keeping the
+    # file. The claim it guards is the one a factory READS BEFORE COPYING: a header saying
+    # "byte-identical" about a file that needs three siblings is the defect it was filed for.
+    "test_ledger_header_closure.py",
     # Added with its registration (board #192). REQUIRED is the correct grain: the gate
     # drives the index's OWN SELFTEST against a THROWAWAY ledger under a temp directory —
     # no live ledger, no fleet manifest, no box-local fixture — so it passes in a
@@ -626,6 +633,27 @@ REQUIRED_GATES: tuple[str, ...] = (
 # enrolled its own fragment. It moved into REQUIRED_GATES in the change that shipped
 # `TEMPLATE/registry/`, which is the condition its own entry named.
 OPTIONAL_GATES: dict[str, str] = {
+    "test_shipped_mechanism_law.py": (
+        "REPO-SIDE BY CONSTRUCTION (board #170). It asserts a property of the tree the deliver "
+        "HANDS OUT — that the shipped law STATES the preconditions of the mechanisms the kit "
+        "ships — so it reads TEMPLATE/SKILL.md.tmpl and TEMPLATE/tools/*, and a bootstrapped "
+        "factory has neither. It is therefore not a PAIRS entry, not in registry/kit.json, and "
+        "NOT REQUIRED: a member inherits the CORRECT law from the template, so the harm is "
+        "created here and is caught here. The class it guards had no observer at all — the "
+        "template carried the patrol's receipt legs with 0 of their five precondition clauses "
+        "stated, measured 2026-09-28, against 1/1/1/2 in the live law — because the two law "
+        "files are deliberately not byte-paired and test_template_sync is clean over them BY "
+        "CONSTRUCTION."
+    ),
+    "test_shipped_audit_runs.py": (
+        "REPO-SIDE BY CONSTRUCTION (board #199). It runs the SHIPPED tree's own audit, so it "
+        "cannot live in that tree — there is no nested TEMPLATE for it to run. It is therefore "
+        "not a PAIRS entry, not in registry/kit.json, and NOT REQUIRED: a bootstrapped factory "
+        "has no shipped tree, and the gate states that skip rather than reding. The class it "
+        "guards is the one nothing else could see — the 65 gate registrations in "
+        "TEMPLATE/tools/audit.py that nothing executed, five of which were found red by hand "
+        "in a single day."
+    ),
     "test_law_coverage.py": (
         "PARAMETERIZE FIRST (n=432 Part 5) — hardcodes skills/meta-factory/SKILL.md and "
         "would RED in a bootstrapped factory."
@@ -644,6 +672,46 @@ OPTIONAL_GATES: dict[str, str] = {
         "It carries the fixture-driven non-vacuity proofs for #166 and #168, so it is "
         "DECLARED rather than left to a by-hand run: a probe the audit never executes is "
         "dead text."
+    ),
+    "test_insights_author.py": (
+        "meta-factory-only (owner order 2026-09-28) — its subject tool tools/insights.py is "
+        "live-only and does not ship, the same reason both synthesizer siblings above are "
+        "OPTIONAL. It carries the probes for the AUTHOR field's three failure modes: an "
+        "append that accepts a blank, a verify that passes one, and a derivation that "
+        "defaults instead of refusing. Every probe is fixture-driven, because the live "
+        "register IS the artifact under measurement."
+    ),
+    "test_insights_class.py": (
+        "meta-factory-only (owner order 2026-09-28) — its subject tool tools/insights.py is "
+        "live-only and does not ship, the same reason its author sibling above is OPTIONAL. "
+        "It carries the probes for the CLASS field's three failure modes: an append that "
+        "accepts a missing class, an append that accepts an unknown one, and a verify that "
+        "passes a stored blank while still accepting a legacy key-less row. Every probe is "
+        "fixture-driven, because the live register IS the artifact under measurement."
+    ),
+    "test_insights_status.py": (
+        "meta-factory-only (owner order 2026-09-28) — its subject tool tools/insights.py is "
+        "live-only and does not ship, the same reason its author and class siblings above are "
+        "OPTIONAL. It carries the probes for the STATUS field, the WORKFLOW axis: that a new "
+        "entry OPENS at `pending` and is stamped, that a blank or unknown status is refused at "
+        "the append, that `status_at` travels WITH the status, that verify rejects a stored "
+        "blank or an unstamped status while still accepting a legacy key-less row, that a "
+        "transition rewrites the label and NOTHING else, and that the two axes stay "
+        "orthogonal. Every probe is fixture-driven, because the live register IS the artifact "
+        "under measurement."
+    ),
+    "test_insights_gate_recorded.py": (
+        "meta-factory-only (OWNER ORDER 2026-09-28: 'this insights tool should not be a part of "
+        "the kit — it's the meta factory's subject matter only'). It was REQUIRED and shipped "
+        "as the one insights surface in the kit; that is now withdrawn. The register is this "
+        "factory's own subject matter, so a bootstrapped factory has no such artifact to "
+        "govern — the template's own doctrine already says so (`TEMPLATE/docs/addons/domain/"
+        "stories.md` classes `tools/insights.py` and `evidence/insights.jsonl` as 'the factory "
+        "creates it'), and this gate joining the kit contradicted it. Its subject is "
+        "`evidence/insights.jsonl`, which never shipped, so the member inherited a boundary "
+        "parameter it had no artifact to apply. It stays REGISTERED and GREEN here, by the "
+        "same presence-guard idiom every factory-local gate uses, and its reason for the "
+        "move is the owner's — not the 'parameterize first' class the two entries above carry."
     ),
     "test_template_sync.py": (
         "meta-factory-only (n=432 Part 5), self-documented — a copy of a pair-guard would "
@@ -679,6 +747,16 @@ OPTIONAL_GATES: dict[str, str] = {
         "member has adopted, and the artifact is what a plan is corrected against. Its "
         "verdict is a REFUSAL when the leg reached no member, so an absent fleet fails "
         "loudly rather than publishing an empty census that reads as a clean one."
+    ),
+    "test_kit_surfaces.py": (
+        "meta-factory-only (issue #214) — its POPULATION is `TEMPLATE/tools/`, and the tool "
+        "it judges (`tools/kit_surfaces.py`) is one of the five root-side executables that "
+        "do not ship (docs/instruments/kit.md section 2.1): the manifest is 100% "
+        "TEMPLATE-rooted, so a member has neither the tool nor the tree it sweeps. It is "
+        "this factory's own gate for the surface census, and it exists because that census "
+        "was run by NOTHING until #214 — an instrument whose verdict reaches no consumer is "
+        "indistinguishable from one that passes, which is how an S1 predicate that could "
+        "never match a hyphenated tool survived as its own headline red."
     ),
 }
 

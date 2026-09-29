@@ -34,7 +34,6 @@ import datetime as dt
 import hashlib
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -167,6 +166,243 @@ def write_ledger(path: Path, *events: tuple[str, str]) -> None:
         encoding="utf-8",
     )
 
+# ---------------------------------------------------------------------------
+# #221 / #222 -- the single-writer pair. ONE defect with TWO legs: the ref the
+# guard judges against (#221) and the scope of the lock that serializes writers
+# (#222). Neither is complete alone, so both are probed here.
+# ---------------------------------------------------------------------------
+
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", "-c", "user.email=gate@fixture", "-c", "user.name=gate", *args],
+        cwd=cwd, capture_output=True, text=True,
+    )
+
+def run_in_tree(root: Path, ledger: Path, *args: str) -> subprocess.CompletedProcess:
+    """Run the tool AS STAGED IN `root`.
+
+    `run()` above always executes this repo's tool, which is right for a throwaway
+    ledger but wrong for these probes: both legs key on whether the LEDGER lies in
+    the repository the TOOL resolved, so a probe that ran this repo's tool against a
+    fixture tree would exercise neither. The staged copy is what the fixture owns.
+    """
+    env = {**os.environ, "OC_LEDGER_PATH": str(ledger)}
+    env["OC_ACTORS_PATH"] = str(ledger.parent / "no-actors.txt")
+    env["OC_AUTHORIZATIONS_PATH"] = str(ledger.parent / "no-authorizations.json")
+    return subprocess.run(
+        [sys.executable, str(root / "tools" / "ledger.py"), *args],
+        capture_output=True, text=True, env=env, cwd=root,
+    )
+
+def _fixture_repo(root: Path, *, remote: Path | None = None) -> Path:
+    """A minimal repository holding the tool and an empty ledger."""
+    root.mkdir(parents=True, exist_ok=True)
+    stage_tool(TOOL, root / "tools", LOCAL_TOOLS)
+    (root / "evidence").mkdir(exist_ok=True)
+    (root / "evidence" / "ledger.jsonl").write_text("", encoding="utf-8")
+    _git(root, "init", "-q", "-b", "main")
+    if remote is not None:
+        _git(root, "remote", "add", "origin", str(remote))
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "init")
+    return root
+
+def _ledger(root: Path) -> Path:
+    return root / "evidence" / "ledger.jsonl"
+
+def _lock_path(root: Path) -> str:
+    """The lock path THE TOOL ITSELF computes.
+
+    Asking the tool, rather than re-deriving the expression here, is the difference
+    between a probe and a paraphrase: a probe that recomputed `git rev-parse` would
+    agree with itself while the tool drifted.
+    """
+    proc = subprocess.run(
+        [sys.executable, "-c",
+         "import sys; sys.path.insert(0, 'tools'); import ledger; print(ledger.LOCK)"],
+        cwd=root, capture_output=True, text=True,
+    )
+    return proc.stdout.strip()
+
+def _event_is_known(event: str) -> bool:
+    """Whether `event` is in THIS tree's vocabulary -- asked of the TOOL, not derived.
+
+    The difference between a probe and a paraphrase: a check that re-read the same JSON
+    would agree with itself while the declaration's location or merge rule moved.
+    """
+    proc = subprocess.run(
+        [sys.executable, "-c",
+         "import sys; sys.path.insert(0, 'tools'); import ledger; "
+         f"print({event!r} in ledger.known_events())"],
+        cwd=REPO, capture_output=True, text=True,
+    )
+    return proc.stdout.strip() == "True"
+
+def check_lock_is_repo_scoped() -> None:
+    """#222 leg 1: two checkouts of ONE repository compute the SAME lock path."""
+    print("single-writer (#222) -- the lock is repository-scoped, not checkout-scoped")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = _fixture_repo(Path(tmp) / "root")
+        linked = Path(tmp) / "linked"
+        add = _git(root, "worktree", "add", "--detach", str(linked), "HEAD")
+        check("a linked worktree of the fixture was created", add.returncode == 0,
+              add.stderr.strip()[:140])
+        stage_tool(TOOL, linked / "tools", LOCAL_TOOLS)
+        a, b = _lock_path(root), _lock_path(linked)
+        compared = [p for p in (a, b) if p]
+        print(f"  lock-anchor probe: {len(compared)} worktree(s) compared, "
+              f"{len(set(compared))} distinct lock path(s)")
+        check("the probe compared at least two worktrees (its population)",
+              len(compared) >= 2, f"{len(compared)} compared")
+        check("two worktrees compute the SAME lock path (the property)",
+              bool(a) and a == b, f"main={a!r} linked={b!r}")
+        check("the lock is anchored outside either checkout",
+              a.startswith(str(root / ".git")) and "evidence" not in a, a)
+
+def check_stale_ref_refused() -> None:
+    """#221 Q1: a peer's push inside the fetch window is REFUSED, by name."""
+    print("single-writer (#221) -- a stale lineage is refused and names the sync")
+    with tempfile.TemporaryDirectory() as tmp:
+        bare = Path(tmp) / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(bare)], capture_output=True)
+        a_dir = _fixture_repo(Path(tmp) / "a", remote=bare)
+        _git(a_dir, "push", "-q", "-u", "origin", "main")
+        b_dir = Path(tmp) / "b"
+        subprocess.run(["git", "clone", "-q", str(bare), str(b_dir)], capture_output=True)
+        stage_tool(TOOL, b_dir / "tools", LOCAL_TOOLS)
+        (b_dir / "evidence").mkdir(exist_ok=True)
+        _ledger(b_dir).write_text("", encoding="utf-8")
+
+        # The peer moves the remote while `b` has not fetched.
+        (a_dir / "peer.txt").write_text("a peer moved the remote on\n", encoding="utf-8")
+        _git(a_dir, "add", "-A")
+        _git(a_dir, "commit", "-qm", "peer commit")
+        _git(a_dir, "push", "-q", "origin", "main")
+
+        stale = run_in_tree(b_dir, _ledger(b_dir), "append", "--event", "genesis",
+                            "--actor", "owner", "--subject", "genesis", "--detail", "genesis")
+        check("(221a) an append against a STALE ref is REFUSED",
+              stale.returncode != 0, f"rc={stale.returncode}")
+        check("(221a) the refusal names the staleness and the sync",
+              "STALE" in stale.stderr and "git fetch origin" in stale.stderr,
+              stale.stderr.strip()[:220])
+
+        # Both-ways control: after the fetch the same append is accepted. Without this
+        # arm the check would pass on a leg that refused everything, everywhere.
+        _git(b_dir, "fetch", "-q", "origin")
+        fresh = run_in_tree(b_dir, _ledger(b_dir), "append", "--event", "genesis",
+                            "--actor", "owner", "--subject", "genesis", "--detail", "genesis")
+        check("(221b) after `git fetch origin` the same append is ACCEPTED",
+              fresh.returncode == 0, fresh.stderr.strip()[:220])
+
+def check_fail_open_needs_no_remote() -> None:
+    """#221 Q3: the fail-open BOUNDARY -- where it stays, and where it is refused."""
+    print("single-writer (#221 Q3) -- the fail-open boundary, both cases")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = _fixture_repo(Path(tmp) / "noremote")
+        r = run_in_tree(root, _ledger(root), "append", "--event", "genesis",
+                        "--actor", "owner", "--subject", "genesis", "--detail", "genesis")
+        check("(221c) a repository with NO remote appends normally",
+              r.returncode == 0, r.stderr.strip()[:220])
+    # And the gate's own throwaway ledgers -- outside any repository -- keep working,
+    # which is the regression this predicate's gating exists to prevent.
+    with tempfile.TemporaryDirectory() as tmp:
+        outside = Path(tmp) / "elsewhere.jsonl"
+        r = run(outside, "append", "--event", "genesis", "--actor", "owner",
+                "--subject", "genesis", "--detail", "genesis")
+        check("(221d) a ledger OUTSIDE the repository is not judged by its lineage",
+              r.returncode == 0, r.stderr.strip()[:220])
+
+    # CASE (2), the other half of #221 Q3: a remote EXISTS and the committed
+    # lineage cannot be read. There IS something to compare against and the guard
+    # failed to look, so this is REFUSED. A stderr warning is not a reader -- it was
+    # invisible on every surface this factory reads, which is how the two cases came
+    # to be indistinguishable.
+    with tempfile.TemporaryDirectory() as tmp:
+        bare = Path(tmp) / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(bare)], capture_output=True)
+
+        def _corrupt_committed(root: Path) -> Path:
+            """Commit an UNPARSEABLE ledger, then leave a VALID working copy.
+
+            Both halves matter: the refusal must be about the COMMITTED lineage being
+            unreadable, not about the working file being broken -- so the working copy
+            is restored to valid rows before the append is driven.
+            """
+            led = _ledger(root)
+            good = json.dumps({"n": 1, "ts": "2026-01-01T00:00:00Z",
+                               "event": "genesis", "actor": "owner",
+                               "subject": "genesis", "detail": "genesis"}) + "\n"
+            led.write_text(good + "not json at all\n", encoding="utf-8")
+            _git(root, "add", "-A")
+            _git(root, "commit", "-qm", "a committed ledger with an unparseable row")
+            led.write_text(good, encoding="utf-8")
+            return led
+
+        with_remote = _fixture_repo(Path(tmp) / "with_remote", remote=bare)
+        led = _corrupt_committed(with_remote)
+        r = run_in_tree(with_remote, led, "append", "--event", "intake",
+                        "--actor", "triage", "--subject", "#1", "--detail", "intake")
+        check("(221e) remote present + unreadable lineage is REFUSED, not failed open",
+              r.returncode != 0, f"rc={r.returncode} {r.stderr.strip()[:200]}")
+        check("(221e) and the refusal names the sync rather than crashing",
+              "lineage" in r.stderr.lower() and "git fetch origin" in r.stderr,
+              r.stderr.strip()[:260])
+        check("(221e) the refused append wrote nothing",
+              len(rows(led)) == 1, f"{len(rows(led))} row(s)")
+
+        # BOTH-WAYS CONTROL: the same bytes WITHOUT a remote fail open, so the arm
+        # above is measuring the remote and not the malformed committed file.
+        no_remote = _fixture_repo(Path(tmp) / "no_remote")
+        led2 = _corrupt_committed(no_remote)
+        r2 = run_in_tree(no_remote, led2, "append", "--event", "intake",
+                         "--actor", "triage", "--subject", "#1", "--detail", "intake")
+        check("(221e) the control: the same bytes with NO remote fail open",
+              r2.returncode == 0, f"rc={r2.returncode} {r2.stderr.strip()[:200]}")
+
+def check_worktree_fork_refused() -> None:
+    """#222 leg 2 / #221 detection: a second checkout cannot re-mint a published n."""
+    print("single-writer (#222) -- a second checkout is refused the published n")
+    with tempfile.TemporaryDirectory() as tmp:
+        bare = Path(tmp) / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(bare)], capture_output=True)
+        a_dir = _fixture_repo(Path(tmp) / "a", remote=bare)
+        # The linked checkout is created BEFORE any row exists, so its own ledger file
+        # is empty -- which is the fork's precondition: two checkouts from one base.
+        linked = Path(tmp) / "linked"
+        _git(a_dir, "worktree", "add", "--detach", str(linked), "HEAD")
+        stage_tool(TOOL, linked / "tools", LOCAL_TOOLS)
+
+        # Checkout A takes and PUBLISHES row 1.
+        first = run_in_tree(a_dir, _ledger(a_dir), "append", "--event", "genesis",
+                            "--actor", "owner", "--subject", "genesis", "--detail", "genesis")
+        _git(a_dir, "add", "-A")
+        _git(a_dir, "commit", "-qm", "row 1")
+        _git(a_dir, "push", "-q", "origin", "main")
+        check("(222a) the first checkout landed and published row 1",
+              first.returncode == 0, first.stderr.strip()[:180])
+
+        # The linked checkout's append would mint n=1 a second time. It is REFUSED --
+        # and the refusal is asserted, not the mere absence of a crash.
+        r = run_in_tree(linked, _ledger(linked), "append", "--event", "intake",
+                        "--actor", "triage", "--subject", "#1", "--detail", "second row")
+        print(f"  worktree-fork probe: 2 checkout(s) driven, 1 re-mint attempted, "
+              f"{1 if r.returncode != 0 else 0} refused")
+        check("(222b) the second checkout's append is REFUSED, not silently forked",
+              r.returncode != 0, f"rc={r.returncode} {r.stderr.strip()[:180]}")
+        check("(222b) the refusal is the ledger's own, by name",
+              ("diverges from committed lineage" in r.stderr
+               or "STALE" in r.stderr
+               or "lineage" in r.stderr.lower()),
+              r.stderr.strip()[:220])
+
+        a_lock, b_lock = _lock_path(a_dir), _lock_path(linked)
+        check("(222c) the two checkouts share ONE lock path (leg 1's property)",
+              a_lock == b_lock != "",
+              "TWO lock files means the two checkouts do not serialize, so both can "
+              "mint the same n -- this is the fork, not a style point: "
+              f"{a_lock!r} vs {b_lock!r}")
+
 def check_registered_in_the_audit() -> None:
     """An unregistered gate never runs — assert this one is wired (P29, issue #59)."""
     audit = (REPO / "tools" / "audit.py").read_text(encoding="utf-8")
@@ -176,6 +412,104 @@ def check_registered_in_the_audit() -> None:
         "an unregistered gate never runs (P29)",
     )
 
+
+def check_release_vocabulary() -> None:
+    """#210's release arms, driven where the vocabulary exists.
+
+    The `release` event is FACTORY DATA (`docs/ledger-refs-kinds.json`), and the kit
+    ships only the empty `.example.json`. So a shipped tree has nothing to drive, and
+    these arms red as though the instrument were broken -- the same bytes scoring two
+    verdicts, which is a missing declaration reported as a defect (#229). The
+    precondition is stated ONCE, above the arms; a tree that has not adopted the
+    vocabulary SKIPS with its reason rather than reporting a false red.
+    """
+    if not _event_is_known("release"):
+        print(
+            "  SKIP  the release arms -- this tree declares no `release` event: "
+            "docs/ledger-refs-kinds.json is absent or silent. A factory that declares "
+            "the vocabulary gets these arms; reding here would report a missing "
+            "declaration as a broken instrument (#229)."
+        )
+        return
+
+    # --- #210 the claim-release transition, DRIVEN -----------------------------------
+    # HQ's ruling (n=1577) makes a withdrawal REPRESENTABLE: `release` is DECLARED as an
+    # event in docs/ledger-refs-kinds.json, the row NAMES the claim it withdraws, and the
+    # read side treats it as that claim's TERMINAL transition. Eight arms, each closing a
+    # half the ruling names: (a) the control, (b) a release naming no claim refused, (c) a
+    # release naming a NON-claim refused, (d) a lawful release accepted, (e) a second
+    # release refused BY NAME, and (f)/(g) the sweep READING it -- that pair is the arm
+    # that reds if the declaration is written and never read (#218). (h) is the both-ways
+    # control: the SAME ledger without the release, where the claim must read OPEN.
+    with tempfile.TemporaryDirectory() as td:
+        rel_ledger = Path(td) / "release.jsonl"
+        rel_subj = "#4343"
+        run(rel_ledger, "append", "--event", "genesis", "--actor", "owner",
+            "--subject", "genesis", "--detail", "genesis: fixture ledger")
+        run(rel_ledger, "append", "--event", "intake", "--actor", "triage",
+            "--subject", rel_subj, "--detail", f"intake: {rel_subj}")
+        r = run(rel_ledger, "append", "--event", "claim", "--actor", "worker",
+                "--subject", rel_subj, "--detail", f"claim: {rel_subj}")
+        check("(210a) the claim lands (the control)", r.returncode == 0,
+              r.stderr.strip()[-90:])
+        # The row numbers are READ from the fixture, never assembled: a hand-built
+        # identifier is the class this ledger files against itself.
+        _rows = [json.loads(line) for line in
+                 rel_ledger.read_text().splitlines() if line.strip()]
+        claim_n = _rows[-1]["n"]
+        intake_n = next(r_["n"] for r_ in _rows if r_["event"] == "intake")
+
+        r = run(rel_ledger, "append", "--event", "release", "--actor", "worker",
+                "--subject", rel_subj, "--detail", "release: the lane gave it up")
+        msg = (r.stdout + r.stderr).strip()
+        check("(210b) a release naming NO claim is REFUSED",
+              r.returncode != 0 and "must name the claim" in msg, msg[-110:])
+
+        r = run(rel_ledger, "append", "--event", "release", "--actor", "worker",
+                "--subject", rel_subj, "--detail", "release: names a non-claim",
+                "--ref", f"row:{intake_n}")
+        msg = (r.stdout + r.stderr).strip()
+        check("(210c) a release naming a row that is NOT a claim is REFUSED",
+              r.returncode != 0 and "is the only row it can terminate" in msg,
+              msg[-110:])
+
+        r = run(rel_ledger, "append", "--event", "release", "--actor", "worker",
+                "--subject", rel_subj, "--detail", "release: the lane gave it up",
+                "--ref", f"row:{claim_n}")
+        check("(210d) a release naming the claim is ACCEPTED", r.returncode == 0,
+              (r.stdout + r.stderr).strip()[-110:])
+
+        r = run(rel_ledger, "append", "--event", "release", "--actor", "worker",
+                "--subject", rel_subj, "--detail", "release: retried",
+                "--ref", f"row:{claim_n}")
+        msg = (r.stdout + r.stderr).strip()
+        check("(210e) a SECOND release of one claim is REFUSED, naming the one that landed",
+              r.returncode != 0 and "already carries a release" in msg and "n=" in msg,
+              msg[-130:])
+
+        r = run(rel_ledger, "verify")
+        out = r.stdout
+        check("(210f) the sweep reads the release as the claim's TERMINAL transition "
+              "(the declaration is READ, not merely written)",
+              r.returncode == 0 and "1 terminal by release, 0 open" in out, out[-420:])
+        check("(210g) and it NAMES the released claim rather than counting it silently",
+              "released claim:" in out, out[-420:])
+
+        # (210h) THE BOTH-WAYS CONTROL. The same fixture WITHOUT the release: the claim
+        # must read OPEN. Without this arm (f) would pass on a leg that simply counted
+        # every claim as released.
+        with tempfile.TemporaryDirectory() as td2:
+            open_ledger = Path(td2) / "open.jsonl"
+            run(open_ledger, "append", "--event", "genesis", "--actor", "owner",
+                "--subject", "genesis", "--detail", "genesis: fixture ledger")
+            run(open_ledger, "append", "--event", "intake", "--actor", "triage",
+                "--subject", rel_subj, "--detail", f"intake: {rel_subj}")
+            run(open_ledger, "append", "--event", "claim", "--actor", "worker",
+                "--subject", rel_subj, "--detail", f"claim: {rel_subj}")
+            r = run(open_ledger, "verify")
+            check("(210h) with no release the SAME claim reads OPEN (the control)",
+                  r.returncode == 0 and "0 terminal by release, 1 open" in r.stdout,
+                  r.stdout[-420:])
 
 def main() -> int:
     print("registration — an unregistered gate never runs (P29)")
@@ -192,7 +526,11 @@ def main() -> int:
         # row count, so a probe appending to `ledger` breaks a NEIGHBOUR test
         # rather than its own (measured 2026-09-27: 20 -> 22 rows).
         refs_ledger = Path(tmp) / "refs.jsonl"
-        run(refs_ledger, "append", "--event", "claim", "--actor", "triage",
+        # The first row is an INTAKE, not a claim: a claim whose subject was never admitted
+        # anywhere is refused at the write path by the claim leg (#137 half 2), so a fixture
+        # seeding a bare claim no longer describes a lawful ledger. The two-row shape and
+        # every assertion below are unchanged — only the event that carries row 1 moved.
+        run(refs_ledger, "append", "--event", "intake", "--actor", "triage",
             "--subject", "#1", "--detail", "first")
         r2 = run(refs_ledger, "append", "--event", "dispatch", "--actor", "triage",
                  "--subject", "#2", "--detail", "points at row 1",
@@ -391,7 +729,7 @@ def main() -> int:
         # ARM 4: a MALFORMED declaration FAILS LOUDLY, never reads as none. A factory whose own
         # lanes silently vanished on a typo would get a membership error naming no file.
         auth_file.write_text("{ this is not json")
-        r = run(auth_tree / "ledger.jsonl", "append", "--event", "claim", "--actor", "triage",
+        r = run(auth_tree / "ledger.jsonl", "append", "--event", "score", "--actor", "triage",
                 "--subject", "#2", "--detail", "malformed declaration",
                 extra_env=AUTH, **auth_kw)
         check("a malformed declaration fails loudly rather than reading as none",
@@ -414,7 +752,7 @@ def main() -> int:
                     sys.executable,
                     str(TOOL),
                     "append",
-                    "--event", "claim",
+                    "--event", "score",
                     "--actor", "triage",
                     "--subject", f"probe-{i}",
                     "--detail", f"parallel append {i}",
@@ -466,18 +804,18 @@ def main() -> int:
         act = Path(tmp) / "actors.jsonl"
         declared = Path(tmp) / "actors.txt"
 
-        r = run(act, "append", "--event", "claim", "--actor", "worker",
+        r = run(act, "append", "--event", "score", "--actor", "worker",
                 "--subject", "x", "--detail", "a shipped role")
         check("a role the template ships is accepted", r.returncode == 0,
               r.stderr.strip()[:60])
 
-        r = run(act, "append", "--event", "claim", "--actor", "delegate",
+        r = run(act, "append", "--event", "score", "--actor", "delegate",
                 "--subject", "x", "--detail", "not declared here")
         check("a lane this factory has not declared is refused",
               r.returncode != 0, r.stderr.strip()[:60])
 
         declared.write_text("delegate\n", encoding="utf-8")
-        r = run(act, "append", "--event", "claim", "--actor", "delegate",
+        r = run(act, "append", "--event", "score", "--actor", "delegate",
                 "--subject", "x", "--detail", "declared", actors=declared)
         check("a declared lane is accepted", r.returncode == 0, r.stderr.strip()[:60])
 
@@ -1572,6 +1910,71 @@ def main() -> int:
         for key in ("cost_usd", "tokens_in", "tokens_out", "turns", "duration"):
             check(f"and it declared no {key} (the probe is not vacuous)",
                   not declares_field(detail, key), detail[-90:])
+
+    # --- #213 leg 1, DRIVEN rather than grepped -------------------------------------
+    # The refusal shipped with NO behavioural probe. It was "verified" by grepping its
+    # own source for the word `reclose`, which proves the mechanism EXISTS and says
+    # nothing about whether it FUNCTIONS -- and it did not. `declares_field` serves a
+    # NUMERIC key and TYPE-TESTS the value, so `reclose=<reason>` could never satisfy it
+    # and the escape hatch the refusal's own message prescribed was unreachable: every
+    # second close was refused, the lawful re-close included. Four arms, so a green that
+    # could not have failed is impossible -- (a) accepts, (b) refuses BY NAME, (c) proves
+    # the refusal wrote nothing, and (d) is the arm that reds under the defect above.
+    with tempfile.TemporaryDirectory() as td:
+        rc_ledger = Path(td) / "reclose.jsonl"
+        subj = "#4242"
+        run(rc_ledger, "append", "--event", "genesis", "--actor", "owner",
+            "--subject", "genesis", "--detail", "genesis: fixture ledger")
+        run(rc_ledger, "append", "--event", "intake", "--actor", "triage",
+            "--subject", subj, "--detail", f"intake: {subj}")
+        run(rc_ledger, "append", "--event", "claim", "--actor", "worker",
+            "--subject", subj, "--detail", f"claim: {subj}")
+        rc_detail = (f"close {subj}: a fixture close. rework=none board=closed "
+                     f"head={'a' * 40}")
+
+        r = run(rc_ledger, "append", "--event", "close", "--actor", "worker",
+                "--subject", subj, "--detail", rc_detail)
+        check("(a) the lawful close is ACCEPTED (the control)",
+              r.returncode == 0, r.stderr.strip()[-90:])
+
+        before = rc_ledger.read_bytes()
+        r = run(rc_ledger, "append", "--event", "close", "--actor", "worker",
+                "--subject", subj, "--detail", rc_detail)
+        msg = (r.stdout + r.stderr).strip()
+        check("(b) an identical second close is REFUSED",
+              r.returncode != 0, msg[-90:])
+        check("(b) and the refusal NAMES the existing row, not merely refuses",
+              "already carries a close" in msg and "n=" in msg, msg[-110:])
+        check("(c) a refused append wrote NOTHING",
+              rc_ledger.read_bytes() == before, f"{len(before)} bytes before")
+
+        # (d) THE ARM THIS PROBE EXISTS FOR. Under `declares_field` this reds: the
+        # declaration cannot satisfy a type-tested predicate, so a lawful re-close
+        # was refused while the refusal's own message told the author to declare it.
+        r = run(rc_ledger, "append", "--event", "close", "--actor", "worker",
+                "--subject", subj, "--detail", rc_detail + " reclose=reopened-by-probe")
+        check("(d) a second close DECLARING reclose=<one-token> is ACCEPTED "
+              "(the escape hatch is reachable)",
+              r.returncode == 0, (r.stdout + r.stderr).strip()[-120:])
+
+        # (e) THE MALFORMED FORM IS NAMED, not silently ignored. A multi-word value
+        # terminates the canonical trailing run, so the row declares nothing while its
+        # author believes it did -- measured: `trailer_tokens` returns [] for
+        # `... head=<sha> reclose=two words`. The refusal must say WHY, or the author
+        # is told to declare the token they already wrote.
+        r = run(rc_ledger, "append", "--event", "close", "--actor", "worker",
+                "--subject", subj,
+                "--detail", rc_detail + " reclose=two words here")
+        msg = (r.stdout + r.stderr).strip()
+        check("(e) a MULTI-WORD reclose= is refused AND the malformation is named",
+              r.returncode != 0 and "ONE token" in msg, msg[-110:])
+
+
+    check_lock_is_repo_scoped()
+    check_stale_ref_refused()
+    check_fail_open_needs_no_remote()
+    check_worktree_fork_refused()
+    check_release_vocabulary()
 
     print()
     if failures:

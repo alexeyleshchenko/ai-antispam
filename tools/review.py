@@ -53,7 +53,6 @@ import argparse
 import datetime
 import hashlib
 import json
-import os
 import re
 import sys
 from pathlib import Path
@@ -1150,6 +1149,69 @@ def cmd_waive(cycle_id: str, lens: str, reason: str, by: str | None = None) -> i
     return 0
 
 
+def cmd_codify(cycle_id: str, finding: str, disposition: str, home: str | None,
+               reason: str | None) -> int:
+    """Record an ACCEPTED finding with the carrier its disposition owes.
+
+    This is the producer the enforcement needs.  Without it `codification_plan`
+    had a reader (verify, close) and no writer at all — so the field stayed at
+    the empty list `_empty_state` seeds, `codification_gaps` saw no entries, and
+    a gate over a permanently-empty population would have read green forever.
+    That is the same defect class one level up: the contract was unenforced, and
+    this command is what makes it enforced rather than merely declarable.
+
+    The carrier is validated HERE as well as in verify, and for a different
+    reason: a refusal at write time names the mistake while the operator still
+    has the finding in hand, where a refusal at close time is a puzzle.
+    """
+    if disposition not in CODIFICATION_DISPOSITIONS:
+        print(f"Error: disposition must be one of {CODIFICATION_DISPOSITIONS}", file=sys.stderr)
+        return 2
+    if not finding.strip():
+        print("Error: --finding cannot be empty.", file=sys.stderr)
+        return 2
+    owed = CODIFICATION_OBLIGATIONS[disposition]
+    supplied = home if owed == "home" else reason
+    if not (supplied or "").strip():
+        print(
+            f"Error: disposition {disposition!r} owes a {owed}; pass --{owed}.",
+            file=sys.stderr,
+        )
+        return 2
+
+    state = read_state(cycle_id)
+    if not state:
+        print(f"Error: Cycle '{cycle_id}' not found.", file=sys.stderr)
+        return 2
+    if is_frozen(state):
+        print(
+            f"Error: Cycle '{cycle_id}' is FROZEN ({state.get('frozen_at')}). "
+            f"A closed cycle's inputs are historical; record the finding in a new cycle.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # ONE home for accepted findings: the plan array. A second log would be the
+    # two-homes defect the waivers leg already collapsed.
+    entry: dict[str, Any] = {
+        "finding": finding.strip(),
+        "disposition": disposition,
+        "home": (home.strip() if isinstance(home, str) and home.strip() else None),
+        "reason": (reason.strip() if isinstance(reason, str) and reason.strip() else None),
+        "recorded_at": _now(),
+    }
+    state.setdefault("codification_plan", []).append(entry)
+    rc = save_state(cycle_id, state)
+    if rc != 0:
+        return rc
+
+    where = entry["home"] or entry["reason"]
+    print(
+        f"Recorded finding as {disposition} ({owed}={where!r}) — "
+        f"plan now carries {len(state['codification_plan'])} accepted finding(s)."
+    )
+    return 0
+
 def cmd_status(cycle_id: str) -> int:
     state = read_state(cycle_id)
     if not state:
@@ -1197,6 +1259,84 @@ def cmd_status(cycle_id: str) -> int:
     return 0 if pending == 0 else 1
 
 
+# --- codification plan enforcement -------------------------------------------------
+# The schema declares this contract at "codification_plan": an accepted finding with
+# no landed home "is a cycle-completion FAILURE, never a scheduling choice".  A
+# declaration nothing reads is the defect this block exists to close — the same class
+# as a claim in a docstring, which is why the enforcement sits in both verify and
+# close rather than in prose.
+CODIFICATION_DISPOSITIONS = ["landed", "routed", "rejected"]
+CODIFICATION_OBLIGATIONS = {
+    # the file+section the finding landed in
+    "landed": "home",
+    # where it was routed TO: a route with no destination is indistinguishable
+    # from a drop, so a routed finding owes the same carrier as a landed one
+    "routed": "home",
+    # the recorded non-fix, which stays legal (F5's narrower reading) but only
+    # with its reason on the surface
+    "rejected": "reason",
+}
+
+
+def codification_gaps(plan: Any) -> list[str]:
+    """Name every plan entry that owes a carrier and does not carry one.
+
+    An EMPTY plan is not a gap: a cycle that accepted no findings owes no landing.
+    The gap is an accepted finding whose disposition names no home and no reason,
+    which is a finding that goes nowhere while the cycle reads COMPLETED.
+    """
+    if not plan:
+        return []
+    if not isinstance(plan, list):
+        return [f"codification_plan is {type(plan).__name__}, not a list"]
+    gaps: list[str] = []
+    for i, entry in enumerate(plan, 1):
+        if not isinstance(entry, dict):
+            gaps.append(f"#{i}: not an object ({type(entry).__name__})")
+            continue
+        finding = (entry.get("finding") or "").strip() if isinstance(entry.get("finding"), str) else f"#{i}"
+        finding = finding or f"#{i}"
+        disp = entry.get("disposition")
+        disp = disp.strip() if isinstance(disp, str) else ""
+        if disp not in CODIFICATION_DISPOSITIONS:
+            gaps.append(
+                f"{finding}: disposition {disp!r} is not one of {CODIFICATION_DISPOSITIONS}"
+            )
+            continue
+        owed = CODIFICATION_OBLIGATIONS[disp]
+        val = entry.get(owed)
+        if not (isinstance(val, str) and val.strip()):
+            gaps.append(f"{finding}: disposition {disp!r} owes a {owed} and carries none")
+    return gaps
+
+
+def census_gaps(state: dict[str, Any]) -> list[str]:
+    """Lenses that are neither run nor explicitly waived.
+
+    The mirror of `codification_gaps`, and a SEPARATE obligation: the plan check
+    asks what happened to what the review FOUND, this one asks whether the review
+    HAPPENED. Measured before this function existed: `verify` failed over 14
+    PENDING lenses while `close --status COMPLETED` returned 0 and froze the
+    cycle — so the census apparatus was advisory and a cycle could read COMPLETED
+    with no lens ever run. That is the silent pass the lifecycle exists to
+    forbid, and it is the worse of the two gaps because it needs no mistake:
+    a lane that simply never ran the review reached the same state as one that
+    ran it clean.
+    """
+    gaps: list[str] = []
+    lenses = state.get("lenses") or {}
+    for lens in CATALOG_LENSES:
+        info = lenses.get(lens) or {}
+        status = info.get("status", "PENDING")
+        if status == "WAIVED":
+            if not (info.get("reason") or "").strip():
+                gaps.append(f"{lens} (waived with no reason)")
+            continue
+        if status != "COMPLETED":
+            gaps.append(f"{lens} ({status})")
+    return gaps
+
+
 def cmd_verify(cycle_id: str) -> int:
     state = read_state(cycle_id)
     if not state:
@@ -1241,7 +1381,9 @@ def cmd_verify(cycle_id: str) -> int:
         if info.get("receipt") != "verified":
             unverified.append(lens)
 
-    if missing or corrupted or unverified:
+    unlanded = codification_gaps(state.get("codification_plan"))
+
+    if missing or corrupted or unverified or unlanded:
         print(f"FAIL: Cycle '{cycle_id}' census check failed.")
         if missing:
             print(f"  Missing or incomplete lenses: {', '.join(missing)}")
@@ -1249,9 +1391,15 @@ def cmd_verify(cycle_id: str) -> int:
             print(f"  Checksum corrupted lenses: {', '.join(corrupted)}")
         if unverified:
             print(f"  UNRECEIPTED lenses (no index line): {', '.join(unverified)}")
+        if unlanded:
+            print(f"  UNLANDED codification entries (accepted finding, no carrier): {', '.join(unlanded)}")
         return 1
 
-    print(f"PASS: Cycle '{cycle_id}' census verified clean across all {len(CATALOG_LENSES)} lenses.")
+    plan = state.get("codification_plan") or []
+    print(
+        f"PASS: Cycle '{cycle_id}' census verified clean across all {len(CATALOG_LENSES)} lenses "
+        f"(codification plan: {len(plan)} accepted finding(s), all accounted for)."
+    )
     return 0
 
 
@@ -1263,7 +1411,6 @@ def cmd_compile(cycle_id: str) -> int:
 
     cycle_dir = get_cycle_dir(cycle_id)
     verdict_file = cycle_dir / "verdict.md"
-    reports_dir = cycle_dir / "reports"
 
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
     lines = [
@@ -1383,6 +1530,36 @@ def cmd_close(cycle_id: str, status: str, stamp: bool,
     if state.get("status") != "IN_PROGRESS":
         print(f"Error: Cycle '{cycle_id}' is already {state.get('status')}.", file=sys.stderr)
         return 2
+
+    # A COMPLETED close is refused over an unlanded accepted finding — that is the
+    # schema's own words.  ABANDONED is NOT refused: a cycle that cannot complete must
+    # still be closable, or the enforcement traps it in IN_PROGRESS forever, which is
+    # worse than the silent pass it prevents.
+    if status == "COMPLETED":
+        # TWO obligations, checked separately so a refusal says WHICH one failed.
+        # A COMPLETED close means the review happened AND what it found is
+        # accounted for; either alone is a cycle that reads finished without
+        # being finished.
+        ran = census_gaps(state)
+        if ran:
+            print(
+                f"Error: Cycle '{cycle_id}' cannot close COMPLETED — "
+                f"{len(ran)} lens(es) neither run nor explicitly waived:",
+                file=sys.stderr,
+            )
+            for g in ran:
+                print(f"  - {g}", file=sys.stderr)
+            return 1
+        gaps = codification_gaps(state.get("codification_plan"))
+        if gaps:
+            print(
+                f"Error: Cycle '{cycle_id}' cannot close COMPLETED — "
+                f"{len(gaps)} accepted finding(s) with no carrier:",
+                file=sys.stderr,
+            )
+            for g in gaps:
+                print(f"  - {g}", file=sys.stderr)
+            return 1
 
     started = _parse_ts(state.get("started_at"))
     state["status"] = status
@@ -1522,7 +1699,14 @@ PROPOSAL_FORMAT = re.compile(
     r"^(?P<op>ADD|CHANGE)\s+(?P<rule>.+?)\s+in\s+(?P<target>[^\s]+)\s+BECAUSE\s+(?P<evidence>.+)$",
     re.DOTALL,
 )
-DATE_TOKEN = re.compile(r"\b(?:\d{4}-\d{2}-\d{2}|\d{2}\.\d{2}\.\d{4})\b")
+# The trailing guard is `(?!\d)`, never `\b`. A published reading carries its instant in
+# the ISO-8601 `T` form — the form used throughout
+# docs/instruments/template-instruments.md §7.4 — and `\b` cannot match between the
+# final digit and that `T` (both are word characters), so the mandated form read UNDATED
+# while a bare date read DATED, flagging every adopter who followed the dating
+# discipline. The lookahead still refuses a partial digit run (`2026-09-271`), the one
+# thing that boundary covered.
+DATE_TOKEN = re.compile(r"\b(?:\d{4}-\d{2}-\d{2}|\d{2}\.\d{2}\.\d{4})(?!\d)")
 INTAKE_DECL_NAME = "intake.json"
 PROPOSAL_KIND_DEFAULT = "proposal"
 
@@ -1798,6 +1982,16 @@ def main() -> int:
     p_intake.add_argument("--live", action="store_true",
                           help="Read today's bytes even on a FROZEN cycle, and say so")
 
+    p_codify = subparsers.add_parser(
+        "codify", help="Record an accepted finding with the carrier its disposition owes"
+    )
+    p_codify.add_argument("cycle_id", help="Cycle identifier")
+    p_codify.add_argument("--finding", required=True, help="The accepted finding, in one line")
+    p_codify.add_argument("--disposition", required=True, choices=CODIFICATION_DISPOSITIONS,
+                          help="landed (owes --home) | routed (owes --home) | rejected (owes --reason)")
+    p_codify.add_argument("--home", default=None, help="The file+section it landed in, or where it was routed")
+    p_codify.add_argument("--reason", default=None, help="Why it was not fixed (required for `rejected`)")
+
     p_step0 = subparsers.add_parser(
         "step0", help="Recovery point: where a resumed reader stands, read from state alone"
     )
@@ -1833,6 +2027,8 @@ def main() -> int:
         return cmd_intake(args.cycle_id, args.record, args.live)
     elif args.subcommand == "step0":
         return cmd_step0(args.cycle_id, args.record)
+    elif args.subcommand == "codify":
+        return cmd_codify(args.cycle_id, args.finding, args.disposition, args.home, args.reason)
     return 1
 
 

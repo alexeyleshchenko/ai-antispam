@@ -58,7 +58,6 @@ import os
 import sqlite3
 import shutil
 import subprocess
-import sys
 import tempfile
 import datetime as dt
 from pathlib import Path
@@ -1493,10 +1492,11 @@ def _duty_tree(*, invariants=None, declaration=None) -> Path:
 _DUTY_TREE = _duty_tree()
 
 
-def _duty_leg(cron_rows, ledger_rows, *, store=None, repo=None) -> dict:
+def _duty_leg(cron_rows, ledger_rows, *, store=None, repo=None,
+              read_at=None) -> dict:
     return RUNNER.duty_receipt_leg(
         cron_rows, ["probe-home"], [], ["factory-"], ledger_rows,
-        read_at=_DUTY_READ_AT,
+        read_at=read_at if read_at is not None else _DUTY_READ_AT,
         store=store if store is not None else Path(tempfile.mkdtemp()),
         repo=repo if repo is not None else _DUTY_TREE,
     )
@@ -1554,6 +1554,85 @@ def test_a_duty_value_OUTSIDE_the_domain_is_an_ERROR_never_a_silent_pass() -> No
     assert len(leg["problems"]) == 1, leg["problems"]
     assert "outside the domain" in leg["problems"][0], leg["problems"][0]
     assert "duty=done" in leg["problems"][0], leg["problems"][0]
+
+def test_the_NEWEST_receipt_GOVERNS_a_round_that_failed_then_completed() -> None:
+    """#217: a round can fail at T and complete at T+n, and that is not a standing problem.
+
+    The measured instance: round 2026-09-28 on `registry-attest` carried a `duty=failed` row
+    written at 5-of-6, then a `duty=completed` row when the sixth fragment answered. Every
+    row is honest and neither corrects the other, so before this the round red for the rest
+    of its key and a lane had NO lawful way to record the recovery.
+
+    BOTH halves are asserted, because either alone is passable by a wrong implementation:
+    the verdict must go CLEAN, and the SUPERSEDED row must still be printed. A leg that
+    simply dropped the incomplete rows would pass the first half and hide the failure.
+    """
+    failed = _receipt_row(subject=f"registry-attest-{_DUTY_ROUND}",
+                          detail="5 of 6 fragments written back. duty=failed", n=1499)
+    failed["ts"] = _plus(_DUTY_BOUND, 0.9)
+    completed = _receipt_row(subject=f"registry-attest-{_DUTY_ROUND}",
+                             detail="6 of 6 fragments written back. duty=completed", n=1529)
+    completed["ts"] = _plus(_DUTY_BOUND, 1.5)
+    leg = _duty_leg([_duty_row()], [failed, completed])
+
+    assert leg["problems"] == [], leg["problems"]
+    assert leg["coverage"]["rounds_superseded"] == 1, leg["coverage"]
+    superseded = [e for e in leg["excused"] if "SUPERSEDED" in e]
+    assert len(superseded) == 1, leg["excused"]
+    note = superseded[0]
+    assert "n=1499" in note, note                      # the superseded row, NAMED
+    assert "duty=failed" in note, note                 # with the value it declared
+    assert "n=1529" in note, note                      # and its successor
+    assert "not backfilled" in note, note              # the row is not rewritten
+
+def test_a_round_whose_NEWEST_receipt_failed_still_REDs() -> None:
+    """The discriminator must not weaken the finding it was added alongside.
+
+    Same round, the OPPOSITE order: it completed, then a later row says it failed. The
+    newest declaration governs, so the round is a problem — which is what stops the fix
+    from becoming "any completed row anywhere clears the round".
+    """
+    completed = _receipt_row(subject=f"registry-attest-{_DUTY_ROUND}",
+                             detail="6 of 6 fragments written back. duty=completed", n=1529)
+    completed["ts"] = _plus(_DUTY_BOUND, 0.9)
+    failed = _receipt_row(subject=f"registry-attest-{_DUTY_ROUND}",
+                          detail="a fragment regressed on re-read. duty=failed", n=1540)
+    failed["ts"] = _plus(_DUTY_BOUND, 1.5)
+    leg = _duty_leg([_duty_row()], [completed, failed])
+
+    assert len(leg["problems"]) == 1, leg["problems"]
+    assert "did NOT complete" in leg["problems"][0], leg["problems"][0]
+    assert "n=1540" in leg["problems"][0], "the finding must name the GOVERNING row"
+    assert "NEWEST" in leg["problems"][0], leg["problems"][0]
+
+def test_a_SINGLE_incomplete_receipt_still_REDs() -> None:
+    """The single-row case is the one the leg was always right about — unchanged by #217."""
+    leg = _duty_leg([_duty_row()], [_receipt_row(
+        subject=f"registry-attest-{_DUTY_ROUND}",
+        detail="nothing ran today. duty=skipped", n=7)])
+    assert len(leg["problems"]) == 1, leg["problems"]
+    assert "did NOT complete" in leg["problems"][0], leg["problems"][0]
+    assert leg["coverage"]["rounds_superseded"] == 0, leg["coverage"]
+
+def test_the_DOMAIN_leg_is_NOT_superseded_by_a_later_row() -> None:
+    """A vocabulary fault is not a state a later row settles — the carve-out, pinned.
+
+    An unrecognised token is the WRITER's error, so it is reported even when a later row
+    declares a clean completion. Folding it into the supersession would let a typo be
+    buried by a subsequent correct row, which is the fabrication direction the domain leg
+    exists to refuse.
+    """
+    bad = _receipt_row(subject=f"registry-attest-{_DUTY_ROUND}",
+                       detail="the round finished. duty=done", n=1500)
+    bad["ts"] = _plus(_DUTY_BOUND, 0.9)
+    good = _receipt_row(subject=f"registry-attest-{_DUTY_ROUND}",
+                        detail="6 of 6 fragments written back. duty=completed", n=1529)
+    good["ts"] = _plus(_DUTY_BOUND, 1.5)
+    leg = _duty_leg([_duty_row()], [bad, good])
+
+    assert len(leg["problems"]) == 1, leg["problems"]
+    assert "outside the domain" in leg["problems"][0], leg["problems"][0]
+    assert "n=1500" in leg["problems"][0], leg["problems"][0]
 
 def test_a_row_that_DECLARES_NOTHING_is_NOT_a_receipt() -> None:
     """THE false-clean fix (#160), and the probe the first version would have passed.
@@ -1753,6 +1832,46 @@ def test_the_duty_leg_is_WIRED_into_the_runner_and_prints_its_population() -> No
         assert "NO duty receipt" in out, "a missing duty receipt must reach the report"
     assert rc == 1, "the leg's verdict must fail the run"
 
+
+def test_a_round_YOUNGER_than_the_residual_is_NOT_JUDGED_with_its_AGE_printed() -> None:
+    """#200's whole defect: a round IN FLIGHT read as a missing duty.
+
+    The filed specimen judged three live lanes MISSING at age 1136 s. A round younger than
+    the declared residual has a trigger that fired and a lane that has not finished, which
+    this leg cannot tell from a duty never done -- so it must not judge it. The age AND the
+    window are both asserted: a bare skip would trade a false RED for a false clean (#160).
+    """
+    young_read = _plus(_DUTY_FIRE, 0.3)          # 18 min after the fire, well inside 30 min
+    leg = _duty_leg([_duty_row()], [], read_at=young_read)
+    assert leg["problems"] == [], (
+        f"a round still inside its residual must not be judged MISSING: {leg['problems']}")
+    assert leg["coverage"]["rounds_excused_by_residual"] == 1, leg["coverage"]
+    line = [e for e in leg["excused"] if "IN FLIGHT" in e]
+    assert len(line) == 1, leg["excused"]
+    assert "18.0 min old" in line[0], line[0]      # the AGE
+    assert "30.0 min" in line[0], line[0]          # the WINDOW, beside it
+    assert "factory-registry-attest" in line[0], "the round is NAMED, never a bare count"
+
+def test_the_residual_is_PRINTED_in_the_coverage_beside_its_sibling() -> None:
+    """Criterion 3: the window travels in the coverage, so an ACCEPTED window is never a
+    hidden one -- the same discipline PUBLISH_RESIDUAL_SECS follows for the pusher."""
+    leg = _duty_leg([_duty_row()], [_receipt_row()])
+    assert leg["coverage"]["residual_secs"] == RUNNER.DUTY_RESIDUAL_SECS, leg["coverage"]
+    rc, out, err = _run([], [], cron_rows=[_duty_row()], prefixes=["factory-"])
+    assert "forward residual:" in out, out[-3000:]
+    assert f"{RUNNER.DUTY_RESIDUAL_SECS} s" in out, out[-3000:]
+
+def test_the_residual_does_NOT_excuse_a_round_OLDER_than_it() -> None:
+    """The counter-control, and the half that keeps the fix honest: a window that excused
+    everything would make the leg permanently clean, which is the pre-fix defect inverted.
+
+    The same round with the same absence, read PAST the residual, must still read MISSING.
+    """
+    old_read = _plus(_DUTY_FIRE, 5.0)               # 5 h after the fire, far past 30 min
+    leg = _duty_leg([_duty_row()], [], read_at=old_read)
+    assert leg["coverage"]["rounds_excused_by_residual"] == 0, leg["coverage"]
+    assert len(leg["problems"]) == 1, leg["problems"]
+    assert "NO duty receipt" in leg["problems"][0], leg["problems"][0]
 
 # ------------------------------------------------------------------- kit-drift leg
 
@@ -2321,7 +2440,8 @@ def test_the_leg_prints_the_bound_beside_the_population_it_judged() -> None:
     rc, out, err = _run([], [], cron_rows=[_duty_row()], prefixes=["factory-"])
     assert rc == 1, (rc, out[-2000:], err[-2000:])  # the fixture round carries no receipt
     assert "LEG duty-receipt" in out, out
-    assert "forward bound `duty_receipt_declared`" in out, out[-3000:]
+    assert "backward bound `duty_receipt_declared`" in out, out[-3000:]
+    assert "forward residual:" in out, out[-3000:]
     assert (_DUTY_BOUND in out) or ("UNDECLARED" in out), (
         "the run must print either the instant it bounded against or say plainly that "
         f"no bound is declared: {out[-3000:]}")

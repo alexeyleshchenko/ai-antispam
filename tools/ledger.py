@@ -39,7 +39,7 @@ event -- which is how a member factory carries an object the core vocabulary doe
 not have, without forking this file. A refusal exits 2.
 
 Exit: 0 ok, 1 problem (bad usage, corrupted ledger, unknown event type, or a
-close whose transition sequence is incomplete).
+`close` — or a `claim` — whose transition sequence is incomplete).
 
 Row shape (one JSON object per line, append-only):
   {"n":1,"ts":"...","event":"claim","actor":"triage","subject":"#6","detail":"..."}
@@ -48,8 +48,56 @@ The transition sequence
 -----------------------
 A subject's rows are a sequence, not a row count: `intake` (filed), then
 `claim` (taken), then `close` (finished). A close with no intake is work that
-was never filed; a close with no claim is work nobody took. `verify` reads the
-sequence and names the subject and the missing leg.
+was never filed; a close with no claim is work nobody took. And a `claim` whose
+subject has no intake ANYWHERE is work taken on a subject the ledger never
+admitted — a leg that used to be invisible until the close failed, so the defect
+was discovered hours after it was made, by whoever tried to close. It is now
+reported at the claim and refused at the write path.
+
+`verify` reads the sequence and names the subject and the missing leg; `append`
+asks the SAME predicate about the row it is about to write, so a defect is named
+at the moment it would be created. The claim leg looks for an intake anywhere in
+the subject's history, because a late-reconstruction intake lands AFTER the
+original claim by design; the close leg stays positional.
+
+The unit you are copying
+------------------------
+This file is NOT standalone. It imports modules that ship beside it in `tools/`,
+and a factory that copies this file alone gets a `ModuleNotFoundError` at import
+rather than a ledger. The sets are DECLARED below so they are checkable rather
+than prose: `tests/test_ledger_header_closure.py` asserts each declaration equals
+this file's actual intra-repo imports of that kind, in both trees.
+
+Closure: ledger_declaration.py, field_predicate.py, reconstruction.py
+
+Deferred: registry.py, telemetry.py
+
+`Closure` modules are imported at MODULE level, so a tree missing one dies at
+import -- copy them with the file. `Deferred` modules are imported INSIDE
+functions on purpose (a fixture append must not pay for the lane resolver), so a
+tree missing one degrades at that call rather than at startup. Both must be
+present for the tool to work; only the first kind stops it from loading.
+
+`EVENTS` below is the CORE vocabulary, never the factory's whole one. A factory's
+event set is a fact about ITS process, so a member that legitimately adds an event
+declares it in `docs/ledger-refs-kinds.json` and `known_events()` folds it in --
+the same shape as `tools/actors.txt` for the actor set. Forking this file to add
+an event is the wrong move: its constants must match everywhere, which is exactly
+why the declaration surfaces are separate files.
+
+Two companion artefacts are part of no copy, and a factory that syncs the modules
+WITHOUT them has a dormant declared-invariant leg that fails OPEN -- `verify`
+reads clean while the leg examines nothing:
+
+  docs/ledger-invariants.json   instantiated from the shipped
+                                `docs/ledger-invariants.example.json`. Absent, the
+                                declared boundaries are never read.
+  tests/ledger_boundary.py      the shared absence/population reader that this
+                                tool and the gates both import. Absent, the
+                                boundary legs cannot run at all.
+
+They are named here so a factory can READ that its leg is dormant, rather than
+infer it from a clean `verify`.
 """
 
 from __future__ import annotations
@@ -81,12 +129,22 @@ from ledger_declaration import (
     parse_ts,
 )
 
+# RE-EXPORTED, and not used by this module's own code: `tests/test_ledger_schema.py` reads
+# AND writes `ledger.AUTHORIZED_ACTORS_BY_EVENT` (the convergence cases), so the binding has
+# to live on THIS namespace. Written as an explicit assignment rather than left as a bare
+# import because pyflakes 3.4 reports a bare re-export as an unused import, and the
+# `as`-alias form does NOT read as a re-export to it -- both measured 2026-09-28. Keep the
+# assignment: deleting it as a no-op removes the binding the schema gate mutates.
+AUTHORIZED_ACTORS_BY_EVENT = AUTHORIZED_ACTORS_BY_EVENT
+
 # The field predicate is shared with both schema gates (#88, ledger n=405 clause 5), on the
 # same bare-neighbour import and for the same reason: `stage_tool`'s closure walker resolves
 # a neighbour by that name when it stages a throwaway tree.
 from field_predicate import (
     declared_keys,
+    declared_reclose,
     declared_revision,
+    mentions_reclose,
     declared_telemetry_provenance,
     declares_field,
     split_canonical_run,
@@ -195,7 +253,60 @@ INVARIANT_FOR_EVENT = {"close": "close_row_revision"}
 # Overridable so the gate can be tested against a throwaway ledger. Tests that
 # write the real state surface are how a probe becomes permanent corruption.
 LEDGER = Path(os.environ.get("OC_LEDGER_PATH", REPO / "evidence" / "ledger.jsonl"))
-LOCK = LEDGER.parent / ".ledger.lock"
+
+def _git_common_dir() -> Path:
+    """The repository's COMMON git dir — the same path from every linked worktree.
+
+    `--path-format=absolute` is load-bearing, not decoration: without it the main
+    checkout answers the RELATIVE `.git` while a linked worktree answers an absolute
+    path, so the two would still not agree on a file. The ledger is a REPOSITORY
+    surface and a checkout is a private view of it, so this — not the checkout — is
+    the boundary a single-writer lock belongs at (#222).
+
+    Any failure falls back to the LEDGER'S OWN DIRECTORY -- never `REPO/.git`,
+    which does not exist in exactly the case that reaches the fallback (a scratch
+    fixture, or a box without git) and made the lock raise FileNotFoundError before
+    the append could fail open. The caller creates that directory immediately before
+    taking the lock, so the anchor always has a home.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=REPO, capture_output=True, text=True, timeout=10,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            common = Path(proc.stdout.strip())
+            if common.is_dir():
+                return common
+    except (OSError, subprocess.SubprocessError):
+        pass
+    # A non-git fixture and a box without git both land here. `REPO/.git` is
+    # absent in that case by definition, so the ledger's own directory is the
+    # only anchor that exists. It is per-checkout, which is correct: with no
+    # repository there is no other checkout to serialize against.
+    return LEDGER.parent
+
+# The lock is taken against the COMMON git dir, so two checkouts of one repository
+# serialize on one file -- and against the ledger's own directory when there is no
+# git dir at all, which is the only anchor that exists for a plain-file factory.
+# A per-checkout lock still lets two checkouts mint the same
+# `n` -- measured 2026-09-28, twice inside four minutes (#222). The anchor is NOT
+# sufficient alone: it serializes writers that reach different FILES, so it is the
+# precondition for the freshness leg below rather than a substitute for it.
+LOCK = _git_common_dir() / "opencrabs-ledger.lock"
+
+# The freshness leg (#221). `read_committed_rows` judges the working file against a
+# ref only as fresh as the last fetch, so a peer's push inside that window is
+# INVISIBLE: the guard compares against a lineage that has been superseded and the
+# next append re-issues a committed `n`. One command answers whether the ref we
+# judged against is still the remote's tip, and it has no side effect.
+#
+# A FETCH IS DELIBERATELY NOT USED. A fetch inside the append lock mutates the
+# working tree's refs as a side effect of a write -- a second-writer act in the
+# terms of SKILL.md §State -- and makes an append network-bound on a box where
+# several lanes append within minutes. A refusal costs the caller one fetch and
+# tells it why.
+_GIT_TIMEOUT = 10
 SUBPROCESSES_DIR = Path(os.environ.get("OC_SUBPROCESS_DIR", REPO / "evidence" / "subprocesses"))
 
 # The closed set of event types. An open set is not a schema — it is a diary.
@@ -215,9 +326,10 @@ EVENTS = ("genesis", "intake", "claim", "dispatch", "close", "score", "ruling", 
 # (`roles/`), plus `owner`, who directs without being a lane. A factory whose
 # law names a lane the core set does not have — a meta-factory's member-comms
 # lane, say — declares it in `tools/actors.txt`, one role per line. It lives
-# there and not here because this file is copied byte-identically into every
-# factory: a lane that only one factory has cannot sit in a constant that must
-# match everywhere.
+# there and not here because these constants must MATCH EVERYWHERE: a lane that
+# only one factory has cannot sit in a shared constant, whatever any given copy
+# does with the file. (This file is not standalone either -- see the module
+# docstring's "The unit you are copying".)
 ACTORS = ("hq", "triage", "worker", "carrier", "owner")
 ACTORS_FILE = Path(os.environ.get("OC_ACTORS_PATH", Path(__file__).with_name("actors.txt")))
 
@@ -414,19 +526,90 @@ def _git_show(ref: str, rel_path: str) -> str | None:
         return None
     return proc.stdout
 
-def read_committed_rows(path: Path) -> tuple[list[dict] | None, str | None]:
+def _git_out(*args: str) -> str | None:
+    """stdout of `git ...` in REPO, or None when git could not answer at all."""
+    try:
+        proc = subprocess.run(
+            ["git", *args], cwd=REPO, capture_output=True, text=True, timeout=_GIT_TIMEOUT
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout
+
+def _ledger_rel_path(path: Path) -> str | None:
+    """`path` relative to the repository, or None when it lies outside it.
+
+    This is the discriminator both legs below hang on, and getting it wrong is how
+    a guard starts refusing lawful writes: a ledger OUTSIDE the repository has no
+    committed lineage in it -- there is nothing to be stale about and nothing to
+    fail to read -- so both legs are skipped for one. The gate suite drives
+    throwaway ledgers under /tmp, which is exactly that case.
+    """
+    try:
+        return path.resolve().relative_to(REPO).as_posix()
+    except ValueError:
+        return None
+
+def stale_ref_refusal(path: Path) -> str | None:
+    """A refusal when the ref we are about to judge against is not the remote's tip.
+
+    ONE command decides it, and it has no side effect: `git ls-remote` asks the
+    remote, `git rev-parse` asks the local ref, and a difference means the lineage
+    `read_committed_rows` is holding has been superseded by a peer's push.
+
+    It returns None -- never a refusal -- whenever the question cannot be answered:
+    no remote configured, no network, no `origin`. A fresh factory with no remote is
+    the fail-open case, and a refusal there would block exactly the factories this
+    guard cannot help.
+    """
+    if _ledger_rel_path(path) is None:
+        return None
+    remote = _git_out("ls-remote", "origin", "main")
+    if remote is None:
+        return None
+    local = _git_out("rev-parse", "origin/main")
+    if local is None:
+        return None
+    remote_sha = remote.split()[0] if remote.split() else ""
+    if not remote_sha or remote_sha == local.strip():
+        return None
+    return (
+        f"the local 'origin/main' ref ({local.strip()[:12]}) is not the remote's tip "
+        f"({remote_sha[:12]}): the committed lineage just compared is STALE, so a peer's "
+        f"push may already have taken the next n. Run `git fetch origin` and retry. "
+        f"(A refusal and not a fetch on purpose: fetching inside the append lock would "
+        f"rewrite origin/* as a side effect of a write, and would make an append "
+        f"network-bound.)"
+    )
+
+def read_committed_rows(path: Path) -> tuple[list[dict] | None, str | None, str | None]:
     """The rows the repository has COMMITTED for `path`, and the ref they came from.
 
-    (None, None) means no committed lineage was readable — a fresh factory with
+    (None, None, None) means no committed lineage was readable — a fresh factory with
     no commits, no remote, or a file that is not tracked. The caller treats that
     as fail-open: the guard makes a revert loud, it never blocks a factory that
     has nothing to compare against.
+
+    (None, None, "unreadable") is the OTHER case: a remote exists, so there IS a
+    lineage to compare against and we failed to read it. The caller REFUSES on that,
+    because a guard that cannot see committed history is not a guard.
     """
-    try:
-        rel_path = path.resolve().relative_to(REPO).as_posix()
-    except ValueError:
-        sys.stderr.write("warning: ledger guard: cannot read committed lineage (proceeding fail-open)\n")
-        return None, None
+    # THE TWO CASES ARE NOT THE SAME FACT, and until now both wrote the same stderr
+    # warning (#221 Q3):
+    #
+    #   (1) no remote, no commits -- a genuinely fresh factory. There is NOTHING to
+    #       compare against, so fail-open is correct and stays.
+    #   (2) a remote EXISTS but the lineage could not be read. There IS something to
+    #       compare against and we did not read it. That is REFUSED, by name.
+    #
+    # A stderr warning is not a reader: it is invisible on every surface this factory
+    # reads, so case (2) was indistinguishable from case (1) to everyone but the caller.
+    rel_path = _ledger_rel_path(path)
+    if rel_path is None:
+        return None, None, None
+    has_remote = _git_out("remote") not in (None, "")
     for ref in ("origin/main", "HEAD"):
         text = _git_show(ref, rel_path)
         if text is None:
@@ -443,10 +626,18 @@ def read_committed_rows(path: Path) -> tuple[list[dict] | None, str | None]:
                 parsed = False
                 break
         if parsed:
-            return rows, ref
+            return rows, ref, None
         break
+    # Reaching here means no ref yielded the file. The two cases are distinct:
+    #   UNTRACKED -- nothing was ever committed for it, so there is nothing to
+    #                compare against: fail-open, as a fresh factory deserves.
+    #   TRACKED but unreadable while a remote exists -- committed history EXISTS
+    #                and we failed to read it. That is refused.
+    tracked = _git_out("ls-files", "--error-unmatch", rel_path) is not None
+    if has_remote and tracked:
+        return None, None, "unreadable"
     sys.stderr.write("warning: ledger guard: cannot read committed lineage (proceeding fail-open)\n")
-    return None, None
+    return None, None, None
 
 def lineage_divergence(
     rows: list[dict], committed_rows: list[dict], ref_name: str
@@ -494,16 +685,38 @@ def index_by_subject(rows: list[dict]) -> dict[str, list[tuple[int, str]]]:
     return by_subject
 
 def sequence_problems(
-    by_subject: dict[str, list[tuple[int, str]]], subject: str, index: int
+    by_subject: dict[str, list[tuple[int, str]]], subject: str, index: int,
+    event: str = "close",
 ) -> list[tuple[str, str, str]]:
-    """What a `close` of `subject` at `index` is missing, as (subject, leg, message).
+    """What a `close` — or a `claim` — of `subject` at `index` is missing.
 
-    ONE predicate, TWO call sites. `verify` asks it about every close row it
-    reads; `append` asks it about the row it is about to write, with
-    `index = len(rows)` — the line that row will occupy — so the refusal names
-    the leg the audit would have named later, at the moment the write would have
-    created the defect. The order leg is bounded by the *latest* intake before
-    the close, so a re-opened subject must be re-claimed after its re-open.
+    ONE predicate, and TWO events x TWO call sites. `verify` asks it about every
+    close row it reads AND every claim row; `append` asks it about the row it is
+    about to write, with `index = len(rows)` — the line that row will occupy — so
+    the refusal names the leg the audit would have named later, at the moment the
+    write would have created the defect. The close leg is bounded by the *latest*
+    intake before the close, so a re-opened subject must be re-claimed after its
+    re-open.
+
+    WHY A CLAIM IS CHECKED AT ALL (#137 half 2, the reporter's diff). `close` was
+    the only event the sequence predicate ever looked at, so a `claim` whose
+    subject had no `intake` ANYWHERE was invisible: `verify` read GREEN while the
+    ledger was already defective, and the defect surfaced hours later when someone
+    tried to close. Measured by the reporting factory at their ledger 257 rows:
+    `verify` returned 0 problems while this leg named a claim with no intake,
+    about nine minutes before the close that turned the gate red. A claim is work
+    being taken, and work cannot be taken on a subject the ledger never admitted.
+
+    WHY THE CLAIM LEG IS "anywhere" AND NOT "before it". A late-reconstruction
+    intake lands AFTER the original claim by design, so a positional claim
+    predicate would re-flag the very repair it exists to prompt. The CLOSE leg
+    keeps its positional form, because a close could not have been lawful on the
+    row it occupies unless its subject was admitted by then.
+
+    WHY NOT A `dispatch` LEG (measured, not assumed). Three legacy subjects carry
+    a dispatch and no intake and none has a claim or a close, so a dispatch-keyed
+    leg fires false positives on rows that are not defective. The dispatch leg is
+    a SEPARATE predicate with its own three classifications; see below.
 
     Each missing leg is reported INDEPENDENTLY, with no short-circuit: one pass
     should tell the reader everything that is absent, not the first thing the
@@ -513,14 +726,28 @@ def sequence_problems(
         return []  # a missing subject is a structural problem, reported as one
 
     legs = by_subject.get(subject, [])
-    intakes = [j for j, ev in legs if ev == "intake" and j < index]
+    # A CLAIM's intake is looked for ANYWHERE, never only before it: the intake it
+    # needs may be a late reconstruction that landed after it by design (#137 half
+    # 2). A CLOSE's legs stay positional — a close could not have been lawful on
+    # the row it occupies unless its subject was already admitted by then.
+    # `j` is a GLOBAL ledger index, never a position within `legs`: bounding it by
+    # `len(legs)` compares an index against a length and silently misses every
+    # intake on the ledger's early rows (the reporting factory measured 39 false
+    # positives at 270 rows from exactly that).
+    if event == "close":
+        intakes = [j for j, ev in legs if ev == "intake" and j < index]
+    else:
+        intakes = [j for j, ev in legs if ev == "intake"]
     claims = [j for j, ev in legs if ev == "claim" and j < index]
 
     problems: list[tuple[str, str, str]] = []
     if not intakes:
+        tail = " before it" if event == "close" else " anywhere in the ledger"
         problems.append((subject, "intake",
-            f"line {index + 1}: close for {subject} has no intake before it"))
-    if not claims:
+            f"line {index + 1}: {event} for {subject} has no intake{tail}"))
+    # The claim leg is a CLOSE leg only: a `claim` row IS its own claim, so asking
+    # a claim for a claim would report every claim in the ledger against itself.
+    if event == "close" and not claims:
         problems.append((subject, "claim",
             f"line {index + 1}: close for {subject} has no claim before it"))
     # THE ORDER LEG IS RETIRED (2026-09-25, plan 2646d31a step 5). It read `claim
@@ -692,7 +919,18 @@ def cmd_append(args: argparse.Namespace) -> int:
         # lowers the working file outside the lock, and the next lawful
         # append would re-issue a committed `n`. Compare against the
         # committed lineage first, and refuse before anything is written.
-        committed_rows, ref_name = read_committed_rows(target_ledger)
+        stale = stale_ref_refusal(target_ledger)
+        if stale:
+            sys.exit(f"ledger append refused: {stale}")
+        committed_rows, ref_name, unreadable = read_committed_rows(target_ledger)
+        if unreadable:
+            sys.exit(
+                "ledger append refused: this repository HAS a remote but its committed "
+                "lineage for the ledger could not be read, so the single-writer guard "
+                "cannot see what is already committed. Run `git fetch origin` (and check "
+                "the ledger is tracked) and retry. Fail-open is for a factory with "
+                "nothing to compare against, not for one that failed to look."
+            )
         if committed_rows is not None:
             divergence = lineage_divergence(rows, committed_rows, ref_name)
             if divergence:
@@ -720,6 +958,67 @@ def cmd_append(args: argparse.Namespace) -> int:
                         f"that does not exist -- this ledger holds {_max_n} row(s), "
                         f"and a ref is a pointer to something, never a wish"
                     )
+        # A RELEASE MUST NAME THE CLAIM IT WITHDRAWS (#210, ruling n=1577). The body
+        # offered a withdrawal wearing a `close`, and that shape is REFUSED: `close`
+        # means COMPLETION here, its contract carrying the board state observed,
+        # `head=<sha>` and a rework disposition, so a withdrawal dressed as a close
+        # asserts a completion that never happened (the false-clean class) and would
+        # satisfy the intake+claim sequence while meaning the opposite. So the
+        # transition is its own event, DECLARED locally in `ledger-refs-kinds.json`
+        # rather than widened into the core tuple, and the row POINTS AT the claim it
+        # terminates -- a release naming no claim is indistinguishable from an intake,
+        # and the claim it was meant to withdraw stays open forever, so the ledger
+        # cannot answer "withdrawn, or still in flight?". Asked HERE, beside the other
+        # ref predicates, because the rows list is already in hand under the lock and
+        # only write time can prevent a release that names nothing.
+        if args.event == "release":
+            released_ns = [
+                int(value) for _ref in refs for kind, value in _ref.items()
+                if kind == "row" and str(value).isdigit()
+            ]
+            if not released_ns:
+                sys.exit(
+                    "ledger append refused: a 'release' must name the claim it "
+                    "withdraws as a ref of kind 'row' (--ref row:<n>). A release "
+                    "naming no claim is indistinguishable from an intake, and the "
+                    "claim it was meant to withdraw stays open forever"
+                )
+            for _n in released_ns:
+                _target = next((r for r in rows if r.get("n") == _n), None)
+                if _target is None:
+                    sys.exit(
+                        f"ledger append refused: release names row n={_n}, which "
+                        f"this ledger does not hold"
+                    )
+                if _target.get("event") != "claim":
+                    sys.exit(
+                        f"ledger append refused: release names row n={_n}, whose "
+                        f"event is {_target.get('event')!r} -- a release withdraws a "
+                        f"CLAIM, and a claim is the only row it can terminate"
+                    )
+                # A SECOND RELEASE OF ONE CLAIM IS REFUSED, AND THE REFUSAL NAMES THE
+                # RELEASE THAT LANDED -- #213's class on a brand-new event: `append` is
+                # not idempotent, so a client-side timeout on a COMPLETED write leaves
+                # the caller with no output, and a caller reading "no output" as "the
+                # write did not happen" retries and mints a duplicate. Measured four
+                # times on `close` in one day before that refusal landed. The same
+                # predicate, the same remedy: name the row that landed, so the writer
+                # learns its first write succeeded.
+                _prior = [
+                    r for r in rows
+                    if r.get("event") == "release"
+                    and any(str(ref.get("row")) == str(_n)
+                            for ref in (r.get("refs") or []))
+                ]
+                if _prior:
+                    _p = _prior[-1]
+                    sys.exit(
+                        f"ledger append refused: claim n={_n} already carries a "
+                        f"release at n={_p.get('n')} ({_p.get('ts')}). A claim is "
+                        f"released once; a second release is either a deliberate "
+                        f"re-release, which is a new claim, or a DUPLICATE minted by "
+                        f"retrying an append that had already completed (#213)"
+                    )
         # A close row is refused at the WRITE PATH when its subject has no
         # preceding intake and claim — the SAME predicate `verify` runs, asked
         # here about the row about to be written, with `index = len(rows)`, the
@@ -737,11 +1036,76 @@ def cmd_append(args: argparse.Namespace) -> int:
         # can never predate the gate. EXEMPTIONS governs `verify`'s reading of
         # history only, and stays printed there. This does not replace `verify`
         # — the order leg and any row written around this path remain its.
-        if args.event == "close" and target_ledger == LEDGER:
-            problems = sequence_problems(index_by_subject(rows), args.subject, len(rows))
+        # A `close` AND a `claim` are both refused at the WRITE PATH when the row
+        # about to be written would create an incomplete sequence — the SAME
+        # predicate `verify` runs, asked here with `index = len(rows)`, the line it
+        # will occupy. A claim whose subject was never admitted anywhere in the
+        # ledger is invisible to a close-keyed reading until the close fails
+        # (#137 half 2), so the leg is asked of the claim itself. The predicate
+        # phrases the message for the event that triggered it — `claim` stays
+        # `claim`.
+        if args.event in ("close", "claim") and target_ledger == LEDGER:
+            problems = sequence_problems(
+                index_by_subject(rows), args.subject, len(rows), args.event)
             if problems:
                 sys.exit("ledger append refused: "
                          + "; ".join(message for _subject, _leg, message in problems))
+            # A SECOND CLOSE FOR ONE SUBJECT IS REFUSED, AND THE REFUSAL NAMES THE
+            # EXISTING ROW (#213). The job is not tidiness: `append` is not idempotent,
+            # so a client-side timeout on a COMPLETED write leaves the caller with no
+            # output, and a caller that reads "no output" as "the write did not happen"
+            # retries and mints a byte-equivalent duplicate. Measured 4 times in one
+            # day (`#140` n=930/931, `#169` n=1361/1363, `#202` n=1502/1504,
+            # `#84` n=1509/1511), and `verify` was CLEAN over every one of them —
+            # the sequence leg looks for PRESENCE of a close, never for a second one.
+            #
+            # SO THE REFUSAL CARRIES THE ANSWER THE RETRYING WRITER NEEDED: it prints
+            # the existing row's `n` and `ts`, which is the one fact that tells that
+            # writer its first write landed. A refusal that merely said "already
+            # closed" would leave the same ambiguity the timeout created.
+            #
+            # RE-ENTRY IS DECLARED, NOT IMPLIED, and it uses the idiom this ledger
+            # already carries (`claim=reconstructed`, `head=<sha>`): a deliberate
+            # re-close states `reclose=<reason>` in its own detail. Measured: two of
+            # the six multi-close subjects (`#22` n=95/125, `#26` n=118/135) are
+            # genuine re-closes hours apart by different actors, so a blanket
+            # one-close-per-subject rule would have been wrong -- the declaration is
+            # what separates a re-open from a retry.
+            #
+            # NO BOUNDARY AND NO EXEMPTION SURFACE, for the reason the two refusals
+            # above state: this binds the row about to be written, so it can never
+            # reach history. EXEMPTIONS govern `verify`'s reading of history only.
+            if args.event == "close" and not declared_reclose(args.detail):
+                # A MALFORMED DECLARATION IS NAMED, NEVER SILENTLY IGNORED. A
+                # `reclose` value containing a SPACE terminates the canonical
+                # trailing run, so the row declares nothing even though its author
+                # wrote the token -- measured 2026-09-28: the guard prescribed a
+                # declaration, `declares_field` could never accept it (it type-tests
+                # the value), and once that was fixed a multi-word reason turned out
+                # to break the run itself. Two stacked defects reached the shipped
+                # tool because the leg had NO behavioural probe, so the message below
+                # states the VALUE FORM as well as the key.
+                if mentions_reclose(args.detail):
+                    sys.exit(
+                        "ledger append refused: this detail carries `reclose=` but NOT "
+                        "as a declaration -- its value must be ONE token (no spaces), "
+                        "because a value containing a space TERMINATES the canonical "
+                        "trailing run and the token then sits outside the run every "
+                        "trailer-scoped reader stops at. Write `reclose=<one-token>` "
+                        "with the explanation in the detail's prose (#213)."
+                    )
+                prior_closes = [r for r in rows
+                                if r.get("event") == "close"
+                                and r.get("subject") == args.subject]
+                if prior_closes:
+                    last = prior_closes[-1]
+                    sys.exit(
+                        f"ledger append refused: {args.subject} already carries a close at "
+                        f"n={last.get('n')} ({last.get('ts')}). IF THIS IS A RETRY after a "
+                        f"timeout, THE FIRST WRITE LANDED -- do not append again. A "
+                        f"deliberate re-close (the subject was re-opened) declares itself "
+                        f"with `reclose=<one-token>` in its canonical trailer (#213)."
+                    )
             # AND THE ROW MUST DECLARE THE REVISION ITS RECEIPTS DESCRIBE (#187). The
             # invariant is `close_row_revision`, enforced by
             # `tests/test_close_row_revision.py` and — until this refusal existed — by
@@ -1024,7 +1388,12 @@ def cmd_repair(args: argparse.Namespace) -> int:
     with open(target_lock, "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         rows = read_rows(target_ledger)
-        committed_rows, ref_name = read_committed_rows(target_ledger)
+        committed_rows, ref_name, unreadable = read_committed_rows(target_ledger)
+        if unreadable:
+            sys.exit(
+                "ledger repair refused: this repository HAS a remote but its committed "
+                "lineage for the ledger could not be read. Run `git fetch origin` and retry."
+            )
         if committed_rows is not None:
             divergence = lineage_divergence(rows, committed_rows, ref_name)
             if divergence:
@@ -1408,9 +1777,16 @@ def cmd_verify(args: argparse.Namespace) -> int:
     by_subject = index_by_subject(rows)
     seq_problems: list[tuple[str, str, str]] = []  # (subject, leg, message)
     for i, row in enumerate(rows):
-        if row.get("event") != "close":
+        event = row.get("event")
+        # `claim` is checked as well as `close` (#137 half 2). A claim whose subject
+        # has no intake anywhere in the ledger is a defect a close-keyed reading
+        # cannot see until the close is attempted, hours later — and by then the
+        # ledger has been carrying it. The predicate keeps the close leg positional
+        # and the claim leg global; see sequence_problems for why.
+        if event not in ("close", "claim"):
             continue
-        seq_problems.extend(sequence_problems(by_subject, row.get("subject"), i))
+        seq_problems.extend(
+            sequence_problems(by_subject, row.get("subject"), i, event))
 
     # The dispatch leg is INDEPENDENT of the close sequence above (n=524: the malformed
     # check "may land with it or before it"), and its two halves have different
@@ -1524,6 +1900,149 @@ def cmd_verify(args: argparse.Namespace) -> int:
             f"neither a strict '#<n>' nor a descriptive stem, so a work-unit dispatch "
             f"was intended and no subject-keyed predicate can resolve it. The row's "
             f"identity is immutable once pushed; the repair is a NEW row"
+        )
+
+    # A SUBJECT CLOSED MORE THAN ONCE (#213). The write path now REFUSES a second
+    # close that declares no `reclose=`, so the class cannot be created going
+    # forward -- but refusing new ones says nothing about the ones already here,
+    # and this leg is what makes the population visible. It printed nothing before:
+    # the sequence predicate looks for PRESENCE of a close, so a subject carrying
+    # TWO of them satisfied it twice over, and `verify` returned "sequences
+    # complete" over four measured duplicate pairs in a single day (`#140`, `#169`,
+    # `#202`, `#84`). An instrument that cannot OBSERVE a defect class cannot clear
+    # the surface it is aimed at, and this one was reading those four as clean.
+    #
+    # IT NAMES THEM ON BOTH PATHS, beside `malformed subject`, and for the same
+    # reason: a historical defect with no in-place repair must stay visible even
+    # when the ledger is otherwise clean, because the alternative is a reader who
+    # never meets it. The repair is a NEW row -- identity is immutable once pushed.
+    #
+    # IT PRINTS ITS POPULATION, NOT ONLY ITS HITS (#94's law, and HQ's #213 ruling):
+    # "count examined, each pair named". A finding printed over an UNSTATED
+    # population cannot be told from a finding printed over a narrowed one, so the
+    # count of subjects examined is stated even when it finds nothing.
+    #
+    # IT PRINTS WHETHER THE DECLARATION IS PRESENT, not merely the count, because
+    # the two populations need different readings: a pair declaring `reclose=` is a
+    # recorded re-open, and a pair declaring nothing is either an undeclared
+    # re-close or a retried-append duplicate. Measured split: 2 re-closes hours
+    # apart by different actors (`#22` n=95/125, `#26` n=118/135) against 4
+    # same-text pairs minutes apart.
+    #
+    # THE FORM FOR A LAWFUL RE-CLOSE IS THE DECLARED TOKEN, and it is stated here
+    # because the choice IS the decision (HQ, #213): the predicate is NOT
+    # "byte-equivalent detail", it is "declares `reclose=`". Byte-equivalence would
+    # have passed all four observed duplicates silently -- they are the SAME text
+    # by construction, which is what a retry produces -- so it is the weaker form
+    # of the two. A re-open that means it says so; a retry that cannot know
+    # whether it landed is told by the refusal, which names the row that landed.
+    close_subjects = sorted({r.get("subject") for r in rows
+                             if r.get("event") == "close"})
+    multi_closes: list[str] = []
+    for subject in close_subjects:
+        closes = [r for r in rows
+                  if r.get("event") == "close" and r.get("subject") == subject]
+        if len(closes) < 2:
+            continue
+        ns = ", ".join(f"n={r.get('n')}" for r in closes)
+        undeclared = [r for r in closes[1:]
+                      if not declares_field(r.get("detail") or "", "reclose")]
+        multi_closes.append(subject)
+        if undeclared:
+            print(
+                f"  multiple closes: {subject} carries {len(closes)} close rows "
+                f"({ns}), and {len(undeclared)} of them declare no `reclose=` reason — "
+                f"either a deliberate re-close that did not declare itself, or a "
+                f"DUPLICATE minted by retrying an append that had already completed "
+                f"(#213). A second close declaring no `reclose=` is now refused at the "
+                f"write path; this reading is of history, whose rows are immutable"
+            )
+        else:
+            print(
+                f"  multiple closes: {subject} carries {len(closes)} close rows "
+                f"({ns}), each after the first declaring `reclose=` — declared "
+                f"re-closes, not duplicates"
+            )
+    print(
+        f"  multiple closes examined: {len(close_subjects)} closed subject(s), "
+        f"{len(multi_closes)} carrying more than one close"
+    )
+
+    # THE CLAIM LIFECYCLE (#210, ruling n=1577). A claim terminates one of two ways: a
+    # `close` for its subject AFTER it (work finished), or a `release` naming its own
+    # row (work withdrawn). Anything else is OPEN -- claimed, and neither finished nor
+    # withdrawn.
+    #
+    # WHY THIS LEG EXISTS. HQ's ruling names "the claim-without-close sweep", and
+    # measured at source there was NO such leg: `verify` modelled a subject's life as
+    # intake -> claim -> close, and the claim leg asked only whether an intake existed
+    # ANYWHERE (#137 half 2). So a claim that was given up sat indistinguishable from
+    # work in flight, and the two `#172`/`#52` withdrawals lived in PROSE because no row
+    # could say it. Build what the ruling names, then read it: a declaration nothing
+    # READS is a field written but never read (#218), so the declaration and this reader
+    # land in the same change.
+    #
+    # IT PRINTS ITS POPULATION AND ITS FINDINGS, AND IT NEVER GATES. An open claim is
+    # NORMAL -- work in flight -- so this leg reports rather than reds, exactly as the
+    # dispatch-malformed leg does. What it makes visible is the reading a reader could
+    # not previously get: finished, withdrawn, or still open, counted AND named. The
+    # population is printed BESIDE the verdict (#94's law): a leg that examined nothing
+    # must not read as a leg that examined the ledger and found it clean.
+    claim_life_rows = [(i, r) for i, r in enumerate(rows) if r.get("event") == "claim"]
+    release_targets: dict[int, list[dict]] = {}
+    for _r in rows:
+        if _r.get("event") != "release":
+            continue
+        for _ref in (_r.get("refs") or []):
+            for _kind, _value in _ref.items():
+                if _kind == "row" and str(_value).isdigit():
+                    release_targets.setdefault(int(_value), []).append(_r)
+    close_index: dict[str, list[int]] = {}
+    for _i, _r in enumerate(rows):
+        if _r.get("event") == "close":
+            close_index.setdefault(_r.get("subject"), []).append(_i)
+    released_claims: list[dict] = []
+    open_claims: list[dict] = []
+    for _i, _r in claim_life_rows:
+        if release_targets.get(_r.get("n")):
+            released_claims.append(_r)
+        elif any(_j > _i for _j in close_index.get(_r.get("subject"), [])):
+            continue
+        else:
+            open_claims.append(_r)
+    # A RELEASE WHOSE REF NAMES NO CLAIM is the write path's predicate read at its other
+    # call site -- one predicate, two call sites, the shape the sequence leg already has
+    # (#98). Only read time can see a release whose target stopped being a claim after it
+    # was written; the write path is the half that prevents it.
+    orphan_releases: list[dict] = []
+    for _n, _rels in sorted(release_targets.items()):
+        _t = next((r for r in rows if r.get("n") == _n), None)
+        if _t is not None and _t.get("event") != "claim":
+            orphan_releases.extend(_rels)
+    print(
+        f"  claim lifecycle examined: {len(claim_life_rows)} claim row(s) over "
+        f"{len({r.get('subject') for _i, r in claim_life_rows})} subject(s) — "
+        f"{len(claim_life_rows) - len(released_claims) - len(open_claims)} terminal by "
+        f"close, {len(released_claims)} terminal by release, {len(open_claims)} open; "
+        f"{len(release_targets)} release(s) examined"
+    )
+    for _r in released_claims:
+        print(
+            f"  released claim: n={_r.get('n')} {_r.get('subject')} — withdrawn by "
+            f"release n={release_targets[_r.get('n')][-1].get('n')}, so it is terminal "
+            f"and not counted as in flight"
+        )
+    for _r in open_claims:
+        print(
+            f"  open claim: n={_r.get('n')} {_r.get('subject')} claimed by "
+            f"{_r.get('actor')} — no close after it and no release naming it, so the "
+            f"ledger cannot tell in-flight work from withdrawn work. A withdrawal is "
+            f"recorded as a `release` naming this row"
+        )
+    for _r in orphan_releases:
+        print(
+            f"  release at n={_r.get('n')} names a row that is not a claim — a release "
+            f"withdraws a CLAIM, and a claim is the only row it can terminate"
         )
 
     # The revision comparison runs whatever the structure check found: a ledger that is

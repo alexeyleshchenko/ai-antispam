@@ -41,9 +41,27 @@ examining modified tracked files at all. It still examines them, and a stranded 
 still fails — it now has to be older than the window to be judged stranded, which is
 what "stranded" means. The measurement run's own-artifact invariant gets the sharper
 form: `--require-committed <path>` fails on a fresh dirty path with no grace at all,
-because the run knows which artifacts are its own. A whole-tree check and a
-run-scoped check coincide in a single-lane repo and diverge here; the run-scoped one
-is the blocking one.
+because the run knows which artifacts are its own.
+
+**The run-scoped form does NOT exist, and this docstring used to claim it did.** The
+sentence "a whole-tree check and a run-scoped check ... the run-scoped one is the
+blocking one" promised a narrowing the tool has never had, and a reader who believed it
+went looking for a flag that is not here (#201, ruled 2026-09-28). The claim is
+WITHDRAWN rather than made true, because the two are not the same thing and only one of
+them is honest. `<path>` is named because a reader must not infer a form that does not exist.
+
+The real contract, stated so nothing has to be inferred:
+
+  * the walk is WHOLE-TREE and every invocation gets it — nothing narrows it, and
+    `--grace-minutes N` moves the boundary for every path, which is why #38 refused it as
+    an allowlist by the back door;
+  * a run declares its OWN artifacts with `--require-committed <path>`, which ADDS a leg
+    and never removes one: it catches a run that has not committed its own output, and it
+    is deliberately not a way to stop looking at anyone else's;
+  * a foreign stranded path is therefore a state the run must RECORD, not one it can
+    silence: the closing invariant admits the second verdict
+    `workspace_gate=blocked-by-unowned`, lawful only when the run NAMES the blocking paths,
+    and never a forged clean.
 """
 
 from __future__ import annotations
@@ -227,6 +245,21 @@ def inspect_git_working_tree(
             text=True,
             check=True,
         )
+        # THE PATHS ARE REPO-ROOT-RELATIVE, WHICHEVER DIRECTORY THE TOOL SITS IN (#199).
+        # `git status --porcelain` reports paths relative to the REPOSITORY ROOT, while
+        # `repo_dir` above is the TOOL's own directory. Those coincide only when the tool is
+        # at the root: run from a subdirectory -- the shipped tree's `TEMPLATE/`, say -- every
+        # modified file was joined against the wrong base, `getmtime` raised OSError, and the
+        # file was reported as "missing from the working tree". A false POSITIVE for every
+        # dirty path, which is worse than a miss: it names files that are present.
+        toplevel = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=repo_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        root = toplevel.stdout.strip() if toplevel.returncode == 0 else repo_dir
     except Exception as e:
         return ([f"git status failed: {e}"], [], [])
 
@@ -238,7 +271,7 @@ def inspect_git_working_tree(
         if not line:
             continue
         status_code, path = _split_status_line(line)
-        full = os.path.join(repo_dir, path)
+        full = os.path.join(root, path)
         try:
             age_min = int((now - os.path.getmtime(full)) / 60)
         except OSError:
@@ -263,7 +296,7 @@ def inspect_git_working_tree(
                 )
 
     for path in REQUIRED_COMMITTED:
-        full = os.path.join(repo_dir, path)
+        full = os.path.join(root, path)
         status = subprocess.run(
             ["git", "status", "--porcelain", "--", path],
             cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -371,6 +404,13 @@ def main() -> int:
             for a in advisories:
                 print(f"  ~ {a}", file=sys.stderr)
         if total_violations > 0:
+            # The marker comes FIRST and is a DECLARATION of the count (#205): the audit's
+            # headline reads it rather than guessing from the sentence below, whose noun
+            # (`issue(s)`) its noun class did not carry -- so the count was dropped and the
+            # recorded cause fell through to the LAST line, an informational declaration
+            # line this tool prints on EVERY run, clean or not. A reader sent there was
+            # sent to a fix that could not clear the gate.
+            print(f"oc-cause-count: {total_violations}", file=sys.stderr)
             # The header states the window it judged on: a verdict that does not
             # carry its own predicate cannot be reproduced by its reader.
             print(

@@ -58,6 +58,20 @@ and no file-identity check could see it. It REPORTS and never gates: the budget 
 process owner's and never the implementing lane's (n=574 PART 5), and a stale basis whose gate
 still runs inside its cap is a fact about the manifest rather than a failing gate.
 
+A SIXTH surface rides this file on the same terms (HQ ruling 2026-09-28, #208). The manifest's
+header asserted that the default is the LARGEST declared budget, and nothing asserted it — a
+grep for a default-vs-max check returned zero hits across `tests/` and `tools/`, so the
+sentence went false silently when an entry landed above it (118.51 against 1008.75), and
+`tests/test_questions.py` — which carries no entry, runs 69.85 s unloaded and was killed at
+the fallback on two independent runs — paid for it in UNKNOWN verdicts. The default is now
+`margin_x x the largest measured runtime among the UNDECLARED population`, and this file
+upholds it: a stated derivation that cannot contain its own population, that sits below its own
+basis, that disagrees with its recorded largest, or that omits a gate now falling through, is
+REFUSED by the loader the audit calls. Unlike the fifth surface this one GATES — the value is a
+derivation, not a policy — while the default's VALUE itself stays the process owner's. A
+manifest stating NO derivation asserts nothing and keeps loading, because the kit ships
+`gates.example.json` with a bare default on purpose.
+
 Run:  python3 tests/test_gate_registration.py
 Exit: 0 clean, non-zero on any gate that is unregistered, non-canonical, or silent.
 """
@@ -87,11 +101,9 @@ from gate_registry import (  # noqa: E402
     first_docstring_line,
     gate_registration_problems,
     law_coverage_problems,
-    law_named_mechanisms,
     manifest_drift_problems,
     optional_gate_lines,
     reads_a_docstring,
-    registered_entries,
     registration_entries,
     required_gate_problems,
     runner_form_problems,
@@ -940,11 +952,16 @@ def _basis(measured_at: str) -> dict:
     thing these probes vary is the revision the basis was taken at."""
     return {"budget_sec": 4.0, "measured_sec": 1.0, "margin_x": 4.0, "measured_at": measured_at}
 
-def _manifest(root: Path, gates: dict) -> Path:
-    """Write a throwaway manifest and return its path — never the live store."""
+def _manifest(root: Path, gates: dict, default: dict | None = None) -> Path:
+    """Write a throwaway manifest and return its path — never the live store.
+
+    `default` is optional so every probe written before #208 keeps the bare default the kit
+    ships (`gates.example.json`), which is the shape a factory inherits and must keep loading.
+    """
     path = root / "gates.json"
     path.write_text(
-        json.dumps({"default": {"budget_sec": 120.0}, "gates": gates}), encoding="utf-8"
+        json.dumps({"default": default or {"budget_sec": 120.0}, "gates": gates}),
+        encoding="utf-8",
     )
     return path
 
@@ -1086,6 +1103,263 @@ def probe_the_live_sweep_states_its_own_account() -> None:
           f"{'y' if len(budgets.gates) == 1 else 'ies'}, {len(budgets.stale)} stale")
 
 # ---------------------------------------------------------------------------
+# #208 — THE DEFAULT IS DERIVED FROM THE UNDECLARED POPULATION, and a leg upholds it.
+#
+# The class this closes. The manifest's header asserted "The default is set to the LARGEST
+# declared budget, so the fallback is never tighter than any gate actually measured", and
+# NOTHING anywhere asserted that relation: a grep for a default-vs-max check returns zero
+# hits across `tests/` and `tools/`. So the sentence went false silently the day an entry
+# landed above it -- measured at 118.51 against a largest declared 1008.75, 8.51x apart --
+# and the harm was not theoretical: `tests/test_questions.py` carries NO entry, runs 69.85 s
+# unloaded, and was KILLED at the 118.51 s fallback on two independent runs, reporting
+# UNKNOWN rather than a pass or a failure (#208).
+#
+# The replacement rule, from the same ruling: the default is `margin_x x the largest
+# measured runtime among the UNDECLARED population`, re-derived whenever that population
+# changes, with the population and the measuring revision stated beside it. Restoring the
+# withdrawn sentence literally is refused -- it is an 8.51x loosening driven by one outlier,
+# the "too high hides a hung gate" direction n=823 refuses -- so the default is bounded by
+# the gates that actually fall through to it, never by the largest entry that happens to
+# exist.
+#
+# WHY THE LEG IS HERE AND NOT IN A FILE OF ITS OWN. The surface is the same one this file
+# already carries: a declared budget's basis, and the resolution that decides whether the
+# basis still describes what runs (#125). A second file over the same manifest would be the
+# `#99` defect -- one field, two predicates -- and this file already imports the module that
+# owns the manifest instead of re-deriving it. What is NEW is the object: the default's own
+# derivation, which is what the probes below carry.
+#
+# THE BOUND, stated rather than left implied. A manifest that states NO derivation asserts
+# no relation and is never refused here -- the kit ships `gates.example.json` with a bare
+# default ON PURPOSE, so a member inherits the SHAPE without this box's measurement, and a
+# leg that RED'd there would red every bootstrapped factory. The live probe therefore
+# REPORTS the shape it found instead of demanding one, and the synthetic probes prove both
+# halves: that a stated derivation which holds is clean, and that one which does not is
+# refused.
+# ---------------------------------------------------------------------------
+
+def _live_undeclared_population(module) -> list[str]:
+    """The gates that fall through to the default, resolved AT the manifest's own revision.
+
+    THE REVISION IS THE POINT. The manifest records `measured_at`, and the population it
+    carries is a fact about THAT revision -- so the comparison is made against the same
+    object database the staleness sweep already reads (`_runner_forms`), never against the
+    working tree. A peer's untracked gate file is therefore not in the population: it falls
+    through today, but it is not part of the tree the manifest describes, and admitting it
+    would make the recorded population describe bytes no revision contains. A gate that
+    lands later is caught by the re-derivation trigger, not by a working-tree read here.
+    """
+    manifest = json.loads((REPO / "registry" / "gates.json").read_text(encoding="utf-8"))
+    declared = set(manifest.get("gates", {}))
+    revision = (manifest.get("default") or {}).get("measured_at")
+    if not isinstance(revision, str) or not revision:
+        return []
+    forms = module._runner_forms(REPO, revision) or {}
+    keys: list[str] = []
+    for argvs in forms.values():
+        for argv in argvs:
+            key = module.gate_key_for_cmd(argv.split(), REPO)
+            if not key or key in declared:
+                continue
+            exists = module._git(REPO, "cat-file", "-e", f"{revision}:{key}")[0] == 0
+            if exists:
+                keys.append(key)
+    return keys
+
+def probe_a_population_entry_above_the_default_is_refused() -> None:
+    """THE BITE. A manifest whose default cannot contain its own population is refused.
+
+    This is the shape that produced the defect: a gate falling through to a cap too tight
+    for it. The assertion is over a MANIFEST driven through the real loader, not over the
+    predicate alone -- a predicate nobody calls upholds nothing, which is the whole finding.
+    """
+    module = _gate_budget_module()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        path = _manifest(
+            root,
+            {},
+            default={
+                "budget_sec": 5.0,
+                "margin_x": module.margin_for(1.0),
+                "measured_sec": 1.0,
+                "measured_at": "HEAD",
+                # 5.0 s of measurement needs margin(5.0) x 5.0 = 20.75 s of cap, so a 5.0 s
+                # default kills this gate on a quiet box -- the realized harm, in one number.
+                "population": {"tests/test_slow.py": 5.0, "tests/test_fast.py": 1.0},
+            },
+        )
+        raised = ""
+        try:
+            module.load_gate_budgets(path=path, repo_root=root)
+        except module.GateBudgetManifestError as exc:
+            raised = str(exc)
+        check("a default that cannot contain its stated population is REFUSED",
+              "ABOVE the default" in raised, raised[:130] or "nothing was raised")
+
+def probe_a_default_below_its_own_derivation_is_refused() -> None:
+    """A stated basis is a function: a value edited away from it is the defect named."""
+    module = _gate_budget_module()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        path = _manifest(
+            root,
+            {},
+            default={
+                "budget_sec": 1.0,
+                "margin_x": module.margin_for(10.0),
+                "measured_sec": 10.0,
+                "measured_at": "HEAD",
+                "population": {"tests/test_slow.py": 10.0},
+            },
+        )
+        raised = ""
+        try:
+            module.load_gate_budgets(path=path, repo_root=root)
+        except module.GateBudgetManifestError as exc:
+            raised = str(exc)
+        check("a default BELOW margin_x x measured_sec is refused",
+              "BELOW its own stated derivation" in raised, raised[:130] or "nothing was raised")
+
+def probe_a_stated_largest_that_is_not_the_population_max_is_refused() -> None:
+    """`measured_sec` is declared AS the largest, so a population contradicting it is refused."""
+    module = _gate_budget_module()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        path = _manifest(
+            root,
+            {},
+            default={
+                "budget_sec": 100.0,
+                "margin_x": module.margin_for(1.0),
+                "measured_sec": 1.0,
+                "measured_at": "HEAD",
+                "population": {"tests/test_slow.py": 12.0},
+            },
+        )
+        raised = ""
+        try:
+            module.load_gate_budgets(path=path, repo_root=root)
+        except module.GateBudgetManifestError as exc:
+            raised = str(exc)
+        check("a stated largest that is not the population's max is refused",
+              "is not the largest recorded runtime" in raised,
+              raised[:130] or "nothing was raised")
+
+def probe_a_partial_derivation_is_refused() -> None:
+    """Half a basis reads as measured while the measurement it rests on is absent."""
+    module = _gate_budget_module()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        path = _manifest(
+            root, {}, default={"budget_sec": 100.0, "measured_sec": 12.0, "measured_at": "HEAD"}
+        )
+        raised = ""
+        try:
+            module.load_gate_budgets(path=path, repo_root=root)
+        except module.GateBudgetManifestError as exc:
+            raised = str(exc)
+        check("a PARTIAL derivation is refused, naming the absent keys",
+              "PARTIAL derivation" in raised and "margin_x" in raised and "population" in raised,
+              raised[:130] or "nothing was raised")
+
+def probe_a_bare_default_still_loads() -> None:
+    """The kit's own shape: a default with no derivation asserts nothing and must keep loading."""
+    module = _gate_budget_module()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        path = _manifest(root, {}, default={"budget_sec": 120.0})
+        try:
+            budgets = module.load_gate_budgets(path=path, repo_root=root)
+            loaded = budgets.default_sec == 120.0
+            raised = ""
+        except module.GateBudgetManifestError as exc:
+            loaded, raised = False, str(exc)
+        check("a BARE default — the shipped example's shape — still loads",
+              loaded, raised[:130] or f"default_sec={loaded}")
+        check("and the intrinsic half is silent on it, so no relation is invented",
+              module.default_basis_problems({"budget_sec": 120.0}) == [],
+              str(module.default_basis_problems({"budget_sec": 120.0}))[:130])
+
+def probe_a_live_population_the_manifest_omits_is_reported() -> None:
+    """The population half: a gate that falls through and is NOT recorded is named."""
+    module = _gate_budget_module()
+    recorded = {"tests/test_recorded.py": 1.0}
+    stated = {
+        "budget_sec": 100.0,
+        "margin_x": module.margin_for(1.0),
+        "measured_sec": 1.0,
+        "measured_at": "HEAD",
+        "population": recorded,
+    }
+    problems = module.default_population_problems(
+        stated, ["tests/test_recorded.py", "tests/test_unrecorded.py"]
+    )
+    check("a gate falling through but ABSENT from the stated population is reported",
+          len(problems) == 1 and "test_unrecorded.py" in problems[0], str(problems)[:130])
+    check("a recorded name that no longer falls through is reported too",
+          any("no longer fall through" in p for p in module.default_population_problems(
+              stated, [])),
+          "nothing reported for an empty live population")
+
+def probe_the_live_default_states_a_derivation_that_holds() -> None:
+    """On the LIVE manifest: the derivation is stated, it holds, and its population is live.
+
+    REPORTS the shape it found rather than demanding one, because the template ships a bare
+    default by design. Where a derivation IS stated, every half of it is checked: the value
+    against its own basis, the recorded population against the gates that actually fall
+    through, and the population's own containment by the default.
+    """
+    module = _gate_budget_module()
+    manifest_path = REPO / "registry" / "gates.json"
+    if not manifest_path.is_file():
+        print(
+            "  live default — this tree carries no registry/gates.json (a bootstrapped factory "
+            "ships gates.example.json and reads the declared fallback); nothing to check"
+        )
+        return
+    default = json.loads(manifest_path.read_text(encoding="utf-8")).get("default")
+    if not isinstance(default, dict) or not any(
+        key in default for key in module.DEFAULT_BASIS_KEYS
+    ):
+        print("  live default — no derivation stated (the shipped example's shape); nothing to check")
+        return
+    problems = module.default_basis_problems(default)
+    for problem in problems:
+        print(f"    {problem}")
+    check("the live default's stated derivation HOLDS", problems == [], "; ".join(problems)[:140])
+    live = _live_undeclared_population(module)
+    population = default.get("population") or {}
+    check("the leg's own population is NON-EMPTY, so the check above is not vacuous",
+          len(live) > 0, f"{len(live)} undeclared gate(s) resolved from the registration list")
+    check("every gate that falls through to the default is RECORDED in its population",
+          sorted(set(live) - set(population)) == [],
+          str(sorted(set(live) - set(population)))[:140])
+    print(f"  live default — {default['budget_sec']}s derived from {len(population)} undeclared "
+          f"gate(s), largest {max(population.values())}s; live population {len(live)}")
+
+def probe_the_containment_check_is_implied_by_the_derivation() -> None:
+    """The claim the predicate's comment rests on, MEASURED rather than asserted.
+
+    `margin(v) x v` expands to `4v + 0.75`, so it increases with `v` — which is why the
+    largest runtime carries the largest margin-budget, and why "every member of the
+    population is contained by the default" follows from the two checks above it. The
+    containment check ships anyway (a consequence nobody writes down is a consequence nobody
+    can rely on), and this probe is what stops the shipped check from being silently
+    unreachable: if the margin's shape ever changed, this fires before the next reader has to
+    find out from an inert assertion.
+    """
+    module = _gate_budget_module()
+    span = [0.05, 0.25, 1.0, 4.0, 17.0, 69.85, 252.0]
+    products = [module.margin_for(v) * v for v in span]
+    check("margin_for(v) x v increases with v over the measured span",
+          all(b > a for a, b in zip(products, products[1:])),
+          str([round(p, 2) for p in products]))
+    check("and it expands to 4v + 0.75, the closed form the predicate's comment names",
+          all(abs(module.margin_for(v) * v - (4.0 * v + 0.75)) < 1e-9 for v in span),
+          str([round(module.margin_for(v) * v - (4.0 * v + 0.75), 12) for v in span])[:120])
+
+# ---------------------------------------------------------------------------
 # #93 — THE THREE-STATE VERDICT, and the cause on the line (P29).
 #
 # The class this leg closes, as Triage measured it at pristine 2fbd097: `run_gate`
@@ -1122,6 +1396,21 @@ def _audit_module():
     import audit  # noqa: PLC0415
 
     return audit
+
+def _field_predicate_module():
+    """`tools/field_predicate.py` ITSELF -- the declared-marker predicate's one home.
+
+    Loaded by the module's own NAME on the same path-insert convention as
+    `_audit_module`, so the reader under probe is the one the audit imports rather than
+    a copy beside it. The marker's ANCHOR-FIRST rule is the property probed, and it can
+    only be probed against the real predicate.
+    """
+    tools = str(REPO / "tools")
+    if tools not in sys.path:
+        sys.path.append(tools)
+    import field_predicate  # noqa: PLC0415
+
+    return field_predicate
 
 
 def _synthetic_gate(passed: bool, unknown: bool) -> dict:
@@ -1377,6 +1666,124 @@ def probe_a_script_shaped_failure_records_its_count() -> None:
         repr(audit.reported_cause("only 2 problem(s) here\n")),
     )
 
+def probe_a_declared_marker_is_read_first_and_the_heuristic_is_the_fallback() -> None:
+    """Issue #205, ruled shape (b): the tool DECLARES its count; the noun list is fallback.
+
+    The defect this closes is not a missing noun -- it is that a noun list is a GUESS AT
+    ENGLISH. `tools/hygiene.py` prints `found N issue(s)`, which the `problem|violation`
+    class does not match, so the count leg silently did nothing and the recorded cause fell
+    through to the output's LAST line -- an INFORMATIONAL declaration line the tool prints on
+    EVERY run, clean or not. A reader who trusted that headline was sent to a fix that could
+    not clear the gate, with the severity number dropped.
+
+    Widening the class was measured and REFUSED: it would have landed on the right line only
+    by COINCIDENCE, because the advisory block prints first with the noun `item(s)`, which no
+    widened class matches. So BOTH arms are probed -- a fix whose only evidence is the marker
+    arm cannot show it left the fallback intact.
+    """
+    audit = _audit_module()
+
+    # ARM 1 -- the marker is present, and the noun is one the heuristic CANNOT see.
+    marked = (
+        "hygiene audit: 3 advisory item(s) — not failures:\n"
+        "  ~ a dirty path\n"
+        "oc-cause-count: 7\n"
+        "hygiene audit found 7 issue(s) (stranded = untouched for 60m or more):\n"
+        "  - modified tracked file: evidence/x.md (untouched for 655m)\n"
+        "hygiene declaration: 0 path(s) declared live, 0 declared scratch\n"
+    )
+    cause = audit.reported_cause(marked)
+    check(
+        "the DECLARED count is carried when the noun is one the heuristic misses",
+        "oc-cause-count: 7" in cause,
+        repr(cause),
+    )
+    check(
+        "...and the count leads, so an informational tail cannot displace it",
+        cause.startswith("oc-cause-count: 7"),
+        repr(cause),
+    )
+    check(
+        "the ADVISORY block is not read as the cause — the ordering hazard the ruling names",
+        "3 advisory item(s)" not in cause,
+        repr(cause),
+    )
+    check(
+        "the OLD predicate records the informational line here — the defect, reproduced",
+        "issue(s)" not in audit.last_reported_line(marked)
+        and "declared live" in cause,
+        repr(audit.last_reported_line(marked)) + " | " + repr(cause),
+    )
+
+    # ARM 2 -- no marker: the pre-#205 behaviour must survive, so a tool that has not
+    # adopted the marker cannot regress.
+    unmarked_script = (
+        "ledger schema: 6 problem(s) in /repo/evidence/ledger.jsonl\n"
+        "  line 15: n=15 (#41) — actor 'worker' is not authorized\n"
+    )
+    check(
+        "with NO marker the noun heuristic still works, as before",
+        "6 problem(s)" in audit.reported_cause(unmarked_script),
+        repr(audit.reported_cause(unmarked_script)),
+    )
+    pytest_shaped = (
+        "=================== FAILURES ===================\n"
+        "E   assert 1 == 2\n"
+        "=========== 1 failed, 31 passed in 1.42s ===========\n"
+    )
+    check(
+        "with NO marker a pytest-shaped failure is still UNCHANGED",
+        audit.reported_cause(pytest_shaped) == audit.last_reported_line(pytest_shaped),
+        repr(audit.reported_cause(pytest_shaped)),
+    )
+
+    # The predicate's own arms, at its one home.
+    predicate = _field_predicate_module()
+    check(
+        "the marker is read ANCHOR-FIRST — a mid-sentence mention is not a declaration",
+        predicate.declared_cause_count("we saw oc-cause-count: 7 inline\n") is None,
+        repr(predicate.declared_cause_count("we saw oc-cause-count: 7 inline\n")),
+    )
+    check(
+        "a marker line declares its integer",
+        predicate.declared_cause_count("oc-cause-count: 0\n") == 0,
+        repr(predicate.declared_cause_count("oc-cause-count: 0\n")),
+    )
+    check(
+        "an output with no marker declares nothing rather than zero",
+        predicate.declared_cause_count("hygiene audit found 7 issue(s)\n") is None,
+        repr(predicate.declared_cause_count("hygiene audit found 7 issue(s)\n")),
+    )
+
+    # The ADOPTION, pinned BEHAVIOURALLY, and this arm is not redundant with the predicate
+    # arms above: a predicate can be perfectly right while the tool that must USE it never
+    # emits it, and that failure is silent — the audit simply falls back to the heuristic
+    # this change exists to stop trusting. Measured: deleting `hygiene.py`'s emission
+    # leaves every predicate probe above GREEN, so only driving the real tool can see it.
+    # The drive is deterministic: `--require-committed` on an absent path reports a
+    # violation with NO grace, whatever the tree's age or state.
+    driven = subprocess.run(
+        [sys.executable, str(REPO / "tools" / "hygiene.py"), "--audit",
+         "--require-committed", "/nonexistent/oc-205-adoption-probe"],
+        capture_output=True, text=True, timeout=300,
+    )
+    hout = (driven.stdout or "") + (driven.stderr or "")
+    check(
+        "hygiene.py EMITS the marker on its failure path — the adoption, not merely the predicate",
+        predicate.declared_cause_count(hout) is not None,
+        repr(predicate.declared_cause_count(hout)),
+    )
+    check(
+        "the audit's recorded cause for hygiene LEADS with that declared count",
+        audit.reported_cause(hout).startswith("oc-cause-count:"),
+        repr(audit.reported_cause(hout)),
+    )
+    check(
+        "the OLD predicate would send the reader to a line that cannot clear the gate — the defect, reproduced",
+        not audit.reported_cause(hout).startswith("hygiene declaration:"),
+        repr(audit.reported_cause(hout)),
+    )
+
 def probe_the_note_is_attached_once_for_every_surface() -> None:
     """The cause is computed ONCE and read by all three surfaces (#158).
 
@@ -1479,10 +1886,23 @@ def main() -> int:
     probe_a_skipped_suite_is_still_no_verdict()
     probe_the_fail_line_cause_is_read_by_one_predicate()
     probe_a_script_shaped_failure_records_its_count()
+    probe_a_declared_marker_is_read_first_and_the_heuristic_is_the_fallback()
     probe_the_note_is_attached_once_for_every_surface()
 
     print("  live manifest — the declared revisions, swept")
     probe_the_live_sweep_states_its_own_account()
+
+    print("  synthetic probes — #208: the default's stated derivation is upheld")
+    probe_a_population_entry_above_the_default_is_refused()
+    probe_a_default_below_its_own_derivation_is_refused()
+    probe_a_stated_largest_that_is_not_the_population_max_is_refused()
+    probe_a_partial_derivation_is_refused()
+    probe_a_bare_default_still_loads()
+    probe_a_live_population_the_manifest_omits_is_reported()
+    probe_the_containment_check_is_implied_by_the_derivation()
+
+    print("  live manifest — the default's derivation, and its population")
+    probe_the_live_default_states_a_derivation_that_holds()
 
     print()
     if failures:

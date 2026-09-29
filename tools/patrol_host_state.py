@@ -110,6 +110,22 @@ PUBLISH_CADENCE_SECS = 6 * 3600
 PUBLISH_GRACE_SECS = 900
 PUBLISH_RESIDUAL_SECS = PUBLISH_CADENCE_SECS + PUBLISH_GRACE_SECS
 
+# THE DUTY RESIDUAL, stated because a threshold without its derivation is unreadable.
+# A round's receipt lands when the lane the trigger woke FINISHES ITS TURN, and the leg
+# cannot read a lane's turn -- so a round young enough that its lane is plausibly still
+# working must not be judged. DECLARED rather than derived: deriving it from the round's
+# own `cron_expr` would mean widening the cron SELECT to reach a column this file
+# deliberately never parses (see the note at `box_cron_rows`), and it would be wrong for
+# every form that parser does not know -- six declaring jobs carry six distinct forms.
+# The value is MEASURED, not chosen. The filed specimen (#200, n=1455) judged three live
+# lanes MISSING at age 1136 s (fired 06:00:46Z, read 06:19:42Z), and every fire->receipt
+# latency on this factory's own ledger for a round that DID clear sits at or under 765 s.
+# The next datum up is 2388 s, and the fastest cadence among the declaring jobs is 6 h --
+# a window reaching either would let a round go UNJUDGED until the next fire superseded it.
+# 1800 s clears the specimen with 1.58x margin, stays under the 2388 s datum, and is 8.3%
+# of the fastest cadence. Printed in the coverage: an ACCEPTED window, never a hidden one.
+DUTY_RESIDUAL_SECS = 1800
+
 # ---- the canonicality leg (law: SKILL.md section 8, the ladder T0-T4) --------------
 #
 # A check that reports a discrepancy names the TIER that resolved it (law section 8), and
@@ -1232,7 +1248,7 @@ def duty_receipt_bound(repo: Path) -> tuple[dt.datetime | None, str, str]:
 def duty_receipt_leg(rows: list[dict], homes_read: list[str], unreached: list[str],
                      prefixes: list[str], ledger_rows: list[dict], *,
                      read_at: str = "", store: Path = FRAGMENT_STORE,
-                     predicate=None, repo: Path = REPO) -> dict:
+                     predicate=None, repo: Path = REPO, now=None) -> dict:
     """The duty-completion leg: did the round each thin trigger woke LEAVE A RECEIPT?
 
     POPULATION. The ENABLED cron rows this factory DECLARES that carry a receipt
@@ -1257,7 +1273,20 @@ def duty_receipt_leg(rows: list[dict], homes_read: list[str], unreached: list[st
     problems: list[str] = []
     excused: list[str] = []
     judged: list[dict] = []
+    rounds_superseded = 0
     rounds_excused_by_bound = 0
+    rounds_excused_by_residual = 0
+    # The residual's reference instant is the READ's own instant, so every age this leg
+    # prints is a property of ONE instant rather than of when each row happened to be
+    # visited. `now` is injectable for probes; the live path uses `read_at`.
+    residual_now = now
+    if residual_now is None and read_at:
+        try:
+            residual_now = reader_parse_ts(read_at)
+        except (ValueError, TypeError):
+            residual_now = None
+    if residual_now is None:
+        residual_now = dt.datetime.now(dt.timezone.utc)
     # A leg that judges NOTHING owes no bound: computing one anyway would hand a member
     # factory with zero declared receipts a REFUSED line for a duty it never owed.
     if declared:
@@ -1299,6 +1328,21 @@ def duty_receipt_leg(rows: list[dict], homes_read: list[str], unreached: list[st
                 f"NOT JUDGED, and NEVER backfilled"
             )
             continue
+        # THE FORWARD WINDOW (#200). A round younger than the residual is IN FLIGHT: the
+        # trigger fired and the lane it woke has not finished, which the leg cannot read
+        # and must not call a missing duty. The window AND the age are PRINTED -- a bare
+        # skip would trade a false RED for a false clean, which is the #160 class.
+        age = (residual_now - fired_instant).total_seconds()
+        if 0 <= age < DUTY_RESIDUAL_SECS:
+            rounds_excused_by_residual += 1
+            excused.append(
+                f"{name} (cron id {job_id}): the round {round_date} (fired {fired}) is "
+                f"IN FLIGHT — {duty_age_text(age)} old at the {read_at or 'unstated'} read, "
+                f"against the declared residual {duty_age_text(DUTY_RESIDUAL_SECS)}. A round "
+                f"younger than its residual is NOT JUDGED: the trigger fired and its lane "
+                f"has not finished, and this leg cannot tell that from a duty never done"
+            )
+            continue
         matched = [r for r in ledger_rows
                    if receipt_subject_matches(str(r.get("subject") or ""), stem, round_date)]
         # A row that declares NOTHING is not a receipt (#160). This is the false-clean fix:
@@ -1324,6 +1368,22 @@ def duty_receipt_leg(rows: list[dict], homes_read: list[str], unreached: list[st
                 f"the TRIGGER fired, so a green run here is a MISSING duty and not a clean one"
             )
             continue
+        # THE ROUND'S NEWEST DECLARATION GOVERNS (#217). A round can fail at T and complete
+        # at T+n — the reporting lane measured exactly that on round 2026-09-28, where a
+        # `duty=failed` row at 5-of-6 was cleared by a later `duty=completed` row and the
+        # verdict did not move. A lane had no lawful way to record "failed, then completed"
+        # without leaving a standing finding, so the verdict is taken from the NEWEST row.
+        #
+        # WHAT SUPERSESSION MUST NOT DO, and it is why this prints rather than filters: it
+        # must not silently swallow a `failed` token. The superseded rows go to `excused`
+        # WITH their instant and value, so a reader meets "failed, superseded by completed"
+        # rather than only the happy ending. A supersession that hides the failure is a
+        # false clean, which is worse than the standing problem this replaces.
+        #
+        # THE DOMAIN LEG IS NOT SUPERSEDED, and deliberately: an unrecognised token is a
+        # fault in the WRITER'S VOCABULARY, not a state a later row settles. So it runs over
+        # every receipt below, while only the newest decides the verdict.
+        newest = max(receipts, key=lambda r: str(r.get("ts") or ""))
         for receipt in receipts:
             detail = str(receipt.get("detail") or "")
             n = receipt.get("n")
@@ -1335,11 +1395,24 @@ def duty_receipt_leg(rows: list[dict], homes_read: list[str], unreached: list[st
                         f"{'/'.join(predicate.DUTY_DOMAIN)}. An unrecognised value is an "
                         f"ERROR, never a silent pass"
                     )
-                elif value in DUTY_INCOMPLETE_VALUES:
-                    problems.append(
-                        f"{name} (cron id {job_id}): the round {round_date} did NOT complete — "
-                        f"receipt row n={n} declares {predicate.DUTY_KEY}={value}"
+                elif receipt is not newest and value in DUTY_INCOMPLETE_VALUES:
+                    rounds_superseded += 1
+                    excused.append(
+                        f"{name}: the round {round_date} — SUPERSEDED receipt row n={n} "
+                        f"declares {predicate.DUTY_KEY}={value} at {receipt.get('ts')}, "
+                        f"superseded by n={newest.get('n')} "
+                        f"({predicate.DUTY_KEY}="
+                        f"{'/'.join(predicate.declared_duty(str(newest.get('detail') or ''))) or 'none'} "
+                        f"at {newest.get('ts')}) — the round failed before it succeeded, and "
+                        f"the earlier row is not backfilled"
                     )
+        for value in predicate.declared_duty(str(newest.get("detail") or "")):
+            if value in DUTY_INCOMPLETE_VALUES:
+                problems.append(
+                    f"{name} (cron id {job_id}): the round {round_date} did NOT complete — "
+                    f"its NEWEST receipt row n={newest.get('n')} declares "
+                    f"{predicate.DUTY_KEY}={value} at {newest.get('ts')}"
+                )
 
     state, state_reason = attestation_state(store)
     return {
@@ -1365,13 +1438,25 @@ def duty_receipt_leg(rows: list[dict], homes_read: list[str], unreached: list[st
             "duties_judged": judged,
             "bound": bound_text,
             "bound_refusal": bound_refusal,
+            "rounds_superseded": rounds_superseded,
             "rounds_excused_by_bound": rounds_excused_by_bound,
+            "residual_secs": DUTY_RESIDUAL_SECS,
+            "rounds_excused_by_residual": rounds_excused_by_residual,
             "duties_missing": len([p for p in problems if "NO duty receipt" in p]),
             "attested_at_state": state,
             "attested_at_not_read": state_reason,
             "read_at": read_at,
         },
     }
+
+def duty_age_text(secs: float) -> str:
+    """A duration a reader can compare against a window, never a bare second count."""
+    if secs < 90:
+        return f"{secs:.0f} s"
+    if secs < 5400:
+        return f"{secs / 60:.1f} min"
+    return f"{secs / 3600:.2f} h"
+
 
 def reader_parse_ts(text: str):
     """Parse an RFC3339 instant through the reader's own predicate (#175).
@@ -1886,9 +1971,21 @@ def render(legs: list[dict], deferred: list[dict], *, slug: str, read_at: str,
                     f"{duty['receipts']} DECLARE a completion"
                 )
             lines.append(
-                f"  forward bound `{DUTY_RECEIPT_BOUNDARY_KEY}`: "
+                f"  backward bound `{DUTY_RECEIPT_BOUNDARY_KEY}`: "
                 f"{cov.get('bound') or 'UNDECLARED'}"
             )
+            residual = cov.get("residual_secs")
+            lines.append(
+                f"  forward residual: "
+                f"{duty_age_text(residual) if residual is not None else 'UNDECLARED'} "
+                f"({residual if residual is not None else '?'} s) — a round younger than "
+                f"this is IN FLIGHT and NOT JUDGED"
+            )
+            if cov.get("rounds_excused_by_residual"):
+                lines.append(
+                    f"    {cov['rounds_excused_by_residual']} round(s) are younger than "
+                    f"that residual and are excused by it, NAMED above — never a missing duty"
+                )
             if cov.get("rounds_excused_by_bound"):
                 lines.append(
                     f"    {cov['rounds_excused_by_bound']} round(s) fired BEFORE that "

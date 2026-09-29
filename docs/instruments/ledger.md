@@ -213,6 +213,52 @@ lawfully — which is precisely the pressure that pushes a member to fork the fi
 A declaration **ADDS**; it never removes or redefines a core entry, so a factory cannot shadow
 `close` and quietly escape the sequence law.
 
+### A claim is withdrawn by a `release`, never by a `close`
+
+This factory **declares `release`** in `docs/ledger-refs-kinds.json` (#210, ruling n=1577), and
+declares it *here* rather than widening the core tuple: a member that never withdraws a claim carries
+no dead vocabulary, and the transition promotes to the core set when a second factory needs it — the
+owner's promotion law applied to one event.
+
+**A withdrawal wearing a `close` is refused.** `close` means COMPLETION in this instrument — its
+contract carries the board state observed, `head=<sha>` and a rework disposition — so a withdrawal
+dressed as a close asserts a completion that never happened *and* would satisfy the intake→claim
+sequence while meaning the opposite. That is the false-clean class, and it is why the withdrawal gets
+its own event instead of borrowing a terminal one.
+
+**The row NAMES the claim it terminates.** The released claim's own row number travels as a ref of
+kind `row` (already core), plus a stated reason. Three refusals at the write path, and each answers a
+different way of writing a release that terminates nothing:
+
+| written | refused because |
+|---|---|
+| a release with no `row:` ref | indistinguishable from an intake, and the claim it meant to withdraw stays open forever |
+| a release naming a row that is **not** a claim | a claim is the only row a release can terminate |
+| a **second** release of one claim | refused **naming the release that landed** — the `#213` class on a new event, since `append` is not idempotent and a retry after a client-side timeout would mint a duplicate |
+
+**The read side learns it in the same change** — `#218`: a declaration nothing reads is a field
+written but never read. `verify` carries the **claim-lifecycle leg**: a claim terminates by a `close`
+for its subject *after* it, or by a `release` naming its own row; anything else is **OPEN**. It prints
+its population and names its findings, counted *and* named:
+
+```
+  claim lifecycle examined: 195 claim row(s) over 189 subject(s) — 192 terminal by
+  close, 0 terminal by release, 3 open; 0 release(s) examined
+```
+
+*Predicate: every `claim` row in `evidence/ledger.jsonl`, terminal-by-close positional and
+terminal-by-release by ref · scope: this factory's live ledger · instant 2026-09-28T21:58Z.*
+
+**It reports and never gates.** An open claim is NORMAL — work in flight — not a defect, so this leg
+has no red to give; what it makes visible is the reading a reader could not previously get: finished,
+withdrawn, or still open. Measured at the instant it landed, it named the two prose withdrawals this
+ruling exists for — `#52` (n=316, superseded) and `#172` (n=1357, withdrawn) — which had sat
+indistinguishable from in-flight work ever since they were written.
+
+**THE BOUND:** a declared event has no row in the core authorization matrix, so the matrix does not
+bind `release` — the same state as inferhub-watch's declared `ack`. The substantive constraint on a
+release is its ref (it must name a claim), not the role that writes it.
+
 ### The authorization declaration — a factory's own lane, without a fork
 
 Membership had a declaration surface (`tools/actors.txt`) and **authorization did not**: the
@@ -363,6 +409,128 @@ Two probe-design rules follow, and they are what this class keeps teaching:
 
 ---
 
+### 5.1 What the gate must make PROVABLE, not merely describe
+
+Promoted (scoped) from `miidas` 2026-09-28, whose gate ran 496 lines ahead of ours on the
+enforcement path. The part that transfers is the **seam**, not the file.
+
+`validate_row_schema` takes `event_types=...`, defaulting to the declaration this gate already
+consumes. The live audit is byte-for-byte unchanged; what changes is that a caller can now pass
+the **OLD private copy** and demonstrate — not describe — that the shape removed for #53 rejects a
+row the shipped writer accepts. Without the parameter the divergence was **describable but not
+demonstrable**, which is how it survived unnoticed: two consumers holding the same eight names in
+two places agree on the day they are written and diverge on the first edit of either.
+
+Two rules came with it:
+
+- **A test's POPULATION comes from the policy, never from the universe under test.** Iterating
+  `known_actors()` lets a narrowed universe shrink its own test set instead of failing it — a
+  vacuous green. The promoted cases derive the actor set from the policy, and the probe event from
+  the vocabulary's own free names, so admitting a name later cannot break them for a reason
+  unrelated to the defect.
+- **A script-mode gate needs its `unittest` cases WIRED, or they are dead code that reads as
+  coverage.** `unittest.main()` never fires when the file is run as a script. The runner is called
+  from BOTH exit paths, including the by-design `SkipGate` one — a tree with no ledger is exactly a
+  tree that needs the seam proven.
+- **AND IT MUST BE RUN AS A SCRIPT — `pytest` reports rc=5 over it, which reads exactly like a
+  failure.** Measured 2026-09-28 by HQ re-verifying the ledger set: SIX of the eight gates
+  (`test_ledger`, `test_ledger_identity`, `test_ledger_no_shrink`, `test_ledger_index`,
+  `test_docs_sync`, `test_template_sync`) are `__main__` scripts, so `python3 -m pytest
+  tests/<x>.py` returns **rc=5 "no tests ran"** — a number that means *the harness found nothing to
+  run*, never *the gate failed*. Run them as `python3 tests/<x>.py`. This is the mirror of the
+  blind-counter class: there a counter could not SEE the fault, here a runner INVENTS one, and both
+  are silent for the same reason — the exit code is read as a verdict without asking what the
+  harness can observe. A gate's wrapper and a gate's body are different instruments.
+- **GREEN AND CLEAN ARE NOT THE SAME OUTPUT, and a receipt must carry which one it read.**
+  `test_ledger_no_shrink` on origin/main is green WITH ONE DECLARED EXEMPTION, which the gate prints
+  itself ("a visible debt, not a clean run"). So "all rc=0" is true and would still be an
+  over-reading if it were offered as "nothing outstanding" — the exemption is the difference, and it
+  is stated in the gate's own output rather than in its exit code.
+
+**THE BOUND, measured, and stated so it is not rediscovered as a defect.** The same source carries
+`TestWriterGateConvergence`, which asserts the writer and the gate return the **SAME** verdict for
+every `(event, actor)` pair. Against THIS write path — 8 events × 11 actors = 88 pairs — **21 agree
+and 67 do not**, in three by-design classes: the matrix binds a **derived** actor only, so a fixture
+(which declares its actor) is authorized for whatever membership permits while the gate has no
+fixture concept (45); the writer enforces **predecessor legs** while the gate validates a single row
+in isolation (21); one pair is refused by both. The premise holds in the source tree because that
+fork carries none of those three predicates — verified there, `rc=0`, 33 tests. It cannot hold here
+without deleting this write path's identity law, so the sweep is **not** ported: grafting it
+verbatim would red 67 of 88 on a false premise and invite muting the reds, which is worse than the
+missing coverage.
+
+### 5.2 A gate's PARAMETERS are factory data, never source inside it
+
+Measured 2026-09-28, and it blocked adoption outright. `tests/test_ledger_commit_cites_no_rows.py`
+bounds the clause it upholds with a **marker commit** — the first commit touching the ledger whose
+subject obeys the clause, with only commits after it examined. That marker was a module constant:
+`MARKER = "743b543"`, a sha belonging to **this factory's** history, inside a file the template
+copies byte-identically (`tests/test_template_sync.py`). A factory bootstrapped from the template
+therefore carried the gate in a state it could neither satisfy nor lawfully correct: editing the sha
+is a fork of a shipped file, and leaving it reds the gate on a history the tree does not have. Two
+members reported the wall in the same round — `ai-antispam` HQ and `inferhub-watch` HQ — each
+holding a shipped gate they were told to adopt and could not anchor.
+
+That is **P35**, and this is its second instance, which is exactly the condition
+`tests/ledger_boundary.py` was created for (issue #78, ruled at ledger `n=515` clause 4): *a
+byte-paired gate must not assert a live-tree fact its own tree cannot satisfy*, and a second
+instance makes the remedy a MECHANISM rather than another exemption. The split is the one that
+module already states: the gate's **LOGIC is universal** — a commit after the boundary must declare
+what the boundary requires — while its **PARAMETERS are factory-specific** — the boundary itself,
+and the ledger it reads. So the parameters are DECLARED, in the factory's own tree, and one reader
+serves both the gate and the repair path.
+
+The marker now follows the same shape, on the surface the gate already reads:
+`docs/ledger-commit-exemptions.json`, whose skeleton (`…example.json`) ships while the filled file
+does not. Three outcomes, and the difference between them is the point:
+
+| state | outcome |
+|---|---|
+| a DECLARED marker that **does not resolve** | **FAILS loudly** — the factory named a sha it cannot honour, and a declared parameter that cannot be honoured is a defect, not an absence (the `#69` clause (e) shape). It never falls back to the default: substituting another factory's sha examines the wrong range and calls the result a verdict |
+| no declaration, the shipped default **resolves** | judged over the default's range — the template's own home factory, where the default is real history |
+| no declaration, the shipped default **does not resolve** | **SKIP, with the reason and the route named** — the state every fresh adopter is in, and it examines nothing and says so rather than passing vacuously |
+
+Two migrations follow from that, and both are member-side: **declare** the marker (one key, no
+fork), or **send the gate the sha it needs** as a kit change if the mechanism itself is wrong. The
+first is available to every adopter today, which is the whole point of moving the parameter out of
+the source.
+
+The declaration is also where the two **exits** stay, unchanged: an exemption entry is still keyed
+by a full 40-character sha, still printed on every run, and still admitted only where a violation
+has an EMPTY REPAIR SPACE. Nothing about the marker's move touches what may be excused — it only
+changes *who* names the range.
+
+### 5.3 A gate must not red on a declaration the kit does not ship
+
+Measured 2026-09-29 (`#229`). This instrument's gate drives `#210`'s `release` arms, and
+`release` is **factory data** — declared in `docs/ledger-refs-kinds.json`, whose skeleton alone
+ships (`…example.json`, `"events": []`). So the shipped tree had nothing to drive: the same bytes
+scored **two verdicts** — this factory's tree `rc=0`, the tree the kit hands every member
+`rc=1` with six failing arms — and the difference was a declaration, not a defect.
+
+The rule, and it is `#219`'s applied to a second surface: **a probe whose precondition is factory
+data declares that precondition once, above the arms, and SKIPS with its reason where the data is
+absent.** A missing declaration is not a broken instrument, and a shipped gate that cannot run in
+the tree it ships to is a wall in front of every adopter.
+
+The shape is the one `tests/ledger_boundary.py` already implements, and the three outcomes are
+§5.2's, which is the point — one doctrine, two surfaces:
+
+| state | outcome |
+|---|---|
+| the factory has **declared** the vocabulary | the arms RUN — this factory's own tree, where the declaration is real |
+| the factory has **not** declared it | **SKIP, with the reason stated** — the shipped tree, and every fresh adopter; it examines nothing and says so rather than passing vacuously |
+| the factory declares it but the vocabulary is **unreachable** | a defect in the declaration, not an absence — the reader treats an unreadable declaration as absent *for the core vocabulary's sake*, so this case surfaces as the first two, never as a third silent state |
+
+**How it got through, because the mechanism matters more than the instance.** `c9a8ec6` added the
+event, the declaration carrying it, the write path, the read side and the arms — and regenerated
+the kit. The declaration went to this factory's own file, which is **not a kit entry**; the kit
+gained only the test that drives it. That is the fourth instance today of one shape (`#202`,
+`#211`, `#219`, `#229`): **a change correct in the tree it was written in, in a fleet where the
+shipped tree is a DERIVED VIEW and nothing checks that a new requirement's carrier also ships.**
+The instance is closed here; the shape is not, and it is the reason this section names the
+mechanism rather than only the fix.
+
 ## 6. This instrument's divergence matrix
 
 Measured 2026-09-27T10:28Z. **Predicate:** the manifest's ledger paths, against each registered
@@ -480,6 +648,24 @@ runs twenty concurrent appends and asserts the row numbers are still `1..N`, so 
 The guarantee is *one append path*, not *tamper-proof*: the ledger is append-only by construction —
 the tool has no rewrite command — but it is still a file, and a file can be edited. That is what
 version control is for: a rewrite shows up as a diff, and the history is the audit.
+
+**Both legs leave a residual, and it is irreducible.** The lock serializes writers that reach the
+same file; the freshness leg refuses a writer whose view of the remote is stale; the divergence leg
+refuses a writer whose working file disagrees with the committed lineage. None of the three can see
+an append that exists only in a WORKING TREE. Two checkouts that each hold an **uncommitted,
+unpublished** row carry no ref the other can read, so both may re-mint the same `n` and neither is
+refused. Closing that hole would require committing on append, which a write path must not do — so
+the remedy is **protocol, not mechanism**:
+
+- **`n` is immutable once PUBLISHED, and free to RE-MINT while UNPUBLISHED.** A row that exists only
+  in a working tree has no identity a peer can observe, so moving it rewrites nothing.
+- **The unpublished sibling re-appends at the next free `n`**, and owes **no** `re-minted-from`
+  declaration: the lost copy was never published, and declaring it would imply a published row moved,
+  which is the one thing §9.6 forbids.
+- **A fork where BOTH sides are PUBLISHED is a different case** and is **not** covered by the rule
+  above: it needs an explicit reconciliation row naming both rows and the disposition. That shape is
+  **undecided**, recorded here rather than silently omitted, so a reader who meets it knows it is an
+  open case and not an oversight.
 
 ### 9.2 The settlement receipt is the TOOL's, never the author's
 
@@ -635,6 +821,92 @@ is checked against.
 for two rates — change fail rate and rework rate — and neither is computable from memory. The log
 is the **numerator**, the ledger's `close` rows are the **denominator**, and both are recomputed on
 each measurement run, never recalled: a remembered rate is an impression with a decimal point.
+
+### 9.10 The append budget, and why a duplicate pair is a LATENCY symptom
+
+**A write that exceeds its CALLER's budget while COMPLETING server-side is read by that caller as a
+failed write, and retried.** The ledger then carries a duplicate pair — and `verify` returns rc=0
+over it, because the sequence leg looks for the PRESENCE of intake/claim/close and nothing checks
+uniqueness on `(event, subject)`. Measured 2026-09-28: `#202` at `n=1502/1504` and `#84` at
+`n=1509/1511`, each pair byte-equivalent, each written by a caller that had read a 120 s timeout as
+"did not happen".
+
+Two legs answer it, deliberately INDEPENDENT — a refusal prevents, a predicate detects:
+
+| leg | site | rule |
+|---|---|---|
+| **detect** | `verify` | a subject carrying more than one `close` is a FINDING over a stated population (count examined, each pair named). It is **printed, never gated red**: a history-wide red whose repair space is empty is the #83 class — the pairs are append-only and stand |
+| **prevent** | the append path | a second `close` for a subject is REFUSED, and the refusal NAMES the existing row so a retrying writer learns its first write landed |
+
+**Scope is the SINGLETON events, not a blanket `(event, subject)` uniqueness.** Two `run` rows for
+one subject are lawful — two duty receipts — so a blanket rule would refuse a legitimate row. A
+legitimate RE-CLOSE (after a reopen) declares itself in the row's own `detail` with the `reclose=`
+token; `close` first, stated rather than inferred.
+
+**The re-close declaration's VALUE is ONE token, and that is not a style rule — a value containing
+a space TERMINATES the canonical trailing run.** Measured 2026-09-28:
+`trailer_tokens("... head=<sha> reclose=the subject was reopened")` is `[]`, so a row written in
+that form declares nothing at all while its author believes the re-close declared. Write
+`reclose=<one-token>` and keep the explanation in the detail's prose, which is where this ledger
+has always put narrative.
+
+**Two stacked defects reached the shipped tool, and the probe that catches either is now in
+`tests/test_ledger.py` (arms a-e).** The refusal first called `declares_field`, which serves a
+NUMERIC key and TYPE-TESTS the value it finds — so no free-text `reclose` value could satisfy it,
+and the escape hatch the refusal's own message prescribed was UNREACHABLE while every second
+`close` was refused, the lawful re-close included. It had been "verified" by grepping its own
+source for the word `reclose`: a receipt that proves a mechanism EXISTS and says nothing about
+whether it FUNCTIONS. Fixing the predicate exposed the second defect, the disappearing run above.
+Hence the pair of readers — `declared_reclose` reads the canonical run and IS the guard's
+predicate, while `mentions_reclose` reads the whole detail and never may be (a lexical test lets a
+row that merely DISCUSSES a re-close satisfy its own guard, the `#88` / `n=405` clause 5 damage).
+The lexical half exists for one job: so the refusal can NAME a malformed declaration rather than
+silently not seeing it, since otherwise an author is told to declare the token they already wrote.
+
+**The upstream half is not optional, and this is where the budget comes from.** The refusal stops
+the duplicate; it does not stop the timeout, and callers keep timing out until the append's own
+budget is a **declared multiple of a measured runtime**. Measured 2026-09-28 on the ops session DB,
+whose `messages` table carries NO index on `created_at` (only the rowid autoindex and
+`idx_messages_session_id`):
+
+| window | runtime | rows scanned |
+|---|---|---|
+| 1 h | 91.8 s | 77,125 |
+| 1 d | 88.2 s | 77,125 |
+| 7 d | 106.1 s | 77,125 |
+
+**The cost is the SCAN, not the window** — a one-hour range costs what a week costs — so narrowing
+the range does not help. The bound is therefore a declared budget,
+`TELEMETRY_QUERY_BUDGET_SEC` in `tools/telemetry.py` (default **30.0 s**, read through the
+`OC_TELEMETRY_BUDGET_S` seam so a factory can state its OWN measured multiple), which is **0.28x of the 106.1 s worst
+case**, enforced by a SQLite progress handler so a runaway scan is aborted rather than allowed to
+outlive its caller. A cut-off query returns **`None`**, which every call site already renders as the
+STATED ABSENCE `telemetry=unavailable` (`§9.8`, and the `#130` class): a row of zeros would read as
+a measurement of nothing, which is the fabrication the `now - 300` constant was removed for.
+
+**Declared, not derived** — a budget the instrument cannot state is a budget no reader can check,
+which is the same rule the gate budgets carry (`#94`).
+
+### 9.11 The freshness refusal — refuse, never fetch
+
+`append` refuses when the ref it is about to judge against is not the remote's tip: the committed
+lineage it just compared has been superseded, so a peer's push may already have taken the next `n`.
+The refusal names the sync (`git fetch origin`) — a refusal a caller cannot act on is a wall.
+
+Two properties are deliberate, and both are load-bearing:
+
+- **A fetch is NEVER performed inside the append lock.** Fetching rewrites `origin/*` as a side
+  effect of a *write* — a second writer acting on refs — and makes an append network-bound on a box
+  where several lanes append within minutes. The price of not fetching is one caller-side fetch.
+- **There is no force-shaped override.** An escape hatch here would be exercised precisely when the
+  guard is right, which is the only moment it matters.
+
+Fail-open keeps its own boundary, and the boundary is the whole point: a factory with **nothing to
+compare against** — no remote, no commits, an untracked ledger — still writes, because a guard that
+blocks a fresh factory protects nothing. What made this a defect is that the two cases used to be
+**indistinguishable**: both wrote the same stderr warning, and no surface this factory reads ever
+shows one. **A remote that exists but whose committed lineage cannot be read is REFUSED**, because
+there the guard failed to look rather than having had nothing to look at.
 
 ---
 

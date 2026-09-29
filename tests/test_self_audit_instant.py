@@ -47,7 +47,6 @@ from __future__ import annotations
 import datetime as dt
 import re
 import sys
-import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -254,6 +253,18 @@ def probe_the_procedure_STATES_the_requirement_where_the_run_reads_it() -> None:
 
 
 def main() -> int:
+# STATED SKIP: docs/processes.md (BOOTSTRAP-created)
+    # `docs/processes.md` is BOOTSTRAP-created (it is the factory's own process register), so
+    # the tree the kit ships carries none and the coupling probe that reads the Process 1 row
+    # has nothing to read (#199). Stated, with the artifact named, rather than a
+    # FileNotFoundError out of the tree the kit ships from.
+    if not PROCEDURE.is_file():
+        print(
+            f"self-audit-instant gate: SKIPPED — no {PROCEDURE.relative_to(REPO)} in this tree, "
+            f"so the Process 1 register row the coupling probe reads does not exist here. That "
+            f"file is BOOTSTRAP-created: a factory writes it, the kit does not."
+        )
+        return 0
     checks = [
         probe_the_predicate_BITES_on_an_artifact_naming_no_instant,
         probe_unparseable_or_partial_instants_are_NOT_accepted,

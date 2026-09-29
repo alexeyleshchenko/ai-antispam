@@ -147,27 +147,59 @@ DEFAULT_FACTORY = (os.environ.get("OC_QUESTIONS_FACTORY") or _declared_slug())
 # a future second factory's readable slug can never be swept by accident.
 LEGACY_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{32}$")
 
-def page_slug_for(entries):
-    """The page slug. STABLE by construction.
+# The aggregate page's slug: the neutral address carrying EVERY factory's open
+# questions (owner order 2026-09-28). RESERVED -- a factory whose slug collides
+# with it is REFUSED rather than allowed to overwrite the aggregate, because the
+# two are different objects that would otherwise share one directory.
+AGGREGATE_SLUG = "all"
 
-    A slug derived from the register alone would MOVE when a set is added or
-    removed -- the first open set by asked_at changes, the path changes, and the
-    owner's bookmark 404s. So the slug is recorded in pages/latest.json on the
-    first publish and REUSED from then on; the register only supplies it when
-    there is no pointer yet.
+def page_targets(sets):
+    """[(slug, entries)] -- the aggregate, plus one page per factory.
 
-    That is the same reuse discipline the retired token had (C7), which is what
-    made the URL stable; dropping it here would have reintroduced the churn the
-    constant-slug order exists to remove.
+    TWO ADDRESSES, ONE OBJECT EACH (owner order 2026-09-28). The single page used
+    to carry every factory's questions while being served from ONE factory's name
+    (`/opencrabs-dev/`), so the path named a factory and the content was the
+    fleet -- and there was no address for the union at all. Now:
+
+      /all/          every factory's open questions
+      /<factory>/    that factory's OWN open questions
+
+    The slug is DERIVED from the factory name, never recorded and reused, so it
+    cannot churn when a set is added or removed: adding a question to
+    inferhub-watch cannot move opencrabs-dev's path. That is the stability the
+    retired mint-per-publish token and the single reuse-pointer both existed to
+    provide, held here by construction instead of by a stored value.
+
+    A factory page is minted even when the factory has NOTHING open, because the
+    address is a permanent anchor: a page that existed only while questions did
+    would 404 the moment they were answered. Such a page renders its empty state.
+    Names come from EVERY set the register holds, not only the open ones, so a
+    factory that answered its last question keeps its address.
+
+    `entries` is always drawn from the OPEN sets -- an answered question is not on
+    any page, and that predicate is shared with the title and the pointer through
+    open_question_count().
     """
-    pointer = read_pointer()
-    if pointer and pointer.get("slug"):
-        return pointer["slug"]
-    for entry in entries:
+    open_entries = sorted([s for s in sets if s.get("status") == "open"],
+                          key=lambda s: s.get("asked_at") or "")
+    names = []
+    for entry in sets:
         key = entry.get("factory") or entry.get("id")
-        if key:
-            return page_slug(key)
-    return page_slug(os.environ.get("OC_QUESTIONS_FACTORY") or DEFAULT_FACTORY)
+        if key and key not in names:
+            names.append(key)
+    takes = {AGGREGATE_SLUG: "the aggregate page"}
+    targets = [(AGGREGATE_SLUG, open_entries)]
+    for name in names:
+        slug = page_slug(name)
+        if slug in takes:
+            die(2, "page address collision: factory %r needs /%s/, which is "
+                   "already taken by %s. Two different objects must not share "
+                   "one directory -- one would overwrite the other, so this is "
+                   "refused rather than published." % (name, slug, takes[slug]))
+        takes[slug] = "factory %r" % name
+        targets.append((slug, [e for e in open_entries
+                               if (e.get("factory") or e.get("id")) == name]))
+    return targets
 
 def questions_db_path():
     return (os.environ.get("OC_QUESTIONS_DB")
@@ -653,6 +685,71 @@ def flag_list(flags, name):
     return value if isinstance(value, list) else [value]
 
 
+def resolve_recommendation(raw, options, where):
+    """#652: resolve --recommended to (index, label), or die 2.
+
+    Accepts EITHER a 0-based index OR an option label, because the alternative
+    is forcing the caller to compute an array index, which fleet-directives.md
+    LLM Ergonomics item 1 forbids outright ("Never force an agent to compute,
+    track, or predict numeric array indices ... Prefer semantic anchors").
+    Measured cost: lane 6630dc9a passed `--recommended 1` meaning "the FIRST
+    option" (its prose said "RECOMMENDED: A"); both questions stored index 1,
+    the SECOND option, so the owner's page pre-checked the radio OPPOSING each
+    question's own prose for 4h26m (q24/q25, amend_count 1 each -- the lane's
+    own correction is the evidence).
+
+    Precedence is deliberate: an all-digit value is an INDEX (so an option
+    literally named "1" stays reachable), then an exact label, then a leading
+    letter. Anything else is REFUSED naming the options -- never silently
+    fallen back to an index, which is how the original wrong-base landed.
+    Returns (index, label) so callers can ECHO what they resolved; the stored
+    value stays the index, so no existing question is reinterpreted.
+    """
+    if raw is None:
+        return None, None
+    if isinstance(raw, bool) or (not isinstance(raw, int)
+                                 and not isinstance(raw, str)):
+        die(2, f"{where}: recommended must be an integer index or an option label")
+    if not options:
+        die(2, f"{where}: recommended is set but the question carries no options "
+               f"-- there is nothing to recommend")
+    if isinstance(raw, int):
+        index = raw
+    elif re.fullmatch(r"[0-9]+", raw.strip()):
+        index = int(raw.strip())
+    else:
+        text = raw.strip()
+        index = None
+        for i, o in enumerate(options):
+            if o == text:
+                index = i
+                break
+        if index is None:
+            # A bare letter is the most natural semantic anchor ("--recommended
+            # Y"). It must be matched against the OPTIONS' OWN leading letters,
+            # NOT the alphabet position: ord('Y')-65 would be 24, which would
+            # refuse options labelled X/Y with a complaint about index 24.
+            m = re.match(r"^([A-Za-z])(?:\s*[).:-]|\s*$)", text)
+            if m:
+                want = m.group(1).upper()
+                hits = [i for i, o in enumerate(options)
+                        if re.match(r"^[A-Za-z](?:\s*[).:-]|\s*$)", o)
+                        and o[0].upper() == want]
+                if len(hits) == 1:
+                    index = hits[0]
+                elif len(hits) > 1:
+                    die(2, f"{where}: recommended letter {want!r} is ambiguous -- "
+                           f"options {hits} all start with it. Pass the full label.")
+        if index is None:
+            die(2, f"{where}: recommended {text!r} matches no option and is not "
+                   f"a 0-based index. Options: "
+                   + "; ".join(f"[{i}] {o!r}" for i, o in enumerate(options)))
+    if not 0 <= index < len(options):
+        die(2, f"{where}: recommended {index} is outside options "
+               f"(0..{len(options) - 1}): "
+               + "; ".join(f"[{i}] {o!r}" for i, o in enumerate(options)))
+    return index, options[index]
+
 def normalise_questions(raw):
     """Validate and normalise the ordered question array. Order is the contract
     (#547: 'questions[] in call order'), so nothing here reorders."""
@@ -672,22 +769,28 @@ def normalise_questions(raw):
         if not isinstance(options, list):
             die(2, f"question {position}: options must be an array")
         options = [str(o) for o in options]
-        recommended = item.get("recommended")
-        if recommended is not None:
-            if not isinstance(recommended, int) or isinstance(recommended, bool):
-                die(2, f"question {position}: recommended must be an integer index")
-            if not options:
-                die(2, f"question {position}: recommended is set but the question "
-                       f"carries no options — there is nothing to recommend")
-            if not 0 <= recommended < len(options):
-                die(2, f"question {position}: recommended {recommended} is outside "
-                       f"options (0..{len(options) - 1})")
+        # kind: SINGLE (radio, the default) or MULTI (checkboxes). Question-level
+        # and fixed at ask time (owner order 2026-09-28) -- it says how many
+        # options an answer may carry, which is a property of the question, not
+        # of an answer or of the page.
+        kind = str(item.get("kind") or "single").strip().lower()
+        if kind not in ("single", "multi"):
+            die(2, f"question {position}: kind must be 'single' or 'multi' "
+                   f"(got {kind!r})")
+        if kind == "multi" and not options:
+            die(2, f"question {position}: kind=multi needs options to choose "
+                   f"between; it carries none")
+        # A label or letter is accepted because a caller must not have to count
+        # array positions; the STORED value stays an index.
+        recommended, _rec_label = resolve_recommendation(
+            item.get("recommended"), options, f"question {position}")
         out.append({
             "qid": f"q{position}",
             "title": title,
             "description": description,
             "options": options,
             "recommended": recommended,
+            "kind": kind,
             "clarify": bool(item.get("clarify", True)),
             "status": "open",
             "answer": None,
@@ -716,7 +819,11 @@ def questions_from_flags(flags):
             "title": flags.get("--title", ""),
             "description": flags.get("--description", ""),
             "options": flag_list(flags, "--option"),
-            "recommended": int(flags["--recommended"]) if "--recommended" in flags else None,
+            "recommended": resolve_recommendation(
+                flags.get("--recommended"), flag_list(flags, "--option"),
+                "question 1")[0],
+            "kind": ("multi" if "--multi" in flags
+                     else (flags.get("--kind") or "single")),
             "clarify": "--no-clarify" not in flags,
         }]
     die(2, "supply --questions-file, --questions-json, or --title/--description")
@@ -730,8 +837,8 @@ def cmd_ask(argv):
         argv,
         valued=["--factory", "--session", "--questions-file", "--questions-json",
                 "--title", "--description", "--option", "--recommended",
-                "--ttl-days", "--subject", "--close-when"],
-        boolean=["--no-clarify", "--json", "--no-publish"],
+                "--ttl-days", "--subject", "--close-when", "--kind"],
+        boolean=["--no-clarify", "--json", "--no-publish", "--multi"],
     )
     # --lane was REMOVED (owner order 2026-09-25): the lane is resolved from the
     # asking session's own binding, so a caller cannot mislabel itself. parse_flags
@@ -771,6 +878,20 @@ def cmd_ask(argv):
         data = read_register()
         entry = find_set(data, factory)
         created = entry is None
+        if not created and flags.get("--subject") is not None:
+            # Defect reported 2026-09-28 (miidas): on an EXISTING set the flag
+            # parsed, was never read, and the command exited 0 -- the caller's
+            # unit key went nowhere, and only a read of the stored set showed
+            # it. The set subject is CREATION-ONLY: it is recorded when the set
+            # is minted, and a set names ONE unit, so a second value could not
+            # describe a set holding questions about two. Refusing converts a
+            # silent no-op into a loud one: a field that cannot be updated must
+            # not read as one that can.
+            die(2, "--subject is CREATION-ONLY: set %r already carries %r, and "
+                   "a set names ONE unit. This add cannot change it, so the "
+                   "value would be discarded rather than recorded. Omit "
+                   "--subject, or name the unit in the question's own "
+                   "title/description." % (factory, entry.get("subject")))
         if entry is None:
             entry = {
                 "id": factory,
@@ -806,6 +927,14 @@ def cmd_ask(argv):
             if close_when:
                 question.setdefault("close_when", close_when)
         entry["questions"].extend(questions)
+        # ECHO what --recommended RESOLVED, read back from what was STORED
+        # (#652). A caller who typed a label must see which option it became,
+        # and echoing the stored value proves the RECORD rather than restating
+        # the intention -- which is exactly what the silent wrong-base hid.
+        resolved_recs = [(q.get("qid"), q.get("recommended"),
+                          (q.get("options") or [None])[q["recommended"]]
+                          if q.get("recommended") is not None else None)
+                         for q in questions]
         write_register_atomic(data)
 
     oc_log_extra("set", factory)
@@ -826,6 +955,9 @@ def cmd_ask(argv):
         # the surface now; the caller needs the count and the link.
         print(f"registered {len(questions)} question(s) in {factory} "
               f"(lane {lane}, ttl {ttl_days}d)")
+        for _qid, _idx, _label in resolved_recs:
+            if _idx is not None:
+                print(f"  recommended {_qid}: [{_idx}] {_label!r}")
         print(f"{total} open question(s) across {sets} factory set(s)")
         if page:
             print(f"page {page}")
@@ -842,8 +974,15 @@ def cmd_list(argv):
     entries = data["sets"]
     if "--all" not in flags:
         entries = [s for s in entries if s.get("status") == "open"]
-    if flags.get("--session"):
-        entries = [s for s in entries if s.get("session") == flags["--session"]]
+    # --session is the RETURN ADDRESS, so it must select QUESTIONS, not sets
+    # (#632, 2026-09-28). A standing factory set is created once by one lane and
+    # then asked into by MANY, so comparing the SET's session against the caller
+    # compares the CREATOR against the caller and returns zero for every
+    # question's own author. Measured cost: a lane using `list` as its "have I
+    # already asked this?" check saw 0 open, filed a duplicate, and put two
+    # questions for one issue on the owner's page. This mirrors
+    # question_return_address, the per-question rule notify already uses.
+    want_session = (flags.get("--session") or "").strip()
 
     # Group by LANE, not by set (owner order 2026-09-25): one standing factory
     # set holds questions from many lanes, so the SET is not the unit a reader
@@ -851,6 +990,11 @@ def cmd_list(argv):
     lanes = {}
     for entry in entries:
         for question in entry.get("questions", []):
+            if want_session:
+                q_session = (question.get("session")
+                             or entry.get("session") or "").strip()
+                if q_session != want_session:
+                    continue
             lane = question.get("lane") or entry.get("lane") or "unknown"
             lanes.setdefault(lane, []).append((entry, question))
 
@@ -878,8 +1022,10 @@ def cmd_list(argv):
                     {"set": entry.get("id"), "qid": question.get("qid"),
                      "title": question.get("title"),
                      "status": question.get("status"),
+                     "kind": question.get("kind") or "single",
                      "age": fmt_age(question.get("asked_at")
-                                    or entry.get("asked_at"))}
+                                    or entry.get("asked_at")),
+                     "delivery": question.get("delivery")}
                     for (entry, question) in pairs],
             })
         print(json.dumps({"open_questions": total_open, "lanes": rows},
@@ -909,8 +1055,11 @@ def cmd_list(argv):
                     detail += f"  (recommended: {options[recommended]})"
             else:
                 detail += f"  -> {question.get('status')}"
+                if (question.get("kind") or "single") == "multi":
+                    detail += " [multi-select]"
                 if question.get("answer") is not None:
                     detail += f": {question.get('answer')}"
+                detail += delivery_note(question)
             print(detail)
     return 0
 
@@ -942,11 +1091,13 @@ def cmd_answer(argv):
     if len(positional) < 2:
         die(2, "answer requires <set-id> <question-id> [choice-index|clarify]")
     set_id, qid = positional[0], positional[1]
-    choice = positional[2] if len(positional) > 2 else None
+    # Several choices arrive as several positionals or as one comma-joined
+    # value, so `answer S q1 0 2` and `answer S q1 0,2` are the same act.
+    choice = ",".join(positional[2:]) if len(positional) > 2 else None
     if flags.get("--clarify"):
         choice = "clarify"
     if choice is None and flags.get("--text") is None:
-        die(2, "supply a choice index, the literal 'clarify', or --text")
+        die(2, "supply one or more choice indices, the literal 'clarify', or --text")
     via = flags.get("--via") or "cli"
     if via not in ("card", "page", "cli"):
         die(2, "--via must be card, page or cli")
@@ -994,16 +1145,28 @@ def cmd_answer(argv):
             question["answer_kind"] = "clarify"
         else:
             options = question.get("options") or []
-            index = None
+            kind = question.get("kind") or "single"
+            indices = []
             if choice is not None:
                 try:
-                    index = int(choice)
+                    indices = [int(piece) for piece in str(choice).split(",")
+                               if piece.strip() != ""]
                 except ValueError:
                     die(2, f"{choice!r} is neither an option index nor 'clarify'")
+                if not indices:
+                    die(2, "no option index given")
                 if not options:
                     die(2, f"set {set_id}/{qid} has no options; answer with --text")
-                if not 0 <= index < len(options):
-                    die(2, f"option {index} is outside 0..{len(options) - 1}")
+                for _i in indices:
+                    if not 0 <= _i < len(options):
+                        die(2, f"option {_i} is outside 0..{len(options) - 1}")
+                if kind != "multi" and len(indices) > 1:
+                    # The kind is fixed at ASK time, so an answer cannot widen it.
+                    # Silently taking the first would record an answer the reader
+                    # did not give, which is the class this instrument exists to
+                    # remove.
+                    die(2, f"{set_id}/{qid} is single-select and takes ONE option; "
+                           f"got {len(indices)} ({choice!r})")
             # A TYPED ANSWER IS NEVER DISCARDED (owner report 2026-09-25). The
             # page pre-checks the recommended radio, so the browser always posts
             # a choice index; a filled text box therefore arrives with BOTH
@@ -1013,11 +1176,27 @@ def cmd_answer(argv):
             if text:
                 question["answer"] = text
                 question["answer_kind"] = "text"
-                if index is not None:
-                    question["selected_option"] = index
-            elif index is not None:
-                question["answer"] = options[index]
-                question["answer_kind"] = "option"
+                if indices:
+                    # The NAME follows the kind, so an existing reader of a
+                    # single-select question finds what it always found. A typed
+                    # answer keeps the chosen index as context (owner rule: a
+                    # typed answer is never discarded).
+                    if kind == "multi":
+                        question["selected_options"] = indices
+                    else:
+                        question["selected_option"] = indices[0]
+            elif indices:
+                if kind == "multi":
+                    # A multi answer is a LIST, and answer_kind says so: a reader
+                    # must be able to tell one label from several without
+                    # inspecting the option set.
+                    question["answer"] = [options[_i] for _i in indices]
+                    question["answer_kind"] = "options"
+                    question["selected_options"] = indices
+                else:
+                    question["answer"] = options[indices[0]]
+                    question["answer_kind"] = "option"
+                    question["selected_option"] = indices[0]
             else:
                 question["answer"] = flags.get("--text")
                 question["answer_kind"] = "text"
@@ -1029,9 +1208,10 @@ def cmd_answer(argv):
         remaining = [q for q in entry.get("questions", [])
                      if not question_is_closed(q)]
         # A factory set is NEVER auto-archived (owner order 2026-09-25): it stays
-        # open at 0..N questions, so the page, its lane sections and their
-        # anchors are permanent. Answering the last question leaves the set OPEN
-        # with 0 open questions.
+        # open at 0..N questions, so the page and its ADDRESS are permanent.
+        # Answering the last question leaves the set OPEN with 0 open questions;
+        # its lane section stops rendering (owner order 2026-09-28), so the
+        # section is explicitly NOT part of what "permanent" names here.
         archived = 0
         write_register_atomic(data)
 
@@ -1108,15 +1288,13 @@ def cmd_amend(argv):
             question["options"] = options if isinstance(options, list) else [options]
             changed.append("options")
         if flags.get("--recommended") is not None:
-            try:
-                index = int(flags["--recommended"])
-            except (TypeError, ValueError):
-                die(2, "--recommended must be an integer index")
-            count = len(question.get("options") or [])
-            if not 0 <= index < count:
-                die(2, f"--recommended {index} is outside 0..{max(count - 1, 0)}")
+            index, rec_label = resolve_recommendation(
+                flags["--recommended"], question.get("options") or [],
+                f"{set_id}/{qid}")
             question["recommended"] = index
-            changed.append("recommended")
+            # Echo what it RESOLVED, so a caller who typed a label sees which
+            # option it became rather than having to re-read the register.
+            changed.append(f"recommended={index} ({rec_label})")
 
         # The whole point: the question becomes ANSWERABLE again.
         was = question.get("status")
@@ -1356,12 +1534,7 @@ def find_set_anywhere(set_id):
     return None
 
 def compose_answer_body(entry, qid=None):
-    questions = entry.get("questions") or []
-    if qid:
-        questions = [q for q in questions if q.get("qid") == qid]
-    answered = [q for q in questions
-                if q.get("answer") is not None
-                or q.get("status") in ("clarifying", "clarified")]
+    answered = answerable_questions(entry, qid)
     if not answered:
         return None
     # The lane comes from the ANSWERING questions, not from the set: one
@@ -1388,6 +1561,64 @@ def compose_answer_body(entry, qid=None):
     if len(body) > NOTIFY_BODY_MAX:
         body = body[:NOTIFY_BODY_MAX] + " (truncated)"
     return body
+
+def answerable_questions(entry, qid=None):
+    """The questions a delivery BODY carries: answered, or awaiting a clarify.
+    Extracted so the body and the delivery stamp cannot disagree about which
+    questions were actually in the message."""
+    questions = entry.get("questions") or []
+    if qid:
+        questions = [q for q in questions if q.get("qid") == qid]
+    return [q for q in questions
+            if q.get("answer") is not None
+            or q.get("status") in ("clarifying", "clarified")]
+
+def delivery_outcome(status):
+    """HTTP status -> the vocabulary the register records."""
+    if 200 <= status < 300:
+        return "delivered"
+    if status == 0:
+        return "unreachable"
+    return "refused"
+
+def stamp_delivery(set_id, qids, outcome, http, mode):
+    """Record that a delivery was ATTEMPTED and what happened. Returns the count
+    stamped, or None when the set is not in the live register.
+
+    A consequence is not a receipt: "answered" says the register closed the
+    question, not that the lane ever saw the answer. Only `notify` knows, so
+    only `notify` can record it.
+
+    BOUND: this stamps the LIVE register. A set that has been archived carries
+    its questions in archive.jsonl, which this does not rewrite -- an archive is
+    history, and rewriting history to record a delivery would be worse than the
+    gap it closes.
+    """
+    stamp = {"attempted_at": now_iso(), "outcome": outcome,
+             "http": http, "mode": mode}
+    with RegisterLock():
+        data = read_register()
+        live = next((s for s in data["sets"] if s.get("id") == set_id), None)
+        if live is None:
+            return None
+        targets = answerable_questions(live) if qids is None else [
+            q for q in (live.get("questions") or []) if q.get("qid") in qids]
+        for question in targets:
+            question["delivery"] = dict(stamp)
+        write_register_atomic(data)
+        return len(targets)
+
+def delivery_note(question):
+    """How the register read renders delivery. An answer with no stamp reads as
+    NOT RECORDED rather than as delivered -- the absence is the finding, so it
+    is printed rather than omitted."""
+    delivery = question.get("delivery") or {}
+    if not delivery:
+        return "  [delivery: NOT RECORDED]"
+    if delivery.get("outcome") == "delivered":
+        return "  [delivered %s]" % (delivery.get("attempted_at") or "?")
+    return "  [delivery FAILED: %s %s]" % (delivery.get("outcome"),
+                                           delivery.get("attempted_at") or "?")
 
 def a2a_deliver(session, body, mode="turn-end"):
     import urllib.error
@@ -1460,13 +1691,27 @@ def cmd_notify(argv):
         return 0
 
     status, response = a2a_deliver(session, body, mode)
+
+    # Stamp the ATTEMPT on the questions the body carried. A delivery the exit
+    # code reports and the register forgets leaves a lane blocked while every
+    # surface it can read says the question is closed.
+    stamped = stamp_delivery(entry.get("id"),
+                             [q.get("qid") for q in answerable_questions(
+                                 entry, flags.get("--qid"))],
+                             delivery_outcome(status), status, mode)
+
     if flags.get("--json"):
         print(json.dumps({"set": entry.get("id"), "session": session,
-                          "mode": mode, "http": status, "response": response},
+                          "mode": mode, "http": status, "response": response,
+                          "delivery": delivery_outcome(status),
+                          "stamped": stamped},
                          indent=2, ensure_ascii=False))
     else:
-        print("notified %s (set %s) — http %s"
-              % (lane_name, entry.get("id"), status))
+        note = ("stamped %d question(s) as %s"
+                % (stamped, delivery_outcome(status))) if stamped else \
+               "not stamped: the set is not in the live register"
+        print("notified %s (set %s) — http %s (%s)"
+              % (lane_name, entry.get("id"), status, note))
     if status == 0:
         return 4
     if status >= 400:
@@ -1593,9 +1838,11 @@ def build_spec(entries, slug, expires_at, action):
 
     Sections are per LANE, not per set (owner order 2026-09-25): one standing
     factory set holds questions from many lanes, and the owner addresses a
-    sub-part of the page by LANE ANCHOR. A lane whose questions are all answered
-    STILL renders its section, so an anchor handed out yesterday keeps resolving
-    today -- the anchor's stability is the whole point of it.
+    sub-part of the page by LANE ANCHOR. A lane renders while it has an OPEN
+    question (owner order 2026-09-28): an all-answered lane is NOT rendered, so
+    the page never carries a block reporting nothing. That SUPERSEDES the
+    earlier rule that an all-answered lane kept its section for the sake of a
+    handed-out anchor -- the page is what the owner reads.
 
     `slug` rides in the form's `token` field: the answer backend's token check
     is a SLUG check now. The field NAME is unchanged because that is the wire
@@ -1624,6 +1871,10 @@ def build_spec(entries, slug, expires_at, action):
                 base = "%s-%s" % (set_id, qid)
                 options = question.get("options") or []
                 recommended = question.get("recommended")
+                # Absent means SINGLE (owner order 2026-09-28) -- the store's 44
+                # pre-existing questions carry no kind and must keep rendering
+                # radios, so the default lives here as well as in normalise.
+                is_multi = (question.get("kind") or "single") == "multi"
                 # One element per BLOCK, in document order: the description is no
                 # longer a single opaque fragment but typed children of the question.
                 children = []
@@ -1637,7 +1888,8 @@ def build_spec(entries, slug, expires_at, action):
                     elements[key] = {
                         "type": "Option",
                         "props": {"label": options[index], "value": str(index),
-                                  "recommended": index == recommended},
+                                  "recommended": index == recommended,
+                                  "multi": is_multi},
                         "children": []}
                     children.append(key)
                 children.append(base + "-text")
@@ -1656,6 +1908,7 @@ def build_spec(entries, slug, expires_at, action):
                 elements[base] = {
                     "type": "Question",
                     "props": {"qid": qid, "title": question["title"],
+                              "multi": is_multi,
                               "recommendation": (options[recommended]
                                                  if options and recommended is not None
                                                  and 0 <= recommended < len(options)
@@ -1671,13 +1924,28 @@ def build_spec(entries, slug, expires_at, action):
                                            lane, set_id, qid)},
                     "children": children}
                 question_keys.append(base)
+        if not question_keys:
+            # Owner order 2026-09-28: a lane with nothing OPEN renders NO
+            # section. It used to render one carrying "0 open", on the argument
+            # that a handed-out lane anchor should keep resolving -- but the
+            # cost was a page of empty blocks reporting nothing, and the owner
+            # READS the page, not the anchors. A lane's anchor resolves while
+            # that lane has an open question; a register with nothing open at
+            # all falls through to the typed empty state below.
+            continue
         n_open = sum(1 for (_e, q) in by_lane[lane] if not question_is_closed(q))
         # set_id: the section can span several sets, so it names the set only
         # when there is exactly one. data-set is for the reader, not the tool.
+        # Derived from the CARDS this section renders (owner order 2026-09-28):
+        # a lane also holds questions that are already CLOSED, and naming their
+        # factory here put a control on the selector for a block holding none
+        # of that factory's cards -- another empty set offered to the reader,
+        # and a filter that scopes someone else's question.
         set_ids = []
-        for (entry, _q) in by_lane[lane]:
-            if entry["id"] not in set_ids:
-                set_ids.append(entry["id"])
+        for key in question_keys:
+            sid = elements[key]["props"]["set"]
+            if sid not in set_ids:
+                set_ids.append(sid)
         elements[anchor] = {
             "type": "QuestionSet",
             "props": {"set_id": ",".join(set_ids), "lane": lane, "anchor": anchor,
@@ -1812,6 +2080,17 @@ UI_JS = """(function () {
   // from each section's own data-set attribute -- already in the DOM, so no
   // spec, renderer or backend change is needed. The control is an ENHANCEMENT:
   // it is built here, so with JS off the page still reads in full.
+  // Per-factory OPEN COUNTS (owner order 2026-09-28): the selector names how
+  // many questions are waiting on each factory. Counted from each CARD's own
+  // set field rather than from its section's data-set, because a lane section
+  // can span two sets (lane-hq carries meta-factory,ai-antispam) and its cards
+  // belong to different factories -- a section-level tally would credit BOTH
+  // with the same cards.
+  var counts = {};
+  document.querySelectorAll('input[name="set"]').forEach(function (inp) {
+    counts[inp.value] = (counts[inp.value] || 0) + 1;
+  });
+
   var setSections = document.querySelectorAll('section.set[data-set]');
   if (setSections.length) {
     var factories = [];
@@ -1839,7 +2118,7 @@ UI_JS = """(function () {
       [''].concat(factories).forEach(function (f) {
         var b = document.createElement('button');
         b.type = 'button';
-        b.textContent = f || 'All';
+        b.textContent = f ? f + ' (' + (counts[f] || 0) + ')' : 'All';
         b.setAttribute('data-f', f);
         b.addEventListener('click', function () { apply(f); });
         bar.appendChild(b);
@@ -1885,10 +2164,27 @@ background:var(--amber);box-shadow:0 0 0 3px var(--amber-soft)}
 .q{background:var(--strip);border:1px solid var(--line);border-left:3px solid var(--line);
 border-radius:0 7px 7px 0;padding:1.2rem 1.3rem 1.1rem;margin:0 0 .85rem}
 .qt{font:600 clamp(1.2rem,2.7vw,1.42rem)/1.3 var(--serif);letter-spacing:-.015em;margin:0}
+/* The factory name in a SECTION heading (owner order 2026-09-28, moved there
+the same day from the question's own heading). It borrows the page's own
+micro-label idiom -- mono, dim, uppercase -- so it reads as context ABOUT the
+lane's questions and never as part of the lane name. Inherits the h2's size so
+the heading stays one line of type. */
+.set h2 .qset{font:inherit;letter-spacing:.13em;color:var(--dim);
+margin-right:.55rem;white-space:nowrap}
 .rec{position:relative;margin:.9rem 0 1.15rem;padding:.75rem .95rem;border-left:2px solid var(--amber);
 border-radius:0 5px 5px 0;background:var(--amber-soft);font-size:.95rem;line-height:1.5}
-.rec::before{content:'lane recommends';display:block;font:.6rem/1.4 var(--mono);
-letter-spacing:.15em;text-transform:uppercase;color:var(--amber);margin-bottom:.28rem}
+/* No ::before label here any more: the label is the <summary> above, because a
+disclosure control needs real text. A CSS-generated label beside a real one
+would double it, and a dead rule reads as live. */
+/* The band FOLDS (owner order 2026-09-27, the same order as the clarifying
+form below): the label is the summary, the counsel is inside. The amber
+signature stays -- it is the page's, and folding must not erase it. */
+.recbox{margin:.9rem 0 1.15rem}
+.recbox>summary{cursor:pointer;font:.6rem/1.4 var(--mono);letter-spacing:.15em;
+text-transform:uppercase;color:var(--amber);padding:.15rem 0}
+.recbox>summary:hover{color:var(--text)}
+.recbox[open]>summary{margin-bottom:.3rem}
+.recbox .rec{margin:.35rem 0 0}
 /* The clarifying state, made visible (owner report 2026-09-25): a question the
 reader asked to clarify rendered identically to an open one, so the state
 change was invisible and a reload looked like nothing had happened. Teal, not
@@ -1899,6 +2195,20 @@ background:var(--teal-soft);font-size:.95rem;line-height:1.5;color:var(--text)}
 .clarifyband::before{content:'clarification requested';display:block;
 font:.6rem/1.4 var(--mono);letter-spacing:.15em;text-transform:uppercase;
 color:var(--teal);margin-bottom:.28rem}
+/* A clarifying question waits on the LANE, not the reader (owner order
+2026-09-27): the lane must amend it back to open. So it no longer takes the
+space of an actionable question -- the card shrinks and its form collapses
+behind a native <details>. No JS, no URL state; opening the summary restores
+the full form, so the question stays answerable. */
+.q.clarifying{padding:.85rem 1.05rem;border-left-color:var(--teal)}
+.q.clarifying .qt{font-size:1.05rem}
+.q.clarifying .clarifyband{margin:.55rem 0 .35rem;padding:.55rem .75rem;font-size:.9rem}
+.q.clarifying .recbox{margin:.5rem 0 .3rem}
+.clarifybox{margin:.4rem 0 0}
+.clarifybox>summary{cursor:pointer;font:.62rem/1.5 var(--mono);letter-spacing:.13em;
+text-transform:uppercase;color:var(--dim);padding:.3rem 0}
+.clarifybox>summary:hover{color:var(--text)}
+.clarifybox[open]>summary{margin-bottom:.3rem}
 .opt{display:flex;gap:.65rem;align-items:flex-start;margin:.45rem 0;padding:.65rem .8rem;
 border:1px solid var(--line);border-radius:6px;cursor:pointer;
 transition:border-color .12s ease,background .12s ease}
@@ -1979,9 +2289,12 @@ def page_wrapper(body, expires_at, title):
     <h1> inside the body -- so the two are not two homes for one fact: the tab
     names the page and its open count, the heading names the page.
 
-    The page is PERMANENT (owner order 2026-09-25), so the line says so rather
-    than printing an expiry that no longer exists."""
-    meta_line = (f"expires {expires_at}" if expires_at else "permanent link")
+    The page is PERMANENT (owner order 2026-09-25), so no expiry is printed --
+    and NO meta line is printed either (owner report 2026-09-27: the
+    "permanent link" line sat above the h1, was the first thing the reader met,
+    and carried nothing they need. Permanence is a property of the REGISTER,
+    not a line of chrome). expires_at stays in the page meta, which is where
+    the answer backend reads it from."""
     return ("<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n"
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
             "<meta name=\"robots\" content=\"noindex, nofollow\">\n"
@@ -1992,7 +2305,6 @@ def page_wrapper(body, expires_at, title):
             f'<script src="{UI_FILE}" defer></script>\n'
             f"<style>{PAGE_CSS}</style>\n"
             "</head><body>\n"
-            f'<p class="meta">{html.escape(meta_line)}</p>\n'
             + body
             + "\n</body></html>\n")
 
@@ -2078,25 +2390,29 @@ def vendor_ui(directory):
         oc_log_extra("ui_vendor_failed", exc.__class__.__name__)
         return False
 
-def prune_pages(keep=None):
+def prune_pages(keeps=None):
     """Remove retired ROTATING-TOKEN directories, and only those.
 
-    The path is a constant slug now, so a token-shaped directory is residue from
+    The path is a readable slug now, so a token-shaped directory is residue from
     the retired model: nothing can address it and its link is dead. The test is
-    the SHAPE (LEGACY_TOKEN_RE), never "anything that is not the current slug",
-    so a second factory's readable slug can never be swept by accident.
+    the SHAPE (LEGACY_TOKEN_RE), never "anything that is not a current slug", so
+    a live page can never be swept by accident.
 
-    The live slug is NEVER removed: its link is bookmarked and permanent
-    (owner order 2026-09-25)."""
+    `keeps` is the WHOLE live set -- the aggregate plus every factory page -- not
+    one slug: there is more than one page now, and protecting only one would let
+    a factory whose slug happens to be token-shaped be swept. Live pages are
+    NEVER removed: their links are bookmarked and permanent (owner order
+    2026-09-25)."""
     import shutil
     removed = []
     root = pages_dir()
     if not os.path.isdir(root):
         return removed
+    keeps = set(keeps or ())
     for name in sorted(os.listdir(root)):
         if not os.path.isdir(os.path.join(root, name)):
             continue
-        if keep and name == keep:
+        if name in keeps:
             continue
         if not LEGACY_TOKEN_RE.match(name):
             continue
@@ -2123,13 +2439,15 @@ def page_is_live(token):
     return True, "live at %s" % page_url(token)
 
 def latest_page():
-    """The current published page as (url, meta), or (None, reason).
+    """The AGGREGATE page as (url, meta), or (None, reason).
 
     publish records pages/latest.json so render does not have to guess which
-    token directory is current. A pointer whose token has expired or been pruned
-    reports the reason rather than omitting the link silently: a card with no
-    pointer and a card whose pointer is dead look identical otherwise, and only
-    one of them is a defect."""
+    directory is current. The pointer names the AGGREGATE (owner order
+    2026-09-28): with a page per factory there is no single "the" page, and the
+    union is the address that stays put no matter which factory moved. A pointer
+    whose page has been pruned reports the reason rather than omitting the link
+    silently: a card with no pointer and a card whose pointer is dead look
+    identical otherwise, and only one of them is a defect."""
     path = latest_pointer_path()
     if not os.path.isfile(path):
         return None, "no page published yet (run: %s publish)" % PROG
@@ -2195,7 +2513,7 @@ def republish(flags):
     if flags.get("--no-publish"):
         return None
     try:
-        meta, _ = publish_page(quiet=True)
+        meta, _, _metas = publish_page(quiet=True)
         return meta
     except SystemExit:
         _note_publish_fault(
@@ -2218,66 +2536,81 @@ def _note_publish_fault(why):
 
 
 def publish_page(action=None, prune=False, quiet=False):
-    """Build or refresh the public page. (meta, pruned).
+    """Build or refresh the public pages. (meta, pruned, metas).
 
-    The path is a CONSTANT slug derived from the factory key, never a rotating
-    token (owner order 2026-09-25). A fresh URL per publish would 404 the link
-    the owner bookmarked, so re-render-on-change and a stable URL have to hold
-    together or the feature is unusable.
+    TWO ADDRESSES (owner order 2026-09-28): the neutral aggregate /all/ carries
+    every factory's open questions, and every factory the register names keeps its
+    OWN page carrying only its own. Both paths are readable CONSTANT slugs, never
+    a rotating token (owner order 2026-09-25) -- a fresh URL per publish would 404
+    the link the owner bookmarked, so re-render-on-change and a stable URL have to
+    hold together or the feature is unusable.
 
-    The page NEVER expires: a 7-day PAGE TTL is incompatible with a permanent
+    The pages NEVER expire: a 7-day PAGE TTL is incompatible with a permanent
     bookmark. DEFAULT_TTL_DAYS still governs QUESTION staleness -- a different
     thing, and unchanged.
 
-    Changing the path means changing the FACTORY KEY, and that has exactly one
-    home: page_slug().
+    `meta` is the AGGREGATE page's, and is what the pointer records: with several
+    pages live there is no "the" page, and the union is the one address that is
+    stable no matter which factory moved.
     """
     with RegisterLock():
         data = read_register()
-    all_open = [s for s in data["sets"] if s.get("status") == "open"]
-    entries = sorted(all_open, key=lambda s: s.get("asked_at") or "")
-    slug = page_slug_for(all_open)
-    pruned = prune_pages(keep=slug)
-    # No early return on an empty register (owner order 2026-09-24): the page
-    # must always be deployed, so an empty state is rendered to the SAME slug
+    targets = page_targets(data["sets"])
+    pruned = prune_pages(keeps=[slug for slug, _ in targets])
+    # No early return on an empty register (owner order 2026-09-24): the pages
+    # must always be deployed, so an empty state is rendered to the SAME slugs
     # rather than leaving the previous page serving stale questions.
 
-    directory = os.path.join(pages_dir(), slug)
-    # Render FIRST: a fault must leave no half-made directory behind and must
-    # leave the previous page serving (owner order 2026-09-24).
-    page = build_page(entries, slug, None, action or "/answer")
-    os.makedirs(directory, exist_ok=True)
-    vendor_htmx(directory)
-    vendor_ui(directory)
-    with open(os.path.join(directory, "index.html"), "w", encoding="utf-8") as fh:
-        fh.write(page)
-    # `expires_at` stays PRESENT and null: the live answer backend reads it and
-    # fails OPEN on an empty value (backend.py: expired() -> False when unset),
-    # so a null is "never expires" rather than "unknown".
-    meta = {"slug": slug,
-            "expires_at": None,
-            "action": action or "/answer", "sets": [e["id"] for e in entries],
-            "url": page_url(slug),
-            "questions": open_question_count(entries)}
-    with open(os.path.join(directory, "meta.json"), "w", encoding="utf-8") as fh:
-        json.dump(meta, fh, indent=2)
+    # Render EVERY page BEFORE writing ANY of them: a renderer fault must leave
+    # no half-made directory behind and must leave the previous pages serving
+    # (owner order 2026-09-24). One bad page must not leave the others half-live.
+    built = [(slug, entries,
+              build_page(entries, slug, None, action or "/answer"))
+             for slug, entries in targets]
 
-    # The pointer render reads. Written AFTER the page and its meta exist, so a
-    # reader never resolves a slug whose directory is still incomplete.
-    pointer = {"slug": slug}
+    metas = {}
+    for slug, entries, page in built:
+        directory = os.path.join(pages_dir(), slug)
+        os.makedirs(directory, exist_ok=True)
+        vendor_htmx(directory)
+        vendor_ui(directory)
+        with open(os.path.join(directory, "index.html"), "w", encoding="utf-8") as fh:
+            fh.write(page)
+        # `expires_at` stays PRESENT and null: the live answer backend reads it
+        # and fails OPEN on an empty value (backend.py: expired() -> False when
+        # unset), so a null is "never expires" rather than "unknown".
+        # `sets` is THIS page's own sets, never the register's: the answer
+        # backend validates a posted set against the page's own meta, so a card
+        # is answerable exactly when its set is listed HERE.
+        meta = {"slug": slug,
+                "expires_at": None,
+                "action": action or "/answer", "sets": [e["id"] for e in entries],
+                "url": page_url(slug),
+                "questions": open_question_count(entries)}
+        with open(os.path.join(directory, "meta.json"), "w", encoding="utf-8") as fh:
+            json.dump(meta, fh, indent=2)
+        metas[slug] = meta
+        oc_log_extra("slug", slug)
+        oc_log_extra("questions", str(meta["questions"]))
+
+    meta = metas[AGGREGATE_SLUG]
+
+    # The pointer render reads. Written AFTER the pages and their metas exist, so
+    # a reader never resolves a slug whose directory is still incomplete.
+    pointer = {"slug": AGGREGATE_SLUG}
     with open(latest_pointer_path(), "w", encoding="utf-8") as fh:
         json.dump(pointer, fh, indent=2)
 
-    oc_log_extra("slug", slug)
-    oc_log_extra("questions", str(meta["questions"]))
     if not quiet:
-        print(f"published {meta['questions']} question(s) to {directory}")
-        print(f"  slug {slug} (permanent)")
-        print(f"  url {page_url(slug)}")
+        for slug, m in metas.items():
+            print(f"published {m['questions']} question(s) to "
+                  f"{os.path.join(pages_dir(), slug)}")
+            print(f"  slug {slug} (permanent)")
+            print(f"  url {m['url']}")
         print(f"  action {meta['action']}")
         for name in pruned:
             print(f"  pruned retired token dir {name}")
-    return meta, pruned
+    return meta, pruned, metas
 
 def cmd_publish(argv):
     if "--set" in argv:
@@ -2287,17 +2620,22 @@ def cmd_publish(argv):
                            boolean=["--json", "--prune"])
     action = flags.get("--action") or "/answer"
 
-    meta, pruned = publish_page(action=action,
-                                prune=bool(flags.get("--prune")), quiet=True)
+    meta, pruned, metas = publish_page(action=action,
+                                       prune=bool(flags.get("--prune")),
+                                       quiet=True)
     if flags.get("--json"):
         print(json.dumps({"slug": meta["slug"],
                           "path": os.path.join(pages_dir(), meta["slug"]),
-                          "meta": meta, "pruned": pruned}, indent=2))
+                          "meta": meta, "pruned": pruned,
+                          "pages": [{"slug": s, "questions": m["questions"],
+                                     "sets": m["sets"], "url": m["url"]}
+                                    for s, m in metas.items()]}, indent=2))
     else:
-        directory = os.path.join(pages_dir(), meta["slug"])
-        print(f"published {meta['questions']} question(s) to {directory}")
-        print(f"  slug {meta['slug']} (permanent)")
-        print(f"  url {page_url(meta['slug'])}")
+        for slug, m in metas.items():
+            directory = os.path.join(pages_dir(), slug)
+            print(f"published {m['questions']} question(s) to {directory}")
+            print(f"  slug {slug} (permanent)")
+            print(f"  url {m['url']}")
         print(f"  action {meta['action']}")
         for name in pruned:
             print(f"  pruned retired token dir {name}")
@@ -2413,6 +2751,87 @@ def selftest():
         ck(len(questions) == 2 and questions[0].get("recommended") == 1
            and questions[1].get("recommended") == 0,
            "per-question recommendations preserved (1 then 0, not shared)")
+
+        # -- 2b. --recommended RESOLUTION (#652, 2026-09-28) ---------------
+        # These arms ASK, so they get their OWN store: the main fixture's set
+        # population is asserted by later arms (an exact set count, and the
+        # recommendation text found in the rendered DOM), so residue here would
+        # silently re-subject THEIR fixtures. Isolation, not tidiness.
+        _rec_store = os.path.join(root, "rec-store")
+        os.makedirs(_rec_store, exist_ok=True)
+        _saved_rec_dir = env["OC_QUESTIONS_DIR"]
+        env["OC_QUESTIONS_DIR"] = _rec_store
+        # A caller must not have to count array positions (fleet-directives.md
+        # LLM Ergonomics item 1). Measured cost of the bare index: lane 6630dc9a
+        # read "1" as "the FIRST option" while its own prose said
+        # "RECOMMENDED: A", so the owner's page pre-checked the radio OPPOSING
+        # the question for 4h26m. The round-trip arm above cannot catch that --
+        # the raw index round-trips correctly, which is the whole problem.
+        # THE RECORDED VALUE STAYS AN INDEX in every form, so no existing
+        # question is reinterpreted; only the INPUT is widened.
+        rc, out, _ = run("ask", "--factory", "f-rec-letter",
+                         "--title", "Letter form", "--description", "d",
+                         "--option", "A", "--option", "B",
+                         "--recommended", "A", "--no-publish")
+        ck(rc == 0, "ask accepts a LABEL/letter for --recommended (rc=%d)" % rc)
+        ck("[0] 'A'" in out,
+           "\u2026and ECHOES what it resolved, read back from the record (%r)"
+           % (out.strip().splitlines()[-2:] if out.strip() else ""))
+        _rl = get_set("f-rec-letter")["questions"][0]
+        ck(_rl.get("recommended") == 0,
+           "\u2026storing the INDEX, so a reader of the register is unchanged "
+           "(%r)" % (_rl.get("recommended"),))
+        # The letter is matched against the OPTIONS' OWN leading letters, not
+        # the alphabet position: ord('Y')-65 = 24 would refuse valid input.
+        rc, out, _ = run("ask", "--factory", "f-rec-y",
+                         "--title", "Y form", "--description", "d",
+                         "--option", "X - first", "--option", "Y - second",
+                         "--recommended", "Y", "--no-publish")
+        ck(rc == 0 and get_set("f-rec-y")["questions"][0].get("recommended") == 1,
+           "a bare letter matches the option's OWN leading letter, not its "
+           "alphabet position (rc=%d, recommended=%r)"
+           % (rc, (get_set("f-rec-y") or {}).get("questions", [{}])[0]
+              .get("recommended")))
+        rc, out, _ = run("ask", "--factory", "f-rec-label",
+                         "--title", "Label form", "--description", "d",
+                         "--option", "X - first", "--option", "Y - second",
+                         "--recommended", "Y - second", "--no-publish")
+        ck(rc == 0 and get_set("f-rec-label")["questions"][0].get("recommended") == 1,
+           "a FULL option label resolves too (rc=%d)" % rc)
+        # An all-digit value stays an INDEX, so an option literally named "1"
+        # remains reachable.
+        rc, out, _ = run("ask", "--factory", "f-rec-digit",
+                         "--title", "digit", "--description", "d",
+                         "--option", "1", "--option", "2",
+                         "--recommended", "1", "--no-publish")
+        ck(rc == 0 and get_set("f-rec-digit")["questions"][0].get("recommended") == 1,
+           "an all-digit value is still an INDEX, so an option named '1' stays "
+           "reachable (rc=%d)" % rc)
+        # REFUSED, naming the options -- never silently fallen back to an
+        # index, which is how the original wrong-base landed.
+        rc, _, err = run("ask", "--factory", "f-rec-bad",
+                         "--title", "bad", "--description", "d",
+                         "--option", "a", "--option", "b",
+                         "--recommended", "zebra", "--no-publish")
+        ck(rc == 2 and "matches no option" in (err or ""),
+           "an unmatched label is REFUSED naming the options (rc=%d, err=%r)"
+           % (rc, (err or "").strip()[:70]))
+        rc, _, err = run("ask", "--factory", "f-rec-range",
+                         "--title", "range", "--description", "d",
+                         "--option", "a", "--option", "b",
+                         "--recommended", "9", "--no-publish")
+        ck(rc == 2 and "outside options" in (err or ""),
+           "an out-of-range index is refused naming the options (rc=%d)" % rc)
+        ck(get_set("f-rec-bad") is None and get_set("f-rec-range") is None,
+           "\u2026and a refused ask registers NOTHING")
+        # The amend leg resolves the same way and echoes the label.
+        rc, out, _ = run("amend", "--set", "f-rec-letter", "--qid", "q1",
+                         "--recommended", "B")
+        ck(rc == 0 and "recommended=1 (B)" in out,
+           "amend resolves and ECHOES the label it stored (rc=%d, out=%r)"
+           % (rc, out.strip()[-60:]))
+        # Close the isolation opened for these arms.
+        env["OC_QUESTIONS_DIR"] = _saved_rec_dir
         ck(set_id == "f-cron-lane",
            "the FACTORY KEY IS the set id (%r)" % set_id)
 
@@ -2511,8 +2930,8 @@ def selftest():
         rc, _, _ = run("answer", set_id, "q2", "0")
         ck(rc == 0, "a later real answer closes the clarifying question")
         # Owner order 2026-09-25: a factory set is NEVER auto-archived. It
-        # stays open at 0..N questions, so the page, its lane sections and
-        # their anchors are permanent.
+        # stays open at 0..N questions, so the page and its address are
+        # permanent -- the lane SECTION is not (owner order 2026-09-28).
         live = get_set(set_id)
         ck(live is not None and live.get("status") == "open",
            "a fully answered factory set STAYS OPEN (status=%r)"
@@ -2601,6 +3020,37 @@ def selftest():
            "the page RENDERS the clarifying state, so a reload shows the change")
         ck("Clarification requested" in _body,
            "\u2026naming the reader's own request in the band")
+        # Owner order 2026-09-27: a clarifying question waits on the LANE, so
+        # it must not occupy the space of an actionable one. It renders compact
+        # and its form collapses behind a native <details> -- while staying in
+        # the DOM, so the question is still answerable when opened.
+        ck('class="q clarifying"' in _body,
+           "a clarifying question renders COMPACT, not as an actionable one")
+        ck('<details class="clarifybox">' in _body,
+           "\u2026with its form collapsed behind a native <details>")
+        ck('<summary' in _body,
+           "\u2026and a summary toggle that opens it (native HTML, no JS)")
+        ck('name="qid" value="%s"' % _cq in _body,
+           "\u2026and the form is STILL in the DOM, so it stays answerable "
+           "(qid=%s)" % _cq)
+        # Owner order 2026-09-27: the recommendation band folds the same way --
+        # a compact label, the lane's counsel one tap away -- so the card opens
+        # on the QUESTION. The counsel stays in the DOM: folding is visual only.
+        rc, out, _ = run("ask", "--factory", "f-rec-lane", "--title", "r",
+                         "--description", "d", "--option", "a", "--option", "b",
+                         "--recommended", "0", "--json")
+        ck(rc == 0, "a question WITH a recommendation registers (rc=%d)" % rc)
+        rc, out, _ = run("publish", "--json")
+        _rdir = json.loads(out)["path"]
+        _rbody = open(os.path.join(_rdir, "index.html"), encoding="utf-8").read()
+        ck('<details class="recbox">' in _rbody,
+           "the recommendation band renders FOLDED behind a native <details>")
+        ck("Lane recommends" in _rbody,
+           "\u2026under a label naming what is inside")
+        _rm = re.search(r'<p class="rec">(.*?)</p>', _rbody, re.S)
+        ck(_rm is not None and _rm.group(1).strip() == "a",
+           "\u2026and the counsel is STILL in the DOM, so folding hides it "
+           "visually only (got %r)" % (_rm.group(1).strip() if _rm else None))
         _uijs = open(os.path.join(_uidir, "questions.js"), encoding="utf-8").read()
         ck("htmx:responseError" in _uijs,
            "the vendored UI surfaces a REFUSED submit -- htmx swaps only 2xx, "
@@ -2760,14 +3210,17 @@ def selftest():
            "the age paragraph is not double-worded (%r)" % (sorted(_ages),))
         # owner report 2026-09-24 22:24Z: "Why two expiration lines?" Two
         # emitters carried the same expiry -- the shell (page_wrapper) and the
-        # Page catalog component, which rendered props.expires_at as well. The
-        # shell owns the visible line; exactly one must reach the page.
+        # Page catalog component. The shell then owned ONE visible line. The
+        # owner removed even that (2026-09-27): the line said "permanent link",
+        # carried nothing the reader needs, and sat above the h1 as the first
+        # thing they met. The page carries NO meta line now -- permanence is
+        # asserted on the page META (expires_at null, below), not in chrome.
         _ttl = body.count('class="meta">')
-        ck(_ttl == 1,
-           "the page carries exactly ONE meta line, not two (%d found)" % _ttl)
-        ck("permanent link" in body,
-           "…and it says the link is permanent (owner order: the page never "
-           "expires, so a 7-day TTL would kill the bookmark weekly)")
+        ck(_ttl == 0,
+           "the page carries NO meta line -- the 'permanent link' accretion "
+           "above the h1 is gone (%d found)" % _ttl)
+        ck("permanent link" not in body,
+           "\u2026and no 'permanent link' text survives anywhere on the page")
         meta = json.load(open(os.path.join(page["path"], "meta.json"), encoding="utf-8"))
         ck(meta.get("expires_at") is None,
            "meta carries expires_at as null -- the backend fails OPEN on it "
@@ -2851,11 +3304,88 @@ def selftest():
         ck(second["slug"] == first["slug"],
            "two consecutive publishes REUSE one slug -- the URL does not churn "
            "(%r vs %r)" % (first["slug"][:8], second["slug"][:8]))
-        page_dirs = [d for d in os.listdir(os.path.join(env["OC_QUESTIONS_DIR"], "pages"))
-                     if d != "latest.json"]
-        ck(len(page_dirs) == 1,
-           "\u2026so exactly ONE live page directory exists, not one per publish "
-           "(%r)" % (page_dirs,))
+        page_dirs = sorted(d for d in os.listdir(os.path.join(env["OC_QUESTIONS_DIR"], "pages"))
+                           if d != "latest.json")
+        _want_pages = sorted(p["slug"] for p in second["pages"])
+        # Every TARGET has a directory -- but not set equality. A factory whose
+        # set LEAVES the register (only via an explicit `gc --archive-closed`;
+        # factory sets are never auto-archived, owner order 2026-09-25) keeps its
+        # page directory, because the address is a permanent anchor. Nothing
+        # removes a readable slug, so the directory outlives the target.
+        ck(set(_want_pages) <= set(page_dirs),
+           "\u2026and every published target HAS a directory -- the aggregate "
+           "plus one per factory the register names, never one per publish "
+           "(missing %r)" % (sorted(set(_want_pages) - set(page_dirs)),))
+        ck("all" in page_dirs,
+           "\u2026including the neutral aggregate /all/, the one address that is "
+           "not a factory name (%r)" % (page_dirs,))
+
+        # -- the TWO-ADDRESS model (owner order 2026-09-28) ----------------
+        # The page used to carry every factory's questions while being served
+        # from ONE factory's name, so the path named a factory and the content
+        # was the fleet -- and the union had no address at all. Asserted on the
+        # ARTIFACTS: the published metas, and each page's own HTML.
+        _reg = store_json()
+        _open_ids = sorted(s["id"] for s in _reg["sets"] if s.get("status") == "open")
+        _agg = json.load(open(os.path.join(env["OC_QUESTIONS_DIR"], "pages",
+                                          "all", "meta.json"), encoding="utf-8"))
+        ck(_agg["slug"] == "all",
+           "the aggregate is published at the NEUTRAL slug /all/ -- not under a "
+           "factory's name (%r)" % _agg["slug"])
+        ck(sorted(_agg["sets"]) == _open_ids,
+           "\u2026and it carries EVERY open set in the register, so the union has "
+           "an address of its own (%r vs %r)" % (sorted(_agg["sets"]), _open_ids))
+
+        _factory_pages = [p for p in second["pages"] if p["slug"] != "all"]
+        ck(len(_factory_pages) >= 2,
+           "\u2026while every factory the register names gets its OWN page "
+           "(%d factory page(s))" % len(_factory_pages))
+        _bad = []
+        for _p in _factory_pages:
+            _m = json.load(open(os.path.join(env["OC_QUESTIONS_DIR"], "pages",
+                                             _p["slug"], "meta.json"),
+                                encoding="utf-8"))
+            # ONLY its own: every set it lists must be one that slugifies to it.
+            if any(page_slug(_sid) != _p["slug"] for _sid in _m["sets"]):
+                _bad.append((_p["slug"], _m["sets"]))
+        ck(not _bad,
+           "\u2026each of which carries ONLY its own sets, never another "
+           "factory's (%r)" % (_bad,))
+        _mine = {p["slug"]: p["sets"] for p in _factory_pages}
+        ck(all(_s in _mine.get(page_slug(_s), []) for _s in _open_ids),
+           "\u2026and every open set is reachable on its OWN factory page "
+           "(missing %r)" % (sorted(s for s in _open_ids
+                                    if s not in _mine.get(page_slug(s), [])),))
+
+        # The answerability property, from the RENDERED side: the answer backend
+        # accepts a posted set iff it is listed in that page's meta.sets, so a
+        # card that renders under a set the page does not list is unanswerable.
+        _unanswerable = []
+        for _slug in ["all"] + [p["slug"] for p in _factory_pages]:
+            _dir = os.path.join(env["OC_QUESTIONS_DIR"], "pages", _slug)
+            _h = open(os.path.join(_dir, "index.html"), encoding="utf-8").read()
+            _m = json.load(open(os.path.join(_dir, "meta.json"), encoding="utf-8"))
+            listed = set(_m["sets"])
+            rendered = set()
+            for _grp in re.findall(r'data-set="([^"]+)"', _h):
+                rendered.update(x for x in _grp.split(",") if x)
+            posted = set(re.findall(r'name="set" value="([^"]+)"', _h))
+            if not (rendered <= listed) or not (posted <= listed):
+                _unanswerable.append((_slug, sorted(rendered - listed),
+                                      sorted(posted - listed)))
+        ck(not _unanswerable,
+           "\u2026and every set a page RENDERS is listed in that page's own "
+           "meta.sets, so no card is rendered unanswerable (slug, rendered-vs-"
+           "meta, posted-vs-meta: %r)" % (_unanswerable,))
+
+        # The address outlives the set: f-leaky-lane was archived by
+        # `gc --archive-closed` and is no longer a target, yet its page dir --
+        # and so its bookmark -- is still there. Nothing removes a readable slug.
+        _archived_dir = os.path.join(env["OC_QUESTIONS_DIR"], "pages", "f-leaky-lane")
+        ck(os.path.isdir(_archived_dir) and "f-leaky-lane" not in _want_pages,
+           "\u2026and a page whose set LEFT the register keeps its directory, "
+           "because the address is a permanent anchor (%s, target=%s)"
+           % (os.path.isdir(_archived_dir), "f-leaky-lane" in _want_pages))
         rc, out, _ = run("publish", "--json")
         rotated = json.loads(out)
         ck(rotated["slug"] == first["slug"],
@@ -3040,6 +3570,65 @@ def selftest():
             ck('class="set"' in _oq_body and 'data-set="' in _oq_body,
                "\u2026over sections that carry the data-set it reads -- "
                "without either half the filter silently does nothing")
+            # Owner order 2026-09-28 (14:32): the factory name sits in the
+            # SECTION heading, not beside each question's own title -- the card
+            # already carries its context on a bottom line. Asserted as a COUNT
+            # against the sections, so the arm cannot go green on one page-level
+            # tag, and the card-heading arm below pins the OTHER half: the chip
+            # must not come back beside a question title.
+            _sections = _html.count('class="set"')
+            _sectags = _html.count('class="qset"')
+            ck(_sectags == _sections and _sections > 0,
+               "every lane SECTION heading names its OWN factory/ies "
+               "(%d tag(s), %d section(s))" % (_sectags, _sections))
+            # The negative half: no question heading may carry the chip. This is
+            # what makes the move a MOVE rather than an addition -- without it a
+            # page carrying both placements would pass the count above.
+            _qheads = re.findall(r'<h3 class="qt">(.*?)</h3>', _oq_body, re.S)
+            ck(bool(_qheads)
+               and all('qset' not in head for head in _qheads),
+               "no question heading carries the factory chip any more "
+               "(%d heading(s) checked)" % len(_qheads))
+            # Owner order 2026-09-28 (15:5x): the card's own CONTEXT LINE --
+            # "asked .. / lane .. / set qid" -- OPENS the card, before the
+            # title. It is the context a reader needs in order to read the
+            # question, so it belongs above it, not as a footnote under the
+            # form. Asserted POSITIONALLY over the card's own body, because a
+            # page-level count cannot tell a line at the top from one at the
+            # bottom -- the failure this arm exists to catch.
+            _cards = re.findall(r'<section id="[^"]*" class="q[^"]*">(.*?)</section>',
+                                _oq_body, re.S)
+            _ordered = [c for c in _cards
+                        if c.find('class="age"') >= 0 and c.find('class="qt"') >= 0]
+            ck(bool(_ordered)
+               and all(c.find('class="age"') < c.find('class="qt"')
+                       for c in _ordered),
+               "the card's context line opens the card, above its own title "
+               "(%d card(s) checked)" % len(_ordered))
+            # Owner order 2026-09-28: the selector names each factory's OPEN
+            # COUNT. A lane section can span two sets, so the count is derived
+            # from each CARD's own set field -- both halves must ship, or the
+            # bar silently shows a bare name again.
+            ck('input[name="set"]' in _oq_js and "counts[" in _oq_js,
+               "\u2026and the selector derives each factory's open count from "
+               "the cards' own set fields")
+            ck("counts[f]" in _oq_js,
+               "\u2026naming it on the button, not a bare factory name")
+            # The section's data-set must name only factories it HOLDS a card
+            # for: a lane also carries CLOSED questions, and naming their
+            # factory here put a control on the selector for a block with none
+            # of that factory's cards in it.
+            _leaks = []
+            for _chunk in _oq_body.split('<section id="lane-')[1:]:
+                _names = re.search(r'data-set="([^"]*)"', _chunk)
+                _names = set(x for x in (_names.group(1).split(",") if _names else []) if x)
+                _held = set(re.findall(r'name="set" value="([^"]+)"', _chunk))
+                if not _names <= _held:
+                    _leaks.append((sorted(_names - _held), sorted(_held)))
+            ck(not _leaks,
+               "\u2026and a section names only the factories whose cards it "
+               "holds, so no selector control scopes another factory's question "
+               "(leaked, held: %r)" % (_leaks,))
         finally:
             env["OC_QUESTIONS_DIR"] = _saved_dir
         # Owner question 2026-09-24: the answer form should swap inline instead
@@ -3290,6 +3879,87 @@ def selftest():
         rc, _, _ = run("amend", "--set", am_set, "--qid", "nope", "--title", "t")
         ck(rc == 1, "amend on an unknown qid is rc=1 (rc=%d)" % rc)
 
+        # -- 8c-bis. MULTI-SELECT (owner order 2026-09-28). Questions may take
+        # several options at once. The kind is QUESTION-LEVEL and FIXED AT ASK
+        # TIME, and an absent kind means single -- so the register's pre-existing
+        # questions keep rendering radios and no stored answer is reinterpreted.
+        rc, out, _ = run("ask", "--factory", "f-multi-lane",
+                         "--title", "Pick several", "--description", "d",
+                         "--option", "A", "--option", "B", "--option", "C",
+                         "--multi", "--json")
+        ck(rc == 0, "a multi question registers (rc=%d)" % rc)
+        multi_set = json.loads(out)["set"]
+        mq = get_set(multi_set)["questions"][0]
+        ck(mq.get("kind") == "multi",
+           "the register RECORDS the kind rather than leaving a reader to infer "
+           "it (kind=%r)" % (mq.get("kind"),))
+        # The spec is what the renderer reads, so the control type is asserted
+        # where it is decided -- and on BOTH the question and each option, since
+        # a flat spec gives a component only its own props.
+        _spec = build_spec([get_set(multi_set)], "t", None, "answer")
+        _opts = [e for e in _spec["elements"].values() if e["type"] == "Option"]
+        _qs = [e for e in _spec["elements"].values() if e["type"] == "Question"]
+        ck(_qs and all(e["props"].get("multi") is True for e in _qs),
+           "a multi question's spec carries multi=True on the Question")
+        ck(_opts and all(e["props"].get("multi") is True for e in _opts),
+           "\u2026and on EVERY option, so the renderer needs no parent context "
+           "to pick the control (%d options)" % len(_opts))
+        rc, out, _ = run("answer", multi_set, "q1", "0", "2", "--json")
+        ck(rc == 0, "several choices are accepted on a multi question (rc=%d)" % rc)
+        answered = get_set(multi_set)["questions"][0]
+        ck(answered.get("answer") == ["A", "C"],
+           "the answer records EVERY chosen option, in order (%r)"
+           % (answered.get("answer"),))
+        ck(answered.get("answer_kind") == "options",
+           "\u2026and answer_kind says it is several, so a reader can tell one "
+           "label from many without inspecting the option set (%r)"
+           % (answered.get("answer_kind"),))
+        # The comma-joined spelling is the SAME act: the answer backend posts one
+        # `choice` field per checked box, and joining is how several reach the
+        # CLI as one value. A FRESH factory, because the factory key IS the
+        # standing set: asking into f-multi-lane again appends q2 and the arm
+        # would address q1, which is already answered.
+        rc, out, _ = run("ask", "--factory", "f-multi-comma-lane",
+                         "--title", "Comma form", "--description", "d",
+                         "--option", "P", "--option", "Q", "--multi", "--json")
+        c2 = json.loads(out)["set"]
+        ck(c2 == "f-multi-comma-lane", "\u2026the factory key is the set id (%r)" % c2)
+        rc, _, err = run("answer", c2, "q1", "0,1")
+        ck(rc == 0 and get_set(c2)["questions"][0].get("answer") == ["P", "Q"],
+           "the comma-joined form is the same act as separate positionals "
+           "(rc=%d, err=%r)" % (rc, (err or "").strip()[:60]))
+
+        # -- 8c-ter. The KIND IS FIXED AT ASK TIME, so an answer cannot widen it.
+        # Silently taking the first of several would record an answer the reader
+        # did not give -- the class this instrument exists to remove.
+        rc, out, _ = run("ask", "--factory", "f-single-lane",
+                         "--title", "Pick one", "--description", "d",
+                         "--option", "Yes", "--option", "No", "--json")
+        single_set = json.loads(out)["set"]
+        ck(get_set(single_set)["questions"][0].get("kind") == "single",
+           "an ask with no kind records single, not absent-and-guessed")
+        rc, out, err = run("answer", single_set, "q1", "0", "1")
+        ck(rc == 2, "several choices on a SINGLE-select question are REFUSED "
+                   "(rc=%d)" % rc)
+        ck("single-select" in (err or ""),
+           "\u2026and the refusal names the reason (%r)" % ((err or "").strip()[:80],))
+        ck(get_set(single_set)["questions"][0]["status"] == "open",
+           "\u2026and nothing was recorded by the refused answer")
+        rc, _, _ = run("answer", single_set, "q1", "1")
+        ck(rc == 0 and get_set(single_set)["questions"][0].get("answer") == "No",
+           "one choice on a single-select question still works (rc=%d)" % rc)
+        # kind=multi with nothing to choose between is refused at ASK time: a
+        # check box set with no boxes is a question nobody can answer.
+        rc, _, err = run("ask", "--factory", "f-multi-bad-lane",
+                         "--title", "No options", "--description", "d", "--multi")
+        ck(rc == 2, "kind=multi with no options is refused (rc=%d)" % rc)
+        # The register read says which kind, so a lane sees that a question takes
+        # several answers BEFORE it tries to answer it.
+        rc, out, _ = run("list", "--all")
+        ck("[multi-select]" in out,
+           "list marks a multi question as such, so a reader sees the kind "
+           "before answering")
+
         # -- 8d. C6: mechanical closure. The register used to close only on an
         # explicit answer or TTL, so questions outlived the thing they asked
         # about. "Never guess" is the contract: an unreadable predicate SKIPS.
@@ -3389,6 +4059,38 @@ def selftest():
                        "--title", "t", "--description", "d",
                        "--option", "a", "--option", "b", "--recommended", "3")
         ck(rc == 2, "a recommendation outside the option range is refused (rc=%d)" % rc)
+
+        # -- 10. --subject is CREATION-ONLY (defect reported 2026-09-28) -----
+        # On an EXISTING set the flag parsed, was never read, and the command
+        # exited 0 -- the caller's unit key went nowhere, and only a read of the
+        # stored set showed it. A field that cannot be updated must not read as
+        # one that can, so the add REFUSES rather than discarding.
+        rc, _, _ = run("ask", "--factory", "f-subject-probe",
+                       "--subject", "unit-A", "--title", "t", "--description",
+                       "d", "--option", "a", "--no-publish")
+        ck(rc == 0, "ask creates a set WITH --subject (rc=%d)" % rc)
+        ck((get_set("f-subject-probe") or {}).get("subject") == "unit-A",
+           "\u2026and the subject IS recorded at creation (%r)"
+           % ((get_set("f-subject-probe") or {}).get("subject"),))
+        before = len((get_set("f-subject-probe") or {}).get("questions") or [])
+        rc, _, err = run("ask", "--factory", "f-subject-probe",
+                         "--subject", "unit-B", "--title", "t2", "--description",
+                         "d2", "--option", "a", "--no-publish")
+        ck(rc == 2, "\u2026and a LATER --subject is REFUSED, not silently "
+                    "discarded (rc=%d)" % rc)
+        ck("CREATION-ONLY" in err,
+           "\u2026and the refusal NAMES the contract, not only the failure (%r)"
+           % (err.strip()[-80:],))
+        ck(len((get_set("f-subject-probe") or {}).get("questions") or []) == before,
+           "\u2026and nothing was written: the refused add left the set "
+           "unchanged (%d questions)" % before)
+        ck((get_set("f-subject-probe") or {}).get("subject") == "unit-A",
+           "\u2026and the stored subject is untouched (%r)"
+           % ((get_set("f-subject-probe") or {}).get("subject"),))
+        rc, _, _ = run("ask", "--factory", "f-subject-probe",
+                       "--title", "t3", "--description", "d3", "--option", "a",
+                       "--no-publish")
+        ck(rc == 0, "\u2026and an add WITHOUT --subject still succeeds (rc=%d)" % rc)
 
         # -- 10. a CORRUPT register is an error, never a silent reset --------
         store = os.path.join(env["OC_QUESTIONS_DIR"], "open.json")
@@ -3567,6 +4269,51 @@ def selftest():
            "list --lane --json: open_questions agrees with the lanes it shows "
            "(pre-fix it carried the fleet total beside a filtered lanes[])")
 
+        # --session is the RETURN ADDRESS, so it must select QUESTIONS, not
+        # SETS (#632, 2026-09-28). The fixture above is exactly the case that
+        # broke: ONE standing set, created by session_a, that session_b asked
+        # into. A set-level comparison compares the CREATOR against the caller,
+        # so the second lane sees ZERO of its own questions -- and the first
+        # lane sees the WHOLE set, including questions it never asked. Both
+        # directions are asserted, because either alone passes a wrong filter.
+        # WHO appears is asserted, not merely how many: a count-only arm
+        # measures the fixture rather than the filter.
+        def _pairs(js):
+            """(set, qid) for every question a list --json call returned."""
+            return [(q.get("set"), q.get("qid")) for r in js.get("lanes", [])
+                    for q in r.get("questions", [])]
+        # The DISCRIMINATOR is the cross-lane pair, not a count: the fixture's
+        # set holds q1 (asked by session_a, who CREATED it) and q2 (asked by
+        # session_b into it). Pre-fix the set-level comparison showed the
+        # creator the WHOLE set -- q2 included -- and showed session_b nothing
+        # at all. Either half alone passes a wrong filter, so both are asserted.
+        rc, out, _ = run("list", "--session", session_b, "--json")
+        _jb = json.loads(out)
+        _pb = _pairs(_jb)
+        ck(rc == 0 and (_fac, "q2") in _pb,
+           "list --session returns the question asked BY a lane into a set "
+           "created by ANOTHER (%r)" % (_pb,))
+        ck((_fac, "q1") not in _pb,
+           "\u2026and NOT the creator's question in the same set (%r)" % (_pb,))
+        rc, out, _ = run("list", "--session", session_a, "--json")
+        _ja = json.loads(out)
+        _pa = _pairs(_ja)
+        ck(rc == 0 and (_fac, "q1") in _pa,
+           "\u2026the OTHER direction: the creator sees its OWN question (%r)"
+           % (_pa,))
+        ck((_fac, "q2") not in _pa,
+           "\u2026and NOT the second lane's, so it no longer sees the whole set "
+           "(%r)" % (_pa,))
+        # A lane that asked nothing gets nothing -- the zero that the pre-fix
+        # code returned for EVERYONE, which is why the bug read as an empty
+        # register rather than as a broken filter.
+        rc, out, _ = run("list", "--session", "99999999-8888-7777-6666-555555555555",
+                         "--json")
+        _jz = json.loads(out)
+        ck(rc == 0 and _jz.get("open_questions") == 0 and not _jz.get("lanes"),
+           "list --session for a lane that asked NOTHING returns zero (%r/%r)"
+           % (_jz.get("open_questions"), len(_jz.get("lanes", []))))
+
         # The page: ONE section per LANE, each with a STABLE anchor.
         rc, out, _ = run("publish", "--json")
         acc_page = json.loads(out)
@@ -3592,20 +4339,22 @@ def selftest():
         ck(json.loads(out)["slug"] == acc_page["slug"],
            "\u2026at the IDENTICAL page path (asserted twice, per the order)")
 
-        # The page ALWAYS deploys, and a lane whose questions are all answered
-        # still renders its section, so an anchor handed out yesterday resolves.
+        # Owner order 2026-09-28 SUPERSEDES the property this block pinned. An
+        # all-answered lane no longer renders its section: the page showed a
+        # wall of blocks reporting "0 open", and the reader meets the PAGE, not
+        # the anchors. The page still ALWAYS deploys, and a lane with OPEN
+        # questions still renders.
         rc, _, _ = run("answer", _fac, "q1", "0")
         rc, _, _ = run("answer", _fac, "q2", "0")
         rc, out, _ = run("publish", "--json")
         zero_body = open(os.path.join(json.loads(out)["path"], "index.html"),
                          encoding="utf-8").read()
-        ck("lane-carrier-tools" in zero_body
-           and "lane-governance-ontology-rsi" in zero_body,
-           "a lane whose questions are all answered STILL renders its section "
-           "(the anchor stays resolvable)")
-        ck("0 open" in zero_body,
-           "\u2026reporting its open count, so 0 is visible rather than the "
-           "section vanishing")
+        ck("0 open" not in zero_body,
+           "an empty lane renders NO section -- no lane block reports 0 open "
+           "(owner order 2026-09-28)")
+        ck("<main>" in zero_body and "<h1>" in zero_body,
+           "\u2026and the page still deploys the lanes that ARE open, rather "
+           "than vanishing with the empty ones")
         _rec = get_set(_fac)
         ck(_rec is not None and _rec.get("status") == "open",
            "answering the last question leaves the set OPEN (status=%r)"
@@ -3725,6 +4474,102 @@ def selftest():
            "an unreachable A2A endpoint is rc=4, never a false success (rc=%d)"
            % proc.returncode)
 
+        # -- 12. DELIVERY STAMP ------------------------------------------
+        # A consequence is not a receipt: "answered" says the register closed the
+        # question, NOT that the lane ever received the answer. `answer` does not
+        # notify, so before this the register read "answered" while a lane could
+        # still be blocked, and no surface could tell the two apart.
+        #
+        # The FAILED case is free: the "unreachable A2A endpoint" arm above is a
+        # real delivery attempt that returned 4. Its stamp is what the exit code
+        # cannot carry to anyone but the caller.
+        _dq = (get_set(rset) or {}).get("questions", [{}])[0]
+        _dd = _dq.get("delivery") or {}
+        ck(_dd.get("outcome") in ("unreachable", "refused"),
+           "a FAILED delivery is STAMPED on the question (outcome=%r)"
+           % (_dd.get("outcome"),))
+        ck(bool(_dd.get("attempted_at")),
+           "\u2026and the stamp carries its instant (%r)" % (_dd.get("attempted_at"),))
+        ck(_dd.get("http") == 0,
+           "\u2026and the transport failure is recorded as http 0, not a code "
+           "that could be read as an HTTP answer (%r)" % (_dd.get("http"),))
+
+        # A delivery that SUCCEEDS is stamped delivered. The endpoint is local, so
+        # the arm is deterministic and needs no daemon.
+        import http.server
+        import threading
+
+        class _Ok(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                self.rfile.read(length)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"jsonrpc":"2.0","id":"1","result":{}}')
+            def log_message(self, *args):
+                pass
+
+        _srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Ok)
+        threading.Thread(target=_srv.serve_forever, daemon=True).start()
+        ok_env = dict(env)
+        ok_env["OC_QUESTIONS_A2A"] = ("http://127.0.0.1:%d/a2a/v1"
+                                      % _srv.server_address[1])
+        try:
+            # MUTATION KILL: skip the stamp write in cmd_notify and the delivered
+            # leg below reddens (the stamp still reads the EARLIER failure).
+            proc = subprocess.run([tool, "notify", "--set", rset], env=ok_env,
+                                  capture_output=True, text=True, timeout=90)
+            ck(proc.returncode == 0,
+               "a REACHABLE endpoint delivers (rc=%d)" % proc.returncode)
+            ck("stamped 1 question(s) as delivered" in (proc.stdout or ""),
+               "\u2026and the verb SAYS what it stamped (%r)"
+               % ((proc.stdout or "").strip()[:90],))
+        finally:
+            _srv.shutdown()
+            _srv.server_close()
+        _dq = (get_set(rset) or {}).get("questions", [{}])[0]
+        _dd = _dq.get("delivery") or {}
+        ck(_dd.get("outcome") == "delivered",
+           "a SUCCESSFUL delivery is STAMPED delivered (outcome=%r, http=%r)"
+           % (_dd.get("outcome"), _dd.get("http")))
+
+        # --dry-run delivers nothing, so it must stamp nothing: a dry run that
+        # wrote a stamp would make the register claim a delivery nobody made.
+        _before = ((get_set(rset) or {}).get("questions", [{}])[0]
+                   .get("delivery") or {}).get("attempted_at")
+        rc, _, _ = run("notify", "--set", rset, "--dry-run")
+        ck(rc == 0, "dry-run still succeeds (rc=%d)" % rc)
+        _after = ((get_set(rset) or {}).get("questions", [{}])[0]
+                  .get("delivery") or {}).get("attempted_at")
+        ck(_before == _after,
+           "a DRY RUN stamps nothing (attempted_at %r -> %r)"
+           % (_before, _after))
+
+        # An answered question that was NEVER notified must read as NOT RECORDED
+        # rather than as delivered -- the absence is the finding, so it prints.
+        rc, out, _ = run("ask", "--factory", "f-delivery-arm",
+                         "--title", "Never notified?", "--description", "d",
+                         "--option", "yes", "--json")
+        nset = json.loads(out)["set"]
+        run("answer", nset, "q1", "0")
+        rc, out, _ = run("list", "--all")
+        ck("[delivery: NOT RECORDED]" in out,
+           "list prints NOT RECORDED for an answer nobody delivered")
+        ck("[delivered " in out,
+           "list prints the DELIVERED state beside the answer")
+        rc, out, _ = run("list", "--all", "--json")
+        try:
+            _rows = [q for r in json.loads(out)["lanes"] for q in r["questions"]]
+        except Exception:
+            _rows = []
+        ck(any(q.get("delivery", {}).get("outcome") == "delivered"
+               for q in _rows if q.get("delivery")),
+           "list --json carries the delivery object")
+        ck(any(q.get("delivery") is None for q in _rows),
+           "\u2026and an undelivered question carries no object, so a machine "
+           "reader sees the gap too")
+
         if fails:
             print("  %d FAILED" % len(fails))
             return 1
@@ -3739,6 +4584,9 @@ USAGE = """questions — the Open Questions register (#547)
            [--questions-file F | --questions-json J |
             --title T --description D [--option O]... [--recommended N]]
            [--ttl-days N] [--subject S] [--no-clarify] [--close-when CMD]
+           --subject is CREATION-ONLY: it is recorded when the set is minted,
+           and a set names ONE unit. Passing it on an add to an existing set is
+           REFUSED (rc=2) rather than silently discarded.
            [--no-publish] [--json]
            --factory is REQUIRED: the factory key IS the standing set id,
            reused on every ask. There is no --lane: the asking session is read
@@ -3747,6 +4595,11 @@ USAGE = """questions — the Open Questions register (#547)
            is an override for callers outside a turn. Prints the open-question
            TOTAL and the page URL -- there is no card.
   answer   <set-id> <qid> <choice-index|clarify> [--text T] [--via card|page|cli]
+           recording an answer does NOT notify the asker: delivery is the
+           separate `notify` verb, and an answer whose asker never received it
+           reads as closed on every surface. `notify` now stamps each question
+           it carried with the outcome and instant (delivery: delivered |
+           refused | unreachable), and `list` prints that beside the answer.
            [--no-publish]
            clarify with NO --text is a COMPLETE request (#183): the owner's
            click alone asks the lane to restate the question in wider context
