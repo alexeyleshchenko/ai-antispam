@@ -61,9 +61,21 @@ GATEWAY_API_BASE = os.getenv("API_BASE")
 GATEWAY_API_KEY = os.getenv("CUSTOM_GATEWAY_API_KEY")
 GATEWAY_MODEL = os.getenv("CUSTOM_GATEWAY_MODEL")
 
-# OpenRouter configuration
-OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+# Fallback-tier provider configuration.
+#
+# The word "openrouter" is retained below for the agent NAMES, pool helpers and
+# log lines because they name this TIER, not the vendor: this tier is the safety
+# net the gateway leg falls through to. Its PROVIDER is deliberately configurable
+# so the net can survive a provider outage — a fallback leg pinned to one
+# hardcoded endpoint cannot be moved when that endpoint stops serving.
+#
+# Measured 2026-09-29: OpenRouter's free models returned 429 (free-models-per-day
+# cap, limit 1000 / remaining 0) while EVERY paid model returned 404 "Model
+# blocked by guardrail" — 10 probed, all blocked. That left this leg 0% available,
+# so each gateway timeout became a lost message: 14 in 24h (5.9%).
+FALLBACK_DEFAULT_API_BASE = "https://openrouter.ai/api/v1"
+FALLBACK_API_BASE = os.getenv("FALLBACK_API_BASE") or FALLBACK_DEFAULT_API_BASE
+FALLBACK_API_KEY = os.getenv("FALLBACK_API_KEY") or os.getenv("OPENROUTER_API_KEY")
 
 
 def _create_llm_client(timeout: float) -> httpx.AsyncClient:
@@ -125,14 +137,22 @@ def _create_gateway_model() -> OpenAIChatModel:
 
 
 def _create_openrouter_model(model_name: str) -> OpenAIChatModel:
-    """Create OpenAIChatModel for a specific OpenRouter model."""
-    if not OPENROUTER_API_KEY:
-        raise ValueError("OPENROUTER_API_KEY environment variable is required")
+    """Create the chat model for one fallback-tier model.
+
+    The endpoint and key come from FALLBACK_API_BASE / FALLBACK_API_KEY (see the
+    module-level note above), never from a hardcoded vendor URL: this leg is the
+    gateway's safety net, so its provider must be movable when a provider stops
+    serving.
+    """
+    if not FALLBACK_API_KEY:
+        raise ValueError(
+            "FALLBACK_API_KEY (or OPENROUTER_API_KEY) environment variable is required"
+        )
 
     client = _create_llm_client(get_llm_per_attempt_timeout())
     openai_client = AsyncOpenAI(
-        base_url=f"{OPENROUTER_API_BASE.rstrip('/')}",
-        api_key=OPENROUTER_API_KEY,
+        base_url=f"{FALLBACK_API_BASE.rstrip('/')}",
+        api_key=FALLBACK_API_KEY,
         http_client=client,
         max_retries=0,  # SDK retries off; the caller's pool owns retrying (see _create_llm_client)
     )

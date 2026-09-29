@@ -49,7 +49,7 @@ def model_factories(monkeypatch):
     """Yield both model factories with provider env patched in."""
     from app import agents
 
-    monkeypatch.setattr(agents, "OPENROUTER_API_KEY", _FAKE_KEY, raising=False)
+    monkeypatch.setattr(agents, "FALLBACK_API_KEY", _FAKE_KEY, raising=False)
     monkeypatch.setattr(
         agents, "GATEWAY_API_BASE", "https://gw.invalid/v1", raising=False
     )
