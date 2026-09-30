@@ -75,6 +75,9 @@ carry a step whose failure falls through to inferhub.
 
 ## Applied
 
+> **Superseded by revision 2 below** (same model pair, walls re-derived from a 20-call
+> distribution instead of a 4-call sample). The pair did not change; the walls did.
+
     - name: ai-antispam
       route_timeout: 15s
       step_cooldown: 5s
@@ -113,3 +116,101 @@ against: **199 all-steps-failed / 954 step requests in 24 h**.
 
 Standing backlog this fix does not touch: **206** rows `status='failed' AND moderated_at IS NULL`
 (2026-09-24 12:41:02Z .. 2026-09-30 18:33:47Z). Their retry semantics are issue #70's scope.
+
+---
+
+# Revision 2 — walls re-derived from a distribution, 2026-09-30T23:45Z
+
+The model pair above was kept; **both step walls were wrong**, and the 4-call samples that
+set them could not have shown it. Unclipped 20-call runs at the same production parity:
+
+| leg | n | ok | min | p50 | p90 | max | 5 s wall | 8 s wall |
+|---|---|---|---|---|---|---|---|---|
+| `inclusionai/ling-3.0-flash-sante:free` | 20 | 20/20 | 2.42 | **3.28** | 3.62 | 7.37 | 18/20 (90%) | **20/20 (100%)** |
+| `cbcn/deepseek-v4.1-flash` | 20 | 20/20 | 2.83 | **5.03** | 18.37 | 25.50 | 10/20 (50%) | 13/20 (65%) |
+
+- **ling is bimodal**: 18 of 20 calls land in 2.42-3.62 s and two outliers sit at 7.11 and
+  7.37 s. The shipped **5 s wall clipped exactly that second mode** — a 90% coverage wall on
+  a model whose first mode is 3.3 s.
+- **cbcn's p50 is 5.03 s**, so the shipped 9 s wall covered only 70% of its own calls, and
+  the earlier "p50 10.54" reading (n=10) was a small-sample artifact: this run's p50 is 5.03
+  with a heavy tail to 25.5 s.
+- Consequence for coverage: the 5 s / 9 s pair had a **~90% x ~70%** per-leg pass, i.e. a
+  ~3% joint failure rate *before* any provider degradation. That is the same defect class as
+  the original `minimax 7s -> dots 7s` route this record exists to fix: **a wall set at or
+  below its own p50**.
+
+## The failure observed on the shipped walls (config E)
+
+From the gateway's own log, one production-shaped request:
+
+    step 0  ling-3.0-flash-sante:free  5005 ms  failed to read response: context deadline exceeded
+    step 1  cbcn/deepseek-v4.1-flash   9004 ms  Post https://api.inferhub.dev/v1/... context deadline exceeded (awaiting headers)
+    request execution failed: all route steps failed for model 'ai-antispam'
+
+14.0 s to a 502, on a config whose steps summed 14 s inside a 15 s route. Window
+2026-09-30T22:35Z-23:22Z: **18 ai-antispam requests, 17 ok (all on step 0), 1 502**.
+Those 18 requests all carried a **byte-identical payload** (md5 `f76704c5`, 103 chars) which
+is the shared probe file `/tmp/oc-prompt.json` on `apps`, so they are probe calls, mine and
+peers', **not production classifier traffic**.
+
+## Applied (config F)
+
+    - name: ai-antispam
+      route_timeout: 14s
+      step_cooldown: 5s
+      steps:
+      - provider: openrouter
+        model: inclusionai/ling-3.0-flash-sante:free
+        step_timeout: 8s
+      - provider: inferhub
+        model: cbcn/deepseek-v4.1-flash
+        step_timeout: 5s
+
+`8 + 5 = 13 s` of steps inside `route_timeout 14s` inside the app's `gateway_timeout_seconds:
+15` — **1 s of headroom at each boundary**, which answers the reviewer's point that
+`route_timeout == the client leg` left none: a route that overruns its own client leg is
+aborted from outside and cannot return its own 502. A non-matching return (502, 429) is
+recoverable: `spam_classifier.py:75` catches any gateway exception and falls to the app's
+2-model inferhub tier at `get_llm_per_attempt_timeout()` = 15 s each, so the total leg
+sequence is 15 + 2x15 = 45 s inside the app's `webhook_timeout: 55`.
+
+Validation: throwaway gateway `gw-validate2` (same image, config bind-mounted, port 18080) —
+boot clean, `providers:10 routes:7`, health 200; **15/15 valid tool calls**, p50 3.65 s,
+p90 4.30 s, max 4.48 s. Then applied to the live file: backup
+`config.yaml.bak-antispam-20260930-234523`, verified to hold the pre-edit bytes
+(`md5 ebf0e2f2427fe17a003ffeb9aa1c8fad`) before the write, atomic temp+rename to
+`md5 8f1420999bffec7398c89d4614c2fc0c`, restart `StartedAt 23:45:23.675Z` with the boot log
+listing all 7 routes. Live through `https://ai-gateway.l1979.ru`: **10/10 valid tool calls,
+p50 3.25 s, p90 3.66 s, max 4.06 s**.
+
+## Two instrument errors found while verifying this change
+
+1. **A copy's mtime is not its birth instant.** `shutil.copy2` preserved the *candidate's*
+   mtime, so the live config read `mtime 23:41:59` — three minutes *before* the write — which
+   a later reader would have compared against `StartedAt 23:45:23` and concluded "the file
+   predates the boot, the running route is not this file". Corrected by rewriting the bytes
+   with no metadata preservation; the corrected `mtime 23:45:44` is read from the filesystem,
+   and the content md5 is unchanged.
+2. **The gateway publishes no host port** (`expose: 8080`, Traefik only). `127.0.0.1:8080` on
+   `apps` is a *different* service, so `curl /health` there returned 404 and `/v1/models`
+   returned "Authentication failed" against something that is not the gateway. Every live
+   route number in this record is taken through `ai-gateway.l1979.ru`, never a host port.
+
+## Standing constraints this config lives under
+
+- **The free cap is account-wide and shared.** `free_model_daily_requests` moved
+  `615` (19:00Z) -> `707` (23:25Z) -> `732` (23:40Z) against `limit 1000`, while only 18
+  requests reached this route in that window: **~90/hour is consumed by consumers outside
+  this route** (`dynamic/n8n` and `oss-nemotron` also carry `:free` steps). At 732/1000 with
+  ~950 requests/day of demand, the primary step will hit 429s before the day ends and the
+  route will fall through to the inferhub step. This is a capacity fact, not a defect of the
+  config; it is why the pair has a second leg at all.
+- **Inferhub cannot be made fast.** Its combo `selection` values are `order`, `reliable`,
+  `balanced` only - there is no latency-first mode, and `antispam-latency` is `order`, which
+  pins calls to member 1. Every inferhub alias measured carries 9-18 s of routing overhead.
+- **Language of `reason`:** `ling` emitted **0 CJK** across its reasons, so the defect that
+  got `ling-3.0-flash-fin` owner-banned is absent here. Its reasons are English or mixed
+  (Russian appears only inside quoted fragments), while production rows carry fully Russian
+  reasons from the previous pool. That is a quality observation for the admin-facing field,
+  not a compliance failure, and nothing in the prompt instructs a language.
