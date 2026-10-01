@@ -1,0 +1,12 @@
+{
+  "_note": "Factory data for tests/test_close_row_revision.py, the gate's DECLARED RETIREMENT surface. An entry is admitted ONLY when this ledger carries its `naming_row` AND that row's detail carries the `false_value` VERBATIM, so a retirement is a proof obligation against a row, never a bare assertion. A retired row stays visible on EVERY run -- 'retired: ...' is printed beside clean and excused -- so this is visible debt, not forgiveness. It exists because an append-only ledger has no repair space for a wrong token: n=143 cannot be amended, so the correction is carried by n=145 and the false value is retired by identity.",
+  "retirements": [
+    {
+      "row": 143,
+      "field": "head",
+      "false_value": "8a22e226b0e51c4165e2ab713bb5dc1418920",
+      "naming_row": 145,
+      "true_value": "8a22e226b0e51c4165e2ab713783bb5dc1418920"
+    }
+  ]
+}
