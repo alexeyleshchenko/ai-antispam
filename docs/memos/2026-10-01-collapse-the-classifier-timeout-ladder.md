@@ -202,3 +202,28 @@ for the locale production actually uses.
   revision** (`assert True is False`, 1 failed / 6 passed) and passes after — the pre-fix output is the
   evidence the guard tests something.
 - Full suite after the change: **995 passed, 4 skipped**.
+
+## Status of the `ai-antispam` route (Task 8)
+
+**The `ai-antispam` route is no longer in the classification path.** The bot reaches the provider pool
+directly; the gateway hop is off (`llm.gateway_enabled: false`), and both call sites in the app are
+guarded, so the route is never dialled by this consumer. Verified post-restart: **0** gateway spans and
+**0** gateway requests from the app container's origin.
+
+**The route is deliberately LEFT IN PLACE, not deleted** — other lanes read it, and the measurement above
+shows the outreach lane is one of them today. Deleting it would take that consumer down.
+
+Two things stay as they are, on purpose:
+
+- The app's `.env` still names the route (`CUSTOM_GATEWAY_MODEL=ai-antispam`, `API_BASE=https://ai-gateway.l1979.ru/v1`).
+  They are inert: the guard means the gateway agent is never constructed, and the agents are lazy, so no
+  gateway client is built. They are kept for a **one-line rollback** — flip `gateway_enabled: true` and
+  the hop returns.
+- The route's own steps and timeouts are untouched. They are no longer load-bearing for this consumer,
+  which is the point: a future edit there cannot take the classifier leg down.
+
+**Carried forward, NOT fixed here:** that route's step 0 is `inclusionai/ling-3.0-flash-sante:free`
+(`step_timeout: 8s`) — the owner-banned model — and the gateway loaded it at its own
+`2026-09-30T23:45:23Z` start. The outreach lane is therefore served by a banned model today. Fixing it
+means editing a **shared** gateway route that another lane depends on, so it is reported rather than
+changed unilaterally.
