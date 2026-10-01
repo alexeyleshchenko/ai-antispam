@@ -1,4 +1,4 @@
-"""Guard: the scorecard's gate note carries the gate's POPULATION, not one row.
+"""Gate: the scorecard's gate note carries the gate's POPULATION, not one row.
 
 Why this file exists
 --------------------
