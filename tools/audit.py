@@ -288,6 +288,13 @@ GATE_WALLS_SEC: dict[str, float] = {
     # only, so the cost is interpreter startup). 5.0 is a 7.6x factor on the SLOWEST run
     # -- a margin rather than a coincidence, and still far below the 30.0 default.
     "tests/test_ledger_commit_cites_no_rows.py": 5.0,
+    # measured 9.97 / 9.55 / 10.23s wall over three consecutive runs on 2026-09-30. The
+    # cost is NOT startup alone: ~6.0s is the guard's own deliberate sleeps (a 1.0s and a
+    # 5.0s staged gate, load-insensitive by construction), the rest is interpreter startup
+    # plus two driven `audit.py --stamp` subprocesses. 41.0 is 4.0x the slowest of those
+    # three -- the house precedent, and a margin that survives a loaded box precisely
+    # because the majority of the runtime is a fixed sleep rather than contention.
+    "tests/test_audit_stamp_duration.py": 41.0,
 }
 
 
@@ -490,6 +497,14 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     if (repo_root / "tests/test_ledger.py").is_file():
         gates_to_run.append([sys.executable, "tests/test_ledger.py"])
 
+    # 16. The stamp's own duration (#71) -- the run row's `duration=` must be MEASURED, not
+    # the literal `4s` it carried for 15 consecutive rows, and it must track the gate work
+    # the same run printed. Runs as a GATE for the same reason as #9-#15: nothing under
+    # tests/ is reached by CI here, so a guard living only in the suite would never execute
+    # on a tools/audit.py change -- the exact shape of the defect it guards.
+    if (repo_root / "tests/test_audit_stamp_duration.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_audit_stamp_duration.py"])
+
     # The commit-citation clause. SCRIPT-MODE (0 test functions collected, `__main__` present),
     # so a script registration is the honest form -- and unlike the cron gate this one is NOT
     # vacuous: it prints "examined N commit(s)" and exits 1 on an unexcused violation.
@@ -690,7 +705,16 @@ def main() -> int:
     ledger_stats = parse_ledger(ledger_file)
     rework_stats = parse_rework(rework_file, ledger_stats.get("closed_tasks", 0))
     cadence_stats = check_cadence_integrity(ledger_file)
+
+    # WALL-CLOCK AROUND THE GATE LOOP (#71). The stamp row's `duration=` was the string
+    # literal `4s`, so every daily self-audit row carried a duration the audit never
+    # measured -- plausible, constant and wrong, which a reader comparing runs reads as a
+    # stable cost while the run itself takes minutes. The population is the SAME one the
+    # gate table below reports (the loop that runs the gates), measured the same way
+    # `run_gate` measures each gate, so the row and the table describe one run.
+    t_gates0 = datetime.datetime.now()
     gate_results = execute_mechanical_gates(REPO_ROOT)
+    gate_loop_sec = (datetime.datetime.now() - t_gates0).total_seconds()
 
     all_gates_pass = all(g["passed"] for g in gate_results)
     cadence_ok = cadence_stats.get("cadence_held", True)
@@ -730,7 +754,11 @@ def main() -> int:
         post_runs = pre_runs + 1
         post_accepted = pre_accepted + (1 if healthy else 0)
         yield_pct = first_pass_yield_pct(post_accepted, post_runs)
-        detail = f"duration=4s turns=0 outcome={outcome} gate={gate_summary} yield={yield_pct}%"
+        # MEASURED, never a literal (#71): `gate_loop_sec` is the wall-clock elapsed around
+        # the gate loop above, so this field tracks the work the row describes instead of
+        # standing at a constant. `turns=0` stays a legitimate declaration -- the runner
+        # makes no agent turns -- and is unaffected.
+        detail = f"duration={round(gate_loop_sec, 2)}s turns=0 outcome={outcome} gate={gate_summary} yield={yield_pct}%"
         stamp_cmd = [
             sys.executable,
             "tools/ledger.py",
