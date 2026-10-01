@@ -12,7 +12,11 @@ from ..agents import (
     get_gateway_spam_agent,
     get_openrouter_spam_agent,
 )
-from ..common.llm_budget import get_llm_gateway_timeout, get_llm_per_attempt_timeout
+from ..common.llm_budget import (
+    get_llm_gateway_enabled,
+    get_llm_gateway_timeout,
+    get_llm_per_attempt_timeout,
+)
 from ..common.utils import describe_exception
 from ..database import get_admin
 from ..i18n import normalize_lang
@@ -50,34 +54,39 @@ async def is_spam(
         "Analyze this message and respond with JSON spam classification "
         "including is_spam, confidence, and reason."
     )
-    gateway_settings = ModelSettings(timeout=get_llm_gateway_timeout())
     openrouter_settings = ModelSettings(timeout=get_llm_per_attempt_timeout())
 
-    # Try gateway first
-    try:
-        with logfire.span("spam_classifier_gateway_call"):
-            agent = get_gateway_spam_agent()
-            async with asyncio.timeout(get_llm_gateway_timeout()):
-                result = await agent.run(
-                    user_message,
-                    instructions=system_prompt,
-                    model_settings=gateway_settings,
-                )
-        is_spam_result = result.output.is_spam
-        confidence_result = result.output.confidence
-        reason_result = result.output.reason
-        classification_confidence_gauge.set(
-            confidence_result if is_spam_result else -confidence_result
-        )
-        attempts_histogram.record(1)
-        return is_spam_result, confidence_result, reason_result
-
-    except Exception as e:  # noqa: BLE001
-        with logfire.span("spam_classifier_gateway_failure"):
-            logger.warning(
-                "Gateway spam classification failed: %s, trying OpenRouter",
-                describe_exception(e),
+    # Gateway first, but only when the hop is enabled. 2026-10-01: the
+    # classification path no longer traverses the ai-gateway (owner directive —
+    # collapse the timeout ladders). With gateway_enabled: false the pool below
+    # IS the path; this block stays for a one-line rollback and for any consumer
+    # still routing through the gateway.
+    if get_llm_gateway_enabled():
+        gateway_settings = ModelSettings(timeout=get_llm_gateway_timeout())
+        try:
+            with logfire.span("spam_classifier_gateway_call"):
+                agent = get_gateway_spam_agent()
+                async with asyncio.timeout(get_llm_gateway_timeout()):
+                    result = await agent.run(
+                        user_message,
+                        instructions=system_prompt,
+                        model_settings=gateway_settings,
+                    )
+            is_spam_result = result.output.is_spam
+            confidence_result = result.output.confidence
+            reason_result = result.output.reason
+            classification_confidence_gauge.set(
+                confidence_result if is_spam_result else -confidence_result
             )
+            attempts_histogram.record(1)
+            return is_spam_result, confidence_result, reason_result
+
+        except Exception as e:  # noqa: BLE001
+            with logfire.span("spam_classifier_gateway_failure"):
+                logger.warning(
+                    "Gateway spam classification failed: %s, trying OpenRouter",
+                    describe_exception(e),
+                )
 
     # OpenRouter pool with rotation
     with logfire.span("spam_classifier_openrouter_loop"):

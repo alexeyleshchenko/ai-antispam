@@ -31,80 +31,61 @@ cache:
 # High-confidence spam: may auto-delete (if admins allow). Low-confidence: notify only, admin confirms.
 # High-confidence not-spam: auto-approve. Low-confidence not-spam: send for review.
 # Examples: limit and ham share for prompt (prefer most recent within each category).
-# LLM routing — keep in sync with gateway route "ai-antispam" (OpenRouter fallback steps).
+# LLM routing — the classification path calls the provider pool DIRECTLY.
+#
+# 2026-10-01 (owner directive: "the timeout ladders are wrong ... lift some
+# self-inflicted requirements"). The gateway hop is REMOVED from the
+# classification path. It added three walls — the gateway's per-step timeout,
+# its route timeout, and the app's client leg — each of which had to reconcile
+# with the others and with the app's own per-attempt budget; twice in three days
+# an edit to one of them took the classifier leg down. With the inferhub-only
+# directive the route pointed at the same provider the app already falls back
+# to, so the hop bought nothing. See
+# docs/memos/2026-10-01-collapse-the-classifier-timeout-ladder.md
+#
+# The old arithmetic here pinned the gateway leg at <=15s from BOTH sides:
+# tests/test_classifier_fallback_budget.py required per_attempt >= 15s, and
+# budget + the 10s reserve had to fit the 55s webhook. Together those gave
+# gateway + 15n <= 45, so with n=2 the gateway leg could never exceed 15s — and
+# the gateway route's steps then had to sum under a wall no latency had ever
+# been measured against. Every wall was load-bearing for the next; none was
+# derived from a measurement. That is the defect this change removes.
 llm:
-  budget_seconds: 45           # total classifier LLM budget; reserve 10s for the webhook
-  gateway_timeout_seconds: 15  # primary gateway leg; classifier-only budget
+  budget_seconds: 32           # total classifier LLM budget; reserve 10s for the webhook
+  gateway_enabled: false       # the gateway hop is out of the classification path
+  gateway_timeout_seconds: 0   # 0 = no gateway leg; the pool owns the whole budget
   route_timeout_seconds: 30    # non-classification LLM legs (topic derivation, admin DM)
-  # Per-attempt budget is DERIVED: (budget - gateway) / len(models) = 15.0s.
+  # Per-attempt budget is DERIVED: (budget - gateway) / len(models) = 16.0s.
+  # The pool floor in tests/test_classifier_fallback_budget.py is 12.0s — low
+  # enough not to fight the derivation, high enough that a pool starved below it
+  # (#44's defect) is still refused.
   #
-  # The gateway leg stays at 15s because it is bounded from BOTH sides:
-  #   - tests/test_classifier_fallback_budget.py pins per_attempt >= 15s, since
-  #     a starved OpenRouter tier silently killed the fallback (#44). Raising
-  #     this leg cuts that budget, so 15s is the ceiling.
-  #   - the gateway route "ai-antispam" must be able to fail over INSIDE this
-  #     leg, or the client cancels mid-route and no later step is reachable.
-  #
-  # 2026-09-28 outage: the route's first step was inferhub, which hung to 15s
-  # and then errored. Our 15s leg cancelled the request at the same instant, so
-  # the gateway could never reach its own later steps; every classification
-  # either burned the full 45s chain or failed. Fixed on the route side:
-  #   inferhub/ali-deepseek-v4-flash-0731  60s timeout then errors -> REMOVED
-  #   groq/openai/gpt-oss-120b             0.6 / 9.8 / 7.1s   -> step 0, 9s
-  #   minimax/MiniMax-M2.7                 8.3 / 8.3 / 11.1s  -> step 1, 12s
-  # A 429 rate-limit on groq fails in ~0.13s, leaving the whole leg to minimax,
-  # so both providers are reachable within 15s on the realistic paths.
-  # (Measured at the real 7.8k-token classifier payload.)
-  # The old "p50 3.3s / max 11.8s" note here described a pre-outage route and
-  # was falsified by that measurement - do not restore it.
-  #
-  # Model choice is MEASURED, not assumed. At production parity on 2026-09-25
-  # (deployed container, the app's own prompt builder, owner-scoped corpus,
-  # populated context, tools required, 15.0s derived budget), over real
-  # confirmed spam AND ham, scoring availability + verdict accuracy + the
-  # admin-facing reason's language:
-  #   dots-3-note-preview  7/10 returned, 7/7 verdicts correct, 7/7 reasons ru
-  #   liquid/lfm-2.5-2.6b  9/10 returned, 4/9 correct, 7/9 reasons ru
-  # dots is ordered FIRST because accuracy leads; liquid follows as the
-  # availability net for when dots times out. Both write reasons in Russian
-  # and neither emits CJK.
-  #
-  # 2026-09-29: liquid was REPLACED. Re-measured at the real 7.8k-token
-  # classifier payload it answered 200 but returned NO tool_call in 5 of 5
-  # calls (37-49s), so as an availability net it could only ever burn its leg -
-  # and its own 4/9 accuracy was already a warning. Replacement measured over
-  # 4 calls each at the same payload: nemotron-3-super-120b-a12b 4/4 tool_calls,
-  # 4/4 reasons ru, 0 CJK, p50 3.3s, max 3.6s. Also rejected on measurement:
-  # cohere/north-mini-code (4/4 tool but 2/4 ru), qwen3.8-27b and gemma-4-31b
-  # (429 on every call), nemotron-3.5-lightning (40s read timeout),
-  # thinkingmachines/inkling (403, agentic-harness only).
-  #
-  # ling-3.0-flash-fin was BANNED by the owner 2026-09-25: it served every
-  # fallback rescue and wrote its reason in Chinese (a 141-char CJK run in
-  # production). The reason is the admin-facing field, so a model that cannot
-  # write it in the admins' language is unusable however fast it is. It is
-  # pinned in BANNED_MODELS so a later config edit cannot quietly re-add it.
-  # See docs/memos/2026-09-25-fallback-pool-language-and-accuracy.md
-  #
-  # 2026-09-29: the tier's PROVIDER was replaced, not its shape. OpenRouter's
-  # free models returned 429 (free-models-per-day cap: limit 1000 / remaining 0)
-  # AND every paid model returned 404 "Model blocked by guardrail" - 10 probed,
-  # all blocked. So this leg was 0% available and every gateway timeout became a
-  # lost message. The endpoint now points at inferhub (FALLBACK_API_BASE, set in
-  # docker-compose.yml; credential FALLBACK_API_KEY in .env) and the ids below
-  # are inferhub aliases.
-  #
-  # Measured 2026-09-29 at production parity - the real 27,743-char prompt with
-  # the real production spam message, 6 calls each:
-  #   ag/gemini-3.7-flash-high   p50 7.50s  max 10.66s  0/6 over the 15s leg
-  #   cb/deepseek-v4.1-flash     p50 7.94s  max 12.46s  0/6 over the 15s leg
-  #   ag/gemini-3.8-flash-high   p50 7.74s  max 12.59s  0/6 over the 15s leg
-  #   cp/zai/glm-5.3-flash       p50 8.61s  max 12.77s  0/6 over the 15s leg
+  # Model choice is MEASURED, not assumed. Measured 2026-09-29 at production
+  # parity — the real 27,743-char prompt with the real production spam message,
+  # 6 calls each:
+  #   ag/gemini-3.7-flash-high   p50 7.50s  max 10.66s  0/6 over a 15s leg
+  #   cb/deepseek-v4.1-flash     p50 7.94s  max 12.46s  0/6 over a 15s leg
+  #   ag/gemini-3.8-flash-high   p50 7.74s  max 12.59s  0/6 over a 15s leg
+  #   cp/zai/glm-5.3-flash       p50 8.61s  max 12.77s  0/6 over a 15s leg
   #   cp/cline-pass/deepseek-v4.1-flash p50 10.11s max 20.08s  1/6 OVER - rejected
   #   ali/deepseek-v4-flash-0731       21.6s+ on every call    - rejected
   #   cp/cline-pass/deepseek-v4-flash  22.5-31.5s on every call - rejected
   # The pair deliberately keeps TWO provider prefixes (ag/gemini, cb/deepseek)
   # so one upstream outage cannot empty the pool.
+  #
+  # Both are inferhub aliases: the endpoint is FALLBACK_API_BASE (set in
+  # docker-compose.yml) with credential FALLBACK_API_KEY in .env. OpenRouter's
+  # free models returned 429 (free-models-per-day cap) and every paid model
+  # returned 404 "Model blocked by guardrail" — 10 probed, all blocked — so the
+  # tier was 0% available and every gateway timeout became a lost message.
+  #
+  # ling is BANNED, both ids: ling-3.0-flash-fin (owner ban 2026-09-25) and
+  # ling-3.0-flash-sante (owner re-confirmed 2026-10-01: "it doesn't reliably
+  # produce reason in Russian"). The prompt ALREADY mandates Russian
+  # (locales/ru.yaml:377 "Пиши по-русски."), so this is model non-compliance,
+  # not a missing instruction. Both are pinned in BANNED_MODELS so a later
+  # config edit cannot quietly re-add them.
+  # See docs/memos/2026-09-25-fallback-pool-language-and-accuracy.md
   openrouter_models:
     - ag/gemini-3.7-flash-high
     - cb/deepseek-v4.1-flash

@@ -31,18 +31,20 @@ from app.common.llm_budget import (
     reset_llm_config_validation,
     validate_llm_config,
 )
-from app.common.utils import get_webhook_timeout
+from app.common.utils import get_webhook_timeout, load_config
 
-# The floor a fallback leg needs to complete a real model call, and the shape it
-# holds the pool to. Measured 2026-09-25 at production parity (real prompt, real
-# owner-scoped corpus, 19,135-char system prompt) over 12 free candidates: the
-# survivors are ling-3.0-flash-fin (5/5, p50 6.23s, max 7.16s) and
-# dots-3-note-preview (5/5, p50 10.96s, max 14.46s). Two models behind the 15s
-# gateway derive exactly 15.0s each. The floor is set at that DERIVED value
-# rather than at the slowest survivor because it also pins the pool at TWO
-# models: a third would derive (45 - 15) / 3 = 10.0s, below the floor, and the
-# guard refuses it.
-MIN_VIABLE_PER_ATTEMPT_SECONDS = 15.0
+# The floor a fallback leg needs to complete a real model call.
+#
+# 2026-10-01: the gateway hop was removed from the classification path (owner
+# directive - collapse the timeout ladders to one layer). With the hop gone the
+# derivation is (budget - 0) / len(models) = (32 - 0) / 2 = 16.0s, so the floor
+# no longer has to reconcile the gateway leg with the pool: it only has to sit
+# below the derived value. The old 15.0 floor was itself the CEILING that pinned
+# the gateway leg at <=15s (gateway + 15n <= 45), which forced the gateway
+# route's steps to sum under a wall no latency was ever measured against. The
+# floor is now 12.0: low enough not to fight the derivation, high enough that a
+# pool starved below it (#44's defect) is still refused.
+MIN_VIABLE_PER_ATTEMPT_SECONDS = 12.0
 
 # Latency measured for the model that was dropped, against the total budget.
 DROPPED_MODEL = "nvidia/nemotron-3.5-lightning:free"
@@ -68,8 +70,37 @@ DEAD_MODELS = (
 # serving every fallback rescue at the time.
 BANNED_MODELS = (
     "inclusionai/ling-3.0-flash-fin:free",  # owner ban 2026-09-25: Chinese reasons
+    # Owner re-confirmed 2026-10-01: "Ling we already tried - it doesn't reliably
+    # produce reason in Russian." The prompt ALREADY mandates Russian
+    # (locales/ru.yaml:377 "Пиши по-русски."), so this is model non-compliance,
+    # not a missing instruction.
+    "inclusionai/ling-3.0-flash-sante:free",
 )
 
+
+
+def test_classifier_does_not_route_through_the_gateway():
+    """The classification path must not traverse the gateway (2026-10-01).
+
+    Owner directive: "the timeout ladders are wrong ... lift some self-inflicted
+    requirements". The gateway hop added three walls - its per-step timeout, its
+    route timeout, and the app's client leg - each of which had to reconcile
+    with the others and with the app's own per-attempt budget. Twice in three
+    days an edit to one of them took the classifier leg down. With the owner's
+    inferhub-only directive the route pointed at the same provider the app
+    already falls back to, so the hop bought nothing.
+
+    Fails against the pre-collapse config (gateway_enabled absent, i.e. the
+    gateway still in the path) and passes once the hop is gone.
+    """
+    llm = load_config().get("llm", {})
+    assert llm.get("gateway_enabled", True) is False, (
+        "the classifier still routes through the gateway; its step/route/client "
+        "walls are back in the classification path"
+    )
+    assert float(llm.get("gateway_timeout_seconds", 0)) == 0.0, (
+        "the gateway leg is still budgeted; it must be 0 when the hop is gone"
+    )
 
 
 def test_derived_per_attempt_budget_leaves_the_fallback_viable():

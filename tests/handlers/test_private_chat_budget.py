@@ -116,16 +116,24 @@ class TestTerminalTelegramError:
         )
 
     async def test_terminal_error_does_not_advance_the_pool(self):
-        """Even reached from the pool itself, the error stops rotation."""
+        """Even reached from the pool itself, the error stops rotation.
+
+        With the gateway hop disabled (llm.gateway_enabled: false, 2026-10-01)
+        the pool IS the primary path, so a genuine provider failure advances the
+        pool once - and the terminal Telegram error must not advance it again.
+        """
         attempt = AsyncMock(
-            side_effect=[RuntimeError("gateway down"), _terminal_error()]
+            side_effect=[RuntimeError("provider down"), _terminal_error()]
         )
         stack, rotate = _patched(attempt)
         with stack, pytest.raises(TelegramBadRequest):
             await private_handlers.handle_private_message(_fake_message())
 
-        assert attempt.await_count == 2, "gateway leg then exactly one pool leg"
-        assert rotate.call_count == 0, "the pool must not be advanced"
+        assert attempt.await_count == 2, "one provider failure then the terminal leg"
+        assert rotate.call_count == 1, (
+            "the pool advanced once for the genuine provider failure and must not "
+            "be advanced again by the terminal Telegram error"
+        )
 
     def test_a_terminal_error_is_not_webhook_retryable(self):
         """If it were, the 503 redelivery would re-enter the same failure."""
@@ -170,12 +178,17 @@ class TestRotationSurvives:
     """The fix must narrow rotation, not remove it."""
 
     async def test_genuine_provider_failure_still_rotates(self):
+        """Both pool agents are tried; each failure advances the pool.
+
+        With the gateway hop disabled (2026-10-01) the pool has exactly two
+        agents, so a total provider outage is two attempts, not three.
+        """
         attempt = AsyncMock(
-            side_effect=[RuntimeError("gw"), RuntimeError("p1"), RuntimeError("p2")]
+            side_effect=[RuntimeError("p1"), RuntimeError("p2")]
         )
         stack, rotate = _patched(attempt)
         with stack, pytest.raises(RuntimeError, match="All chat providers failed"):
             await private_handlers.handle_private_message(_fake_message())
 
-        assert attempt.await_count == 3, "gateway leg plus both pool agents"
+        assert attempt.await_count == 2, "both pool agents, gateway hop disabled"
         assert rotate.call_count == 2, "each pool failure still advances the pool"

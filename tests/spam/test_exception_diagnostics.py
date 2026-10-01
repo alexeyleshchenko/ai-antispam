@@ -96,18 +96,31 @@ def test_describe_exception_appends_a_message_when_there_is_one() -> None:
 @pytest.mark.parametrize(
     "exc", MESSAGE_LESS_EXCEPTIONS, ids=lambda e: type(e).__name__
 )
+@pytest.mark.parametrize(
+    "gateway_enabled", [False, True], ids=["pool-only", "gateway-on"]
+)
 async def test_classifier_failure_lines_name_the_type(
-    exc: BaseException, caplog: pytest.LogCaptureFixture
+    exc: BaseException,
+    gateway_enabled: bool,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The REAL path: every leg fails with a message-less exception.
 
     A guard on `describe_exception` alone would not prove the call sites USE it, so
     this drives `is_spam` itself and reads the lines it actually emits.
+
+    Run for BOTH gateway states. The shipped config disables the hop
+    (`llm.gateway_enabled: false`, 2026-10-01) so the pool is the only leg that
+    logs — but the gateway block is retained for a one-line rollback and must stay
+    covered rather than rot into untested code.
     """
     from app.spam import spam_classifier
 
     with (
         _all_legs_failing(exc),
+        patch.object(
+            spam_classifier, "get_llm_gateway_enabled", return_value=gateway_enabled
+        ),
         caplog.at_level(logging.WARNING),
         pytest.raises(RuntimeError),
     ):
@@ -116,8 +129,11 @@ async def test_classifier_failure_lines_name_the_type(
     lines = [record.getMessage() for record in caplog.records]
     gateway = [line for line in lines if line.startswith("Gateway spam classification")]
     openrouter = [line for line in lines if line.startswith("OpenRouter agent")]
-    assert gateway, f"the gateway leg logged nothing: {lines}"
     assert openrouter, f"no OpenRouter leg logged anything: {lines}"
+    if gateway_enabled:
+        assert gateway, f"the gateway leg logged nothing: {lines}"
+    else:
+        assert not gateway, f"the gateway leg ran while it was disabled: {lines}"
     for line in gateway + openrouter:
         assert type(exc).__name__ in line, (
             f"a message-less failure rendered without its type, so the line is "

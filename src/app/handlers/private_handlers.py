@@ -18,7 +18,11 @@ from ..agents import (
     get_openrouter_chat_agent,
 )
 from ..common.bot import bot
-from ..common.llm_budget import get_llm_gateway_timeout, get_llm_per_attempt_timeout
+from ..common.llm_budget import (
+    get_llm_gateway_enabled,
+    get_llm_gateway_timeout,
+    get_llm_per_attempt_timeout,
+)
 from ..common.telegram_errors import is_message_not_found_error
 from ..common.utils import sanitize_llm_html
 from ..database import (
@@ -261,44 +265,49 @@ async def handle_private_message(message: types.Message) -> str:
     # not fit system.webhook_timeout. Unbounded legs here let one update run
     # past the webhook timeout, which answers 503 and redelivers the update
     # straight back into the same failure.
-    gateway_timeout = get_llm_gateway_timeout()
     per_attempt_timeout = get_llm_per_attempt_timeout()
     num_openrouter = len(_get_openrouter_chat_agents())
 
     last_error = None
 
-    # Try gateway first
-    try:
-        chat_agent = get_chat_agent()
-        # Apply timeout to the whole provider attempt (including internal retries)
-        return await asyncio.wait_for(
-            _try_provider_with_retries(
-                chat_agent,
-                user_message_text=user_message_text,
-                system_prompt=system_prompt,
-                model_settings=ModelSettings(timeout=gateway_timeout),
-                admin_message=admin_message,
-                admin_id=admin_id,
-                message=message,
-            ),
-            timeout=gateway_timeout,
-        )
-    except asyncio.CancelledError:
-        raise
-    except TelegramBadRequest as e:
-        # Terminal: no provider can fix a bad reply target such as Telegram's
-        # "message to be replied not found", so rotating the pool only burns
-        # the budget discovering that. Propagate it - the dispatcher turns it
-        # into a user-visible outcome rather than a silent provider failure.
-        logger.warning(
-            "Gateway chat failed (%s): %s", type(e).__name__, str(e) or "<no message>"
-        )
-        raise
-    except Exception as e:  # noqa: BLE001
-        last_error = e
-        logger.warning(
-            "Gateway chat failed (%s): %s", type(e).__name__, str(e) or "<no message>"
-        )
+    # Gateway first, but only when the hop is enabled. 2026-10-01: the same
+    # directive that removed the gateway from the classification path removes it
+    # here — the hop pointed at the same provider the pool already uses, and its
+    # client leg was one more wall to reconcile. With gateway_enabled: false the
+    # pool below is the primary path.
+    if get_llm_gateway_enabled():
+        gateway_timeout = get_llm_gateway_timeout()
+        try:
+            chat_agent = get_chat_agent()
+            # Apply timeout to the whole provider attempt (including internal retries)
+            return await asyncio.wait_for(
+                _try_provider_with_retries(
+                    chat_agent,
+                    user_message_text=user_message_text,
+                    system_prompt=system_prompt,
+                    model_settings=ModelSettings(timeout=gateway_timeout),
+                    admin_message=admin_message,
+                    admin_id=admin_id,
+                    message=message,
+                ),
+                timeout=gateway_timeout,
+            )
+        except asyncio.CancelledError:
+            raise
+        except TelegramBadRequest as e:
+            # Terminal: no provider can fix a bad reply target such as Telegram's
+            # "message to be replied not found", so rotating the pool only burns
+            # the budget discovering that. Propagate it - the dispatcher turns it
+            # into a user-visible outcome rather than a silent provider failure.
+            logger.warning(
+                "Gateway chat failed (%s): %s", type(e).__name__, str(e) or "<no message>"
+            )
+            raise
+        except Exception as e:  # noqa: BLE001
+            last_error = e
+            logger.warning(
+                "Gateway chat failed (%s): %s", type(e).__name__, str(e) or "<no message>"
+            )
 
     # OpenRouter pool with rotation
     if num_openrouter > 0:
