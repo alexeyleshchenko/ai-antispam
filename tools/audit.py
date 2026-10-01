@@ -288,13 +288,15 @@ GATE_WALLS_SEC: dict[str, float] = {
     # only, so the cost is interpreter startup). 5.0 is a 7.6x factor on the SLOWEST run
     # -- a margin rather than a coincidence, and still far below the 30.0 default.
     "tests/test_ledger_commit_cites_no_rows.py": 5.0,
-    # measured 9.97 / 9.55 / 10.23s wall over three consecutive runs on 2026-09-30. The
-    # cost is NOT startup alone: ~6.0s is the guard's own deliberate sleeps (a 1.0s and a
-    # 5.0s staged gate, load-insensitive by construction), the rest is interpreter startup
-    # plus two driven `audit.py --stamp` subprocesses. 41.0 is 4.0x the slowest of those
-    # three -- the house precedent, and a margin that survives a loaded box precisely
-    # because the majority of the runtime is a fixed sleep rather than contention.
-    "tests/test_audit_stamp_duration.py": 41.0,
+    # measured 9.97 / 9.55 / 10.23 / 13.14 / 9.67 / 11.45 / 12.71 / 11.51 / 12.83s wall over
+    # nine runs on 2026-09-30-10-01, the later ones taken at load 11.49 on 4 cores (co-tenant
+    # load, board item #72). The cost is NOT startup alone: ~6.0s is the guard's own
+    # deliberate sleeps (a 1.0s and a 5.0s staged gate, load-insensitive by construction),
+    # the rest is interpreter startup plus two driven `audit.py --stamp` subprocesses. 53.0
+    # is 4.0x the slowest of those nine -- the house precedent. The spread is load, not the
+    # guard: the fixed sleeps put a floor under the runtime and a ceiling on how far
+    # contention can stretch it.
+    "tests/test_audit_stamp_duration.py": 53.0,
 }
 
 
@@ -502,6 +504,13 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     # the same run printed. Runs as a GATE for the same reason as #9-#15: nothing under
     # tests/ is reached by CI here, so a guard living only in the suite would never execute
     # on a tools/audit.py change -- the exact shape of the defect it guards.
+    #
+    # SCRIPT-form, and the file is script-form BY CONSTRUCTION: it carries `main()` under a
+    # `__main__` guard and NO module-level `def test_*`. Direction 5 of
+    # `tests/test_gate_registration.py` reads the form from the TARGET's shape (#124, probed
+    # at `:754`), so a test-carrying file would have to be registered under a pytest runner
+    # -- and pytest is the expensive path here, dragging in `tests/conftest.py` and
+    # `pythonpath = src` for ~46s against this file's ~10s script run.
     if (repo_root / "tests/test_audit_stamp_duration.py").is_file():
         gates_to_run.append([sys.executable, "tests/test_audit_stamp_duration.py"])
 

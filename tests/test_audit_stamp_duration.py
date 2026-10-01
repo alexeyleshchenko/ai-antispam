@@ -210,15 +210,13 @@ def check_measured_and_tracks_work(base: Path) -> list[str]:
     return problems
 
 
-# --- pytest wrappers (the gate path does not need pytest) -------------------
-
-
-def test_source_carries_no_literal() -> None:
-    assert check_source_carries_no_literal() == []
-
-
-def test_measured_and_tracks_work(tmp_path: Path) -> None:
-    assert check_measured_and_tracks_work(tmp_path) == []
+# NO PYTEST WRAPPERS, DELIBERATELY (direction 5, tests/test_gate_registration.py). A file
+# carrying module-level `def test_*` is PYTEST-form HOWEVER it is invoked (#124, probed at
+# `:754`), so a script registration would leave those wrappers uncollected and the
+# registration a direction-5 mismatch -- and the pytest form is the expensive one here:
+# ~46s against this file's ~10s script run, because a pytest invocation drags in
+# tests/conftest.py and `pythonpath = src`. The two legs above are the whole guard, so a
+# wrapper could add nothing but the mismatch.
 
 
 # --- standalone entry point (how tools/audit.py runs it) --------------------
