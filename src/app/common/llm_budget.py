@@ -27,6 +27,24 @@ def _parse_positive_number(value: Any, field: str) -> float:
         raise ValueError(f"config.yaml: {field} must be positive")
     return parsed
 
+def _parse_non_negative_number(value: Any, field: str) -> float:
+    """Parse a number that may be 0.
+
+    Used for llm.gateway_timeout_seconds: 0 is the meaningful value that says
+    "there is no gateway leg" (2026-10-01, the timeout-ladder collapse), so it
+    cannot go through _parse_positive_number. Negative is still refused — a
+    negative leg would be a wall with no budget behind it.
+    """
+    if value is None:
+        raise ValueError(f"config.yaml: missing {field}")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"config.yaml: {field} must be a number") from e
+    if parsed < 0:
+        raise ValueError(f"config.yaml: {field} must not be negative")
+    return parsed
+
 
 def validate_llm_config(config: dict[str, Any] | None = None) -> None:
     """Validate the LLM budget and store the derived values for getters."""
@@ -39,9 +57,12 @@ def validate_llm_config(config: dict[str, Any] | None = None) -> None:
         raise ValueError("config.yaml: missing or invalid 'llm' section (expected mapping)")  # noqa: TRY004 - config validation: ValueError is the domain error
 
     budget = _parse_positive_number(llm.get("budget_seconds"), "llm.budget_seconds")
-    gateway = _parse_positive_number(
+    gateway = _parse_non_negative_number(
         llm.get("gateway_timeout_seconds"), "llm.gateway_timeout_seconds"
     )
+    # Default True: a config that has not been migrated keeps the gateway in the
+    # path, exactly as before this key existed.
+    gateway_enabled = bool(llm.get("gateway_enabled", True))
     route = _parse_positive_number(
         llm.get("route_timeout_seconds"), "llm.route_timeout_seconds"
     )
@@ -60,6 +81,11 @@ def validate_llm_config(config: dict[str, Any] | None = None) -> None:
             )
         validated_models.append(model_id)
 
+    if gateway_enabled and gateway <= 0:
+        raise ValueError(
+            "config.yaml: llm.gateway_enabled is true but llm.gateway_timeout_seconds is 0; "
+            "disable the gateway or give it a positive timeout"
+        )
     if gateway >= budget:
         raise ValueError("config.yaml: llm.gateway_timeout_seconds must be < llm.budget_seconds")
     per_attempt = (budget - gateway) / len(validated_models)
@@ -83,6 +109,7 @@ def validate_llm_config(config: dict[str, Any] | None = None) -> None:
 
     _validated_llm = {
         "budget_seconds": budget,
+        "gateway_enabled": gateway_enabled,
         "gateway_timeout_seconds": gateway,
         "route_timeout_seconds": route,
         "per_attempt_timeout_seconds": per_attempt,
@@ -103,6 +130,10 @@ def get_llm_config() -> dict[str, Any]:
 def get_llm_budget_seconds() -> float:
     return float(_require_validated_llm()["budget_seconds"])
 
+
+def get_llm_gateway_enabled() -> bool:
+    """Whether the classification path may use the gateway hop."""
+    return bool(_require_validated_llm()["gateway_enabled"])
 
 def get_llm_gateway_timeout() -> float:
     return float(_require_validated_llm()["gateway_timeout_seconds"])
