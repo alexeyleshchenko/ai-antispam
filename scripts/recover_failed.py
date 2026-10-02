@@ -664,12 +664,28 @@ def render_table(records: list[dict], run_id: str, apply: bool) -> str:
     expiring: Counter = Counter()
     deletes: dict[int, list[tuple[int, int]]] = {}
 
+    def _bucket(r: dict) -> str:
+        """One column per record. ``recovered`` is ambiguous on its own: in apply
+        mode a recovery is a deletion when ``is_spam`` and an approval otherwise,
+        so it is split here rather than dumped into the delete column."""
+        outcome = r["outcome"]
+        if outcome == "recovered":
+            return "deleted" if r.get("is_spam") else "kept"
+        if outcome == "would_delete":
+            return "deleted"
+        if outcome == "would_keep":
+            return "kept"
+        if outcome == "would_review":
+            return "review"
+        return "terminal"
+
     for r in records:
         counts = by_chat.setdefault(r["chat_id"], Counter())
-        counts[r["outcome"]] += 1
+        bucket = _bucket(r)
+        counts[bucket] += 1
         if r.get("prior_created_at") and r["prior_created_at"] + ttl <= soon:
             expiring[r["chat_id"]] += 1
-        if r["outcome"] in {"would_delete", "recovered"}:
+        if bucket == "deleted":
             deletes.setdefault(r["chat_id"], []).append(
                 (r["message_id"], r.get("confidence") or 0)
             )
@@ -680,9 +696,9 @@ def render_table(records: list[dict], run_id: str, apply: bool) -> str:
 
     def row_for(label: str, counts: Counter, exp: int = 0) -> str:
         return (
-            f"{label:<22} {counts.get('would_delete', 0) + counts.get('recovered', 0):>6} "
-            f"{counts.get('would_review', 0):>6} {counts.get('would_keep', 0):>6} "
-            f"{sum(counts.get(o, 0) for o in TERMINAL_OUTCOMES):>6} {exp:>7}"
+            f"{label:<22} {counts.get('deleted', 0):>6} "
+            f"{counts.get('review', 0):>6} {counts.get('kept', 0):>6} "
+            f"{counts.get('terminal', 0):>6} {exp:>7}"
         )
 
     lines = [
@@ -711,7 +727,8 @@ def render_table(records: list[dict], run_id: str, apply: bool) -> str:
     )
     for chat_id, ids in sorted(deletes.items()):
         lines.append("")
-        lines.append(f"delete list for {chat_id} ({len(ids)}):")
+        heading = "deleted (apply)" if apply else "delete list"
+        lines.append(f"{heading} for {chat_id} ({len(ids)}):")
         lines.append("  " + ", ".join(f"{m}(c{c})" for m, c in sorted(ids)))
 
     problems = [r for r in records if r["outcome"] == "terminal_error"]
