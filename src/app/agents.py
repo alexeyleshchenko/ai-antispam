@@ -15,8 +15,8 @@ from pydantic_ai.retries import AsyncTenacityTransport, RetryConfig
 from tenacity import retry_never
 
 from .common.llm_budget import (
+    get_llm_budget_seconds,
     get_llm_gateway_timeout,
-    get_llm_per_attempt_timeout,
     get_llm_route_timeout,
     get_openrouter_models,
 )
@@ -149,7 +149,13 @@ def _create_openrouter_model(model_name: str) -> OpenAIChatModel:
             "FALLBACK_API_KEY (or OPENROUTER_API_KEY) environment variable is required"
         )
 
-    client = _create_llm_client(get_llm_per_attempt_timeout())
+    # The transport timeout is the WHOLE budget, not the derived per-attempt
+    # slice. 2026-10-02 (owner order: "Remove them. Late classification is
+    # better than timeouts with no classification at all."): a transport pinned
+    # at budget/len(models) would clip every call at the same wall the loop no
+    # longer imposes, so the two must move together. The per-attempt wall now
+    # lives in spam_classifier._openrouter_attempt_wall().
+    client = _create_llm_client(get_llm_budget_seconds())
     openai_client = AsyncOpenAI(
         base_url=f"{FALLBACK_API_BASE.rstrip('/')}",
         api_key=FALLBACK_API_KEY,

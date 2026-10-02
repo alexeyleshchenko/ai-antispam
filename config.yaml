@@ -51,14 +51,21 @@ cache:
 # been measured against. Every wall was load-bearing for the next; none was
 # derived from a measurement. That is the defect this change removes.
 llm:
-  budget_seconds: 32           # total classifier LLM budget; reserve 10s for the webhook
+  # 2026-10-02 (owner order): "Your strict timeouts break the process. Remove
+  # them. Late classification is better than timeouts with no classification at
+  # all."
+  #
+  # budget_seconds is raised to the platform maximum the webhook guard allows
+  # (budget + reserve <= system.webhook_timeout, i.e. 45 + 10 <= 55), and the
+  # DERIVED per-attempt slice is no longer the wall. An attempt now gets the
+  # whole remainder of the request's own deadline instead of budget/len(models);
+  # see the note in src/app/spam/spam_classifier.py. The derived value is kept
+  # (and still guarded by tests/test_classifier_fallback_budget.py) as the
+  # floor a fallback leg needs, not as the runtime wall.
+  budget_seconds: 45           # total classifier LLM budget; reserve 10s for the webhook
   gateway_enabled: false       # the gateway hop is out of the classification path
   gateway_timeout_seconds: 0   # 0 = no gateway leg; the pool owns the whole budget
   route_timeout_seconds: 30    # non-classification LLM legs (topic derivation, admin DM)
-  # Per-attempt budget is DERIVED: (budget - gateway) / len(models) = 16.0s.
-  # The pool floor in tests/test_classifier_fallback_budget.py is 12.0s — low
-  # enough not to fight the derivation, high enough that a pool starved below it
-  # (#44's defect) is still refused.
   #
   # Model choice is MEASURED, not assumed. Measured 2026-09-29 at production
   # parity — the real 27,743-char prompt with the real production spam message,

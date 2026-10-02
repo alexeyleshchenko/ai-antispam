@@ -13,9 +13,9 @@ from ..agents import (
     get_openrouter_spam_agent,
 )
 from ..common.llm_budget import (
+    get_llm_budget_seconds,
     get_llm_gateway_enabled,
     get_llm_gateway_timeout,
-    get_llm_per_attempt_timeout,
 )
 from ..common.utils import describe_exception
 from ..database import get_admin
@@ -27,6 +27,35 @@ classification_confidence_gauge = logfire.metric_gauge("spam_score")
 attempts_histogram = logfire.metric_histogram("attempts")
 
 logger = logging.getLogger(__name__)
+
+
+def _openrouter_attempt_wall() -> float:
+    """The wall for one pool attempt: the WHOLE classifier budget.
+
+    Owner order 2026-10-02: *"Your strict timeouts break the process. Remove
+    them. Late classification is better than timeouts with no classification at
+    all."*
+
+    The wall this replaces was DERIVED - ``(budget - gateway) / len(models)`` -
+    and never measured against a model. On the shipped config it was 16.0s while
+    ``ag/gemini-3.7-flash-high``, one of the two models behind it, has a measured
+    p50 of 15.9s: the wall sat on that model's median, so half its calls were
+    cancelled mid-flight and the fallback paid for the same work again from
+    zero.
+
+    No fixed slice can be right, because the provider regime itself moves - the
+    same model on the same production-parity prompt measured a ~3x swing across
+    two consecutive days (``ag/gemini-3.7-flash-high`` p50 11,272 ms on
+    2026-10-01, 15,795 ms on 2026-10-02). Each attempt now gets the whole
+    budget.
+
+    The request's own deadline is deliberately NOT the bound here. The verdict
+    gate detaches this work into its own task precisely so it may finish after
+    the webhook has answered 503, and a redelivery then serves the persisted
+    verdict - sizing an attempt by what is left of the webhook window would
+    starve exactly that late path, which is the case this order exists to fix.
+    """
+    return get_llm_budget_seconds()
 
 
 async def is_spam(
@@ -54,8 +83,6 @@ async def is_spam(
         "Analyze this message and respond with JSON spam classification "
         "including is_spam, confidence, and reason."
     )
-    openrouter_settings = ModelSettings(timeout=get_llm_per_attempt_timeout())
-
     # Gateway first, but only when the hop is enabled. 2026-10-01: the
     # classification path no longer traverses the ai-gateway (owner directive —
     # collapse the timeout ladders). With gateway_enabled: false the pool below
@@ -94,14 +121,16 @@ async def is_spam(
         num_models = len(agents)
 
         for attempt in range(num_models):
+            wall = _openrouter_attempt_wall()
             agent = get_openrouter_spam_agent()
+            attempt_settings = ModelSettings(timeout=wall)
             try:
                 with logfire.span(f"spam_classifier_openrouter_call_{attempt + 1}"):
-                    async with asyncio.timeout(get_llm_per_attempt_timeout()):
+                    async with asyncio.timeout(wall):
                         result = await agent.run(
                             user_message,
                             instructions=system_prompt,
-                            model_settings=openrouter_settings,
+                            model_settings=attempt_settings,
                         )
                 is_spam_result = result.output.is_spam
                 confidence_result = result.output.confidence

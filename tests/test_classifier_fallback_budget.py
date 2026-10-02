@@ -78,7 +78,6 @@ BANNED_MODELS = (
 )
 
 
-
 def test_classifier_does_not_route_through_the_gateway():
     """The classification path must not traverse the gateway (2026-10-01).
 
@@ -197,6 +196,84 @@ def test_pool_spans_more_than_one_provider():
     assert len(providers) > 1, (
         f"pool spans one provider ({providers}); one outage would empty it"
     )
+
+
+def test_budget_spends_the_whole_webhook_allowance():
+    """No request time may be left unspent (owner order 2026-10-02).
+
+    The ladder used to stop at ``budget_seconds: 32`` while the webhook deadline
+    the gate actually reads is ``webhook_timeout - reserve = 45``, so 13s of the
+    request's own allowance went unused while attempts were being cancelled at a
+    derived 16s slice. The budget must now reach the ceiling the guard allows.
+    """
+    reset_llm_config_validation()
+    validate_llm_config()
+
+    from app.common.llm_budget import WEBHOOK_RESERVE_SECONDS
+
+    ceiling = float(get_webhook_timeout()) - WEBHOOK_RESERVE_SECONDS
+    assert get_llm_budget_seconds() == ceiling, (
+        f"budget {get_llm_budget_seconds()}s leaves "
+        f"{ceiling - get_llm_budget_seconds()}s of the request's own allowance "
+        f"unspent; the ceiling is {ceiling}s"
+    )
+
+
+def test_attempt_wall_is_the_whole_budget_not_a_derived_slice():
+    """Owner order 2026-10-02: *"Remove them. Late classification is better than
+    timeouts with no classification at all."*
+
+    The replaced wall was ``(budget - gateway) / len(models)`` - derived, never
+    measured against a model, and it cancelled calls that were still working.
+    An attempt now gets the whole classifier budget.
+    """
+    from app.spam.spam_classifier import _openrouter_attempt_wall
+
+    reset_llm_config_validation()
+    validate_llm_config()
+
+    assert _openrouter_attempt_wall() == get_llm_budget_seconds()
+    assert _openrouter_attempt_wall() > get_llm_per_attempt_timeout(), (
+        f"attempt wall must exceed the derived slice "
+        f"{get_llm_per_attempt_timeout()}s, or the strict timeout is back"
+    )
+
+
+def test_attempt_wall_survives_the_webhook_deadline():
+    """Late classification must not be starved by the webhook clock.
+
+    The verdict gate detaches the classifier into its own task so it can finish
+    AFTER the webhook answered 503 (``asyncio.create_task`` copies the context,
+    so the detached task inherits the request's deadline and ``_finish`` never
+    resets it). Sizing an attempt by ``remaining_webhook_seconds()`` therefore
+    starves exactly the late path the owner's order exists to create: past the
+    deadline the remainder is negative and every attempt would be refused.
+
+    The wall is the whole budget in every context, so the detached work runs to
+    completion and persists its verdict for the redelivery.
+    """
+    import contextvars
+
+    from app.common.trace_context import set_webhook_deadline
+    from app.spam.spam_classifier import _openrouter_attempt_wall
+
+    reset_llm_config_validation()
+    validate_llm_config()
+
+    def _past_the_webhook_deadline() -> float:
+        # Negative = the deadline already passed, as it is for a detached task
+        # that outlived the webhook turn.
+        set_webhook_deadline(-5.0)
+        return _openrouter_attempt_wall()
+
+    # Run in a COPY of the context so the deadline does not leak into other
+    # tests in the same process.
+    wall = contextvars.copy_context().run(_past_the_webhook_deadline)
+    assert wall == get_llm_budget_seconds(), (
+        f"a detached attempt got {wall}s, not the whole budget: the webhook "
+        f"clock is starving the late-classification path again"
+    )
+    assert wall > 0, "the detached attempt must still be allowed to run"
 
 
 if __name__ == "__main__":
