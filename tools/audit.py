@@ -291,6 +291,19 @@ GATE_WALLS_SEC: dict[str, float] = {
     # a 1.15x factor on the SLOWEST of those -- not a margin -- and the gate duly
     # reported a 100.12s "failure" that was a TIMEOUT, hiding a passing gate behind a
     # red audit. 350.0 is 4.0x the slowest measurement, the house precedent.
+    # REGIME: the 87s basis below is UNLOADED (2026-09-29). RE-MEASURED in the co-tenant
+    # LOADED regime on 2026-10-02 (#72's regime), n=4 whole-command samples, all rc=0:
+    # 113.58 / 115.58 / 124.12 / 125.43s at load 3.82-6.55 on 4 cores. The audit's own run
+    # that day corroborates it at 119.8s. So the loaded worst is 1.4417x the unloaded basis,
+    # and 350.0 is a 2.7904x factor on the LOADED worst -- NOT the 4.0x the paragraph below
+    # claims of its 87s basis, which is stale for the regime the audit actually runs in.
+    # NOT re-derived, deliberately: the manifest's re-derivation trigger is a CONTAINMENT
+    # EVENT (a sample exhausting the budget and the audit reporting UNKNOWN), and this gate
+    # has never had one -- the wall still contains the observed loaded worst with 224.57s
+    # (2.79x) of headroom. Inflating a wall that has never killed a passing gate would buy
+    # 2.5 extra minutes of tolerance for a genuinely hung gate and pay for it in signal.
+    # RE-DERIVATION IS OWED at the first UNKNOWN this gate reports, and the basis is then
+    # 125.43s in this regime (law: margin_x 4.006 -> 502.47s), never the 350.0 itself (#226).
     "tests/test_ledger.py": 350.0,
     # RE-DERIVED 2026-10-02 under #72's q10 ruling ("calibrate for co-tenant load"), and the
     # re-derivation trigger is the manifest's own law: a sample EXHAUSTED the budget, so the
@@ -306,20 +319,40 @@ GATE_WALLS_SEC: dict[str, float] = {
     # killed mid-pass and its timeout was rendered as a gate FAILURE. The basis is a MEASURED
     # runtime, NEVER the 70.17s the kill itself recorded: a killed gate's duration is a LOWER
     # BOUND on the cap that stopped it, and promoting it to a basis derives the next cap from
-    # the last one (#226). The 4x margin is what absorbs a heavier co-tenant day than sampled.
+    # the last one (#226).
+    # THE REGIME GAP IS NAMED, NOT HIDDEN. These 12 samples were taken at load 4.51-7.87,
+    # while the incident that filed #72 happened at 5.54 / 11.10 / 13.15 on 4 cores with io
+    # full avg300=4.85 -- a HEAVIER regime than any sample here, so this basis is a FLOOR on
+    # the regime that bit, not a reading of it. Two things cover the gap. First, the one
+    # observation we do have from that heavier regime is the kill itself: the gate ran past
+    # 70.17s, so its true runtime exceeded 70.17s -- 2.3328x this worst sample -- and the new
+    # wall contains that observed lower bound with 1.7254x headroom, where the old 70.0 sat
+    # 0.17s BELOW the kill it produced. Second, #72's condition 1 is what makes the residual
+    # safe: a co-tenant day heavier than anything sampled here can still exhaust this wall,
+    # and when it does the audit reports UNKNOWN and takes NO verdict, instead of the false
+    # DEGRADED that filed this item.
     "tests/test_cron_thinness.py": 121.07,
-    # measured 0.66 / 0.33 / 0.31s wall over three consecutive runs (script-mode, stdlib
-    # only, so the cost is interpreter startup). 5.0 is a 7.6x factor on the SLOWEST run
-    # -- a margin rather than a coincidence, and still far below the 30.0 default.
+    # REGIME: co-tenant LOADED (2026-10-02, the same regime #72 calibrated in), because a
+    # budget must be sized in the regime it runs in and this is the regime the audit runs
+    # in. measured 0.21 / 0.23 / 0.24 / 0.28 / 0.28 / 0.33 / 0.36 / 1.00s wall over eight
+    # whole-command samples at load 5.24-5.26 on 4 cores (script-mode, stdlib only, so the
+    # cost is interpreter startup; the 1.00s head is the cold first sample). Worst observed
+    # 1.00s -> margin_x 4.75 -> 4.75, rounded UP to 5.0, i.e. a 5.0x factor on the worst
+    # observed and still far below the 30.0 default. An earlier UNLOADED reading of
+    # 0.66 / 0.33 / 0.31s (three runs) is kept only as the comparison: its head is 1.5x
+    # smaller, so the loaded regime is the one that sizes this wall.
     "tests/test_ledger_commit_cites_no_rows.py": 5.0,
-    # measured 9.97 / 9.55 / 10.23 / 13.14 / 9.67 / 11.45 / 12.71 / 11.51 / 12.83s wall over
-    # nine runs on 2026-09-30-10-01, the later ones taken at load 11.49 on 4 cores (co-tenant
-    # load, board item #72). The cost is NOT startup alone: ~6.0s is the guard's own
-    # deliberate sleeps (a 1.0s and a 5.0s staged gate, load-insensitive by construction),
-    # the rest is interpreter startup plus two driven `audit.py --stamp` subprocesses. 53.0
-    # is 4.0x the slowest of those nine -- the house precedent. The spread is load, not the
-    # guard: the fixed sleeps put a floor under the runtime and a ceiling on how far
-    # contention can stretch it.
+    # REGIME: co-tenant LOADED. measured 9.97 / 9.55 / 10.23 / 13.14 / 9.67 / 11.45 /
+    # 12.71 / 11.51 / 12.83s wall over nine runs on 2026-09-30-10-01, the later ones taken
+    # at load 11.49 on 4 cores (co-tenant load, board item #72) -- so the basis already sits
+    # in the loaded regime and needs no re-derivation. The cost is NOT startup alone: ~6.0s
+    # is the guard's own deliberate sleeps (a 1.0s and a 5.0s staged gate, load-insensitive
+    # by construction), the rest is interpreter startup plus two driven `audit.py --stamp`
+    # subprocesses. Derivation from the worst observed: 12.83s -> margin_x 4.0585 -> 52.07,
+    # rounded UP to 53.0 -- the house 4x precedent, stated as arithmetic rather than asserted.
+    # Corroborated 2026-10-02 at 9.15s inside the #72 leg-1 audit (load 4.78, 4 cores).
+    # The spread is load, not the guard: the fixed sleeps put a floor under the runtime and
+    # a ceiling on how far contention can stretch it.
     "tests/test_audit_stamp_duration.py": 53.0,
 }
 
