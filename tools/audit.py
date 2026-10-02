@@ -292,10 +292,22 @@ GATE_WALLS_SEC: dict[str, float] = {
     # reported a 100.12s "failure" that was a TIMEOUT, hiding a passing gate behind a
     # red audit. 350.0 is 4.0x the slowest measurement, the house precedent.
     "tests/test_ledger.py": 350.0,
-    # measured 15.07 / 15.70 / 17.52s wall over three consecutive runs (16 tests,
-    # 0.33s of actual test time -- the rest is interpreter + plugin startup), so
-    # 30.0 was a 1.71x factor on the SLOWEST run, not a margin -> 4x the median.
-    "tests/test_cron_thinness.py": 70.0,
+    # RE-DERIVED 2026-10-02 under #72's q10 ruling ("calibrate for co-tenant load"), and the
+    # re-derivation trigger is the manifest's own law: a sample EXHAUSTED the budget, so the
+    # audit reported UNKNOWN for a gate that passes. The previous 70.0 came from three
+    # UNLOADED runs, and the box the audit actually runs on is shared. REGIME: co-tenant LOADED.
+    #   measured_sec    30.08   <- WORST OBSERVED of 12 whole-command samples, which is the
+    #                             basis the law names ("a budget must contain the slow tail,
+    #                             not the median"; median 22.73, mean 22.19, stdev 3.79)
+    #   load_at_measure  7.87   <- 1-min load on 4 cores at that worst sample (range 4.51-7.87)
+    #   margin_x       4.0249   <- 4.0 + 0.75/measured_sec, the manifest's stated margin law
+    #   budget_sec     121.07   <- margin_x x measured_sec
+    # 70.0 was a 1.73x factor on this loaded worst case -- not a margin -- so the gate was
+    # killed mid-pass and its timeout was rendered as a gate FAILURE. The basis is a MEASURED
+    # runtime, NEVER the 70.17s the kill itself recorded: a killed gate's duration is a LOWER
+    # BOUND on the cap that stopped it, and promoting it to a basis derives the next cap from
+    # the last one (#226). The 4x margin is what absorbs a heavier co-tenant day than sampled.
+    "tests/test_cron_thinness.py": 121.07,
     # measured 0.66 / 0.33 / 0.31s wall over three consecutive runs (script-mode, stdlib
     # only, so the cost is interpreter startup). 5.0 is a 7.6x factor on the SLOWEST run
     # -- a margin rather than a coincidence, and still far below the 30.0 default.
