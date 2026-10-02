@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - 'src/**'
+      - 'scripts/**'
       - 'Dockerfile'
       - 'docker-compose.yml'
       - '.github/workflows/deploy.yml'

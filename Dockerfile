@@ -41,6 +41,10 @@ COPY --from=builder /usr/local/lib/python3.14/site-packages /usr/local/lib/pytho
 COPY pyproject.toml ./
 COPY --chown=appuser:appuser PRD.md config.yaml ./
 COPY src/app ./app/
+# Operator scripts (recovery, loss-watch) are invoked with `docker exec … python
+# /app/scripts/<name>.py`, so they must be IN the image; the chown -R below
+# covers their ownership like app/.
+COPY scripts ./scripts/
 
 RUN addgroup -S -g 1000 appuser && \
     adduser -S -u 1000 -H appuser && \
