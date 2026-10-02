@@ -14,10 +14,12 @@ States:
 
 `failed` is RETRYABLE, not terminal. Once every leg fails, the caller answers
 503 so Telegram redelivers, and a later delivery reclaims the row through
-`reclaim_failed` and classifies again - this time from the real update, which is
-the only place the message still exists (nothing persists it before a verdict).
-`attempts` counts the failures; `reclaim_failed` refuses past `max_attempts` and
-inside `cooldown`, so the retry is bounded rather than a livelock.
+`reclaim_failed` and classifies again from the real update. That update is NOT
+lost with the row: the whole object is persisted in Logfire
+(`attributes->'update'`), so it outlives this table's own 7-day TTL — which is
+why recovery reads Logfire and not this table. `attempts` counts the failures;
+`reclaim_failed` refuses past `max_attempts` and inside `cooldown`, so the retry
+is bounded rather than a livelock.
 
 `moderated_at` is the moderation claim, independent of `status`: it is set by
 `claim_moderation` with an `IS NULL` guard, so exactly one caller wins even if
