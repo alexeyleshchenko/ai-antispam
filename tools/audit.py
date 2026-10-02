@@ -21,12 +21,24 @@ import argparse
 import datetime
 import json
 import os
+import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Sibling modules, on the APPEND convention -- never `insert(0)`. `tools/registry.py`
+# shares its name with the repo's own `registry/` package, so putting this directory
+# FIRST on the path would let the module beside this file shadow the repo's declaration
+# surface. Appending resolves both call shapes this file must serve -- run as a script
+# (its own dir is already sys.path[0]) and imported by `tests/` (which appends `tools/`)
+# -- without reordering anything.
+sys.path.append(str(Path(__file__).resolve().parent))
+from field_predicate import declared_cause_count  # noqa: E402
+from gate_budget import TIMEOUT_EXIT_CODE  # noqa: E402
 
 
 def first_pass_yield_pct(accepted: int, total: int) -> float:
@@ -324,49 +336,294 @@ def _gate_wall(cmd: list[str]) -> float:
     return GATE_WALLS_SEC.get(_gate_wall_key(cmd), DEFAULT_GATE_WALL_SEC)
 
 
-def run_gate(cmd: list[str], cwd: Path, timeout_sec: float = DEFAULT_GATE_WALL_SEC) -> dict[str, Any]:
-    """Run an individual verification gate and capture output and exit code.
+def run_gate(cmd: list[str], cwd: Path, budget_sec: float = DEFAULT_GATE_WALL_SEC) -> dict[str, Any]:
+    """Run an individual verification gate under its DECLARED time budget.
 
-    `timeout_sec` is the wall for THIS gate, and it is a DECLARED MULTIPLE of a
+    `budget_sec` is the wall for THIS gate, and it is a DECLARED MULTIPLE of a
     MEASURED runtime rather than a round number: a wall picked by feel kills a
-    healthy gate when too low and hides a hung one when too high (ai-antispam#64).
+    healthy gate when too low and hides a hung one when too high (ai-antispam#64, #72).
 
-    A gate that exceeds its wall is UNKNOWN, never a plain failure, so the except
-    branch keeps the MEASURED elapsed time and names the exception TYPE. A
-    hardcoded `0.0` renders a timeout as an instant logic error, and an empty
-    `str(e)` -- which `TimeoutError` has -- logs as nothing after the colon.
+    A gate that exceeds its wall is UNKNOWN -- it neither passed nor failed, and
+    reporting it as either would be a verdict nobody measured. So the timeout branch
+    carries the DISTINCT `TIMEOUT_EXIT_CODE` (never the generic 99 a crash gets), the
+    `unknown` flag, and the MEASURED elapsed time; the crash branch keeps 99 and
+    `unknown: False`. Before #72 both branches returned 99 with no `unknown` key, so a
+    timeout was indistinguishable from an instant logic error -- the code contradicting
+    its own docstring, and the defect this branch now closes.
+
+    ONE BOUNDED RETRY, and ONLY for a timeout (#74 leg 7, kit #93). A load-dependent
+    timeout is transient by nature, so a single retry distinguishes a flake from a gate
+    that is genuinely too slow; a SECOND timeout is UNKNOWN. The retry is bounded to
+    exactly one and its occurrence is RECORDED (`attempts`, `retried`,
+    `first_attempt_sec`), because an unrecorded retry becomes a way to hide a gate that
+    is genuinely too slow. A genuine FAIL (a non-zero exit) is a VERDICT and is never
+    retried; only a timeout, which is no verdict at all, is.
     """
-    try:
+    attempts = 0
+    first_attempt_sec: float | None = None
+    while True:
+        attempts += 1
         t0 = datetime.datetime.now()
-        res = subprocess.run(
-            cmd,
-            cwd=cwd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=timeout_sec,
-        )
-        t_el = (datetime.datetime.now() - t0).total_seconds()
-        return {
-            "cmd": " ".join(cmd),
-            "exit_code": res.returncode,
-            "passed": res.returncode == 0,
-            "duration_sec": round(t_el, 2),
-            "stdout": res.stdout.strip(),
-            "stderr": res.stderr.strip(),
-        }
-    except Exception as e:
-        t_el = (datetime.datetime.now() - t0).total_seconds()
-        detail = f"{type(e).__name__}: {e}".strip().rstrip(":")
-        return {
-            "cmd": " ".join(cmd),
-            "exit_code": 99,
-            "passed": False,
-            "duration_sec": round(t_el, 2),
-            "stdout": "",
-            "stderr": detail,
-        }
+        try:
+            res = subprocess.run(
+                cmd,
+                cwd=cwd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=budget_sec,
+            )
+            t_el = (datetime.datetime.now() - t0).total_seconds()
+            return {
+                "cmd": " ".join(cmd),
+                "exit_code": res.returncode,
+                "passed": res.returncode == 0,
+                "unknown": False,
+                "duration_sec": round(t_el, 2),
+                "duration_is_lower_bound": False,
+                "budget_sec": budget_sec,
+                "attempts": attempts,
+                "retried": attempts > 1,
+                "stdout": res.stdout.strip(),
+                "stderr": res.stderr.strip(),
+            }
+        except subprocess.TimeoutExpired:
+            t_el = (datetime.datetime.now() - t0).total_seconds()
+            if attempts == 1:
+                first_attempt_sec = round(t_el, 2)
+                continue
+            return {
+                "cmd": " ".join(cmd),
+                "exit_code": TIMEOUT_EXIT_CODE,
+                "passed": False,
+                "unknown": True,
+                "duration_sec": round(t_el, 2),
+                # A KILLED gate's wall-clock is a LOWER BOUND, never a measurement: the gate
+                # ran AT LEAST this long and was stopped at the cap, so the number is the
+                # budget talking. Stated in the record so no reader -- and no future tool
+                # deriving a `measured_sec` from an audit payload -- can promote the cap to a
+                # base and derive the next cap from itself (#226).
+                "duration_is_lower_bound": True,
+                "budget_sec": budget_sec,
+                "attempts": attempts,
+                "retried": True,
+                "first_attempt_sec": first_attempt_sec,
+                "stdout": "",
+                "stderr": (
+                    f"budget exhausted: the gate was killed at {budget_sec:.2f}s after "
+                    f"running {t_el:.2f}s, and killed AGAIN on the one bounded retry "
+                    f"(first attempt {first_attempt_sec}s) -- UNKNOWN, no verdict taken"
+                ),
+            }
+        except Exception as e:
+            t_el = (datetime.datetime.now() - t0).total_seconds()
+            detail = f"{type(e).__name__}: {e}".strip().rstrip(":")
+            return {
+                "cmd": " ".join(cmd),
+                "exit_code": 99,
+                "passed": False,
+                "unknown": False,
+                "duration_sec": round(t_el, 2),
+                "duration_is_lower_bound": False,
+                "budget_sec": budget_sec,
+                "attempts": attempts,
+                "retried": attempts > 1,
+                "stdout": "",
+                "stderr": detail,
+            }
 
+
+# One bound for a failing gate's recorded cause, shared by every surface that prints it.
+# Raised from the 60 the markdown cell used, because a SCRIPT-shaped failure states a COUNT
+# and a SPECIMEN and 60 characters cannot hold both (#74 leg 7 / kit #158). The bound is
+# KEPT: this lands on one line of a table whose job is to let the reader decide whether to
+# RE-RUN, not to reproduce the log.
+GATE_CAUSE_LIMIT = 140
+
+_COUNT_FIRST_RE = re.compile(r"\b\d+\s+(?:problem|violation)\(s\)", re.IGNORECASE)
+"""The FALLBACK count shape, reached only when a gate declares no marker (kit #205).
+
+Two nouns, and they are a GUESS AT ENGLISH rather than a property. So the primary reading
+is the DECLARED marker (`field_predicate.declared_cause_count`) and this is the fallback,
+kept unchanged so a tool that has not adopted the marker behaves as it did before.
+"""
+
+def last_reported_line(text: str, limit: int = 200) -> str:
+    """The last non-blank line of a gate's output, whitespace-collapsed and BOUNDED.
+
+    The LAST line, because a failing gate states its reason at the end of what it prints --
+    pytest writes its failure list there, and a killed gate writes its reason there too.
+    BOUNDED, because this lands on one line of the headline report whose job is to let the
+    reader decide whether to RE-RUN, not to reproduce the log.
+    """
+    lines = [" ".join(ln.split()) for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    return lines[-1][:limit]
+
+def reported_cause(text: str, limit: int = GATE_CAUSE_LIMIT) -> str:
+    """A failing gate's cause: its COUNT, AND its last line.
+
+    The audit faces TWO output shapes and they put the summary in DIFFERENT places. A
+    PYTEST-shaped gate writes its failure list LAST and carries no count line, so the last
+    line IS the reason. A SCRIPT-shaped gate prints `N problem(s) in <path>` FIRST and then
+    N violations, so the last line is one ARBITRARY specimen and the total is lost.
+
+    PRECEDENCE (kit #205): the tool's own DECLARED marker is read FIRST, and the noun
+    heuristic is the FALLBACK. A declaration cannot be moved by phrasing; a noun list is a
+    guess at English. So the count line is recorded FIRST when one exists, and the last line
+    is appended as the specimen. Both share ONE bound, and the join keeps the HEAD, so the
+    count cannot be crowded out by a specimen longer than the remaining budget.
+    """
+    lines = [" ".join(ln.split()) for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    last = lines[-1]
+    counted = next((ln for ln in lines if declared_cause_count(ln) is not None), None)
+    if counted is None:
+        counted = next((ln for ln in lines if _COUNT_FIRST_RE.search(ln)), None)
+    if counted is None or counted == last:
+        return last[:limit]
+    return f"{counted} \u2014 {last}"[:limit]
+
+def attach_gate_causes(gate_results: list[dict[str, Any]]) -> None:
+    """Set `note` on every gate that did not pass, from the ONE predicate above.
+
+    Computed once and read by every surface (the JSON payload, the markdown report and the
+    stdout headline), so they cannot disagree about what the gate said. A PASSING gate
+    carries no note; an UNKNOWN gate is not a pass and does carry one.
+    """
+    for g in gate_results:
+        if g.get("passed"):
+            g.pop("note", None)
+            continue
+        g["note"] = reported_cause(g.get("stdout") or "") or reported_cause(g.get("stderr") or "")
+
+@dataclass
+class GateVerdict:
+    """The THREE-state verdict over a gate run (#74 leg 7 / kit #93 PART 2).
+
+    GREEN / DEGRADED / UNKNOWN, and `None` when the suite was SKIPPED -- a skipped suite
+    reports no verdict at all, because `all([])` is True and leaving `healthy` to be
+    computed over it would print a green over gates that never ran.
+
+    UNKNOWN is a state of its own and NEVER a pass. A gate that exhausted its budget did not
+    run to a verdict, so counting it in the pass total would be the vacuous pass in a new
+    coat -- and reporting it as a failure would assert a verdict nobody measured. It is
+    therefore in NEITHER the pass total nor the failure list, and it is as LOUD as FAIL:
+    `status` is UNKNOWN, `healthy` is False, and the caller prints it. The three populations
+    are carried apart so a report can state all three counts instead of collapsing them.
+
+    `healthy` keeps the bool/None shape its existing consumers expect (the telemetry outcome
+    derives from it): True ONLY for GREEN, False for DEGRADED and for UNKNOWN, None skipped.
+    """
+
+    status: str | None
+    healthy: bool | None
+    all_known_pass: bool | None
+    passed: list[dict[str, Any]]
+    failed: list[dict[str, Any]]
+    unknown: list[dict[str, Any]]
+
+    @property
+    def examined(self) -> int:
+        """Gates that RAN TO A VERDICT -- the population the pass total is taken over."""
+        return len(self.passed) + len(self.failed)
+
+    @property
+    def total(self) -> int:
+        """Every gate the runner attempted, UNKNOWN included."""
+        return self.examined + len(self.unknown)
+
+def judge_gates(
+    gate_results: list[dict[str, Any]], cadence_ok: bool = True, gates_ran: bool = True
+) -> GateVerdict:
+    """Reduce gate results to the three-state verdict, keeping the populations apart.
+
+    PURE over its inputs and free of I/O, so a probe can drive it with synthetic results --
+    including a timed-out gate -- without running the suite it judges.
+
+    A FAIL is a MEASURED statement and outranks an UNKNOWN, which is the absence of one:
+    when a gate genuinely failed, DEGRADED is the verdict, and the UNKNOWN gates are still
+    counted and named on the headline beside it rather than swallowed.
+    """
+    if not gates_ran:
+        return GateVerdict(None, None, None, [], [], [])
+    unknown = [g for g in gate_results if g.get("unknown")]
+    failed = [g for g in gate_results if not g.get("unknown") and not g["passed"]]
+    passed = [g for g in gate_results if not g.get("unknown") and g["passed"]]
+    # The pass total is taken over the gates that ran to a verdict. An UNKNOWN is in neither
+    # column: not a pass (that is the vacuous green) and not a failure (that is a verdict
+    # nobody measured). `all([])` is True, which is right -- no gate ran to a verdict and no
+    # gate failed -- and the status is UNKNOWN, so it is not a green.
+    all_known_pass = all(g["passed"] for g in passed + failed)
+    if failed or not cadence_ok:
+        status = "DEGRADED"
+    elif unknown:
+        status = "UNKNOWN"
+    else:
+        status = "GREEN"
+    return GateVerdict(status, status == "GREEN", all_known_pass, passed, failed, unknown)
+
+def render_status_line(verdict: GateVerdict) -> str:
+    """The headline. THREE states, and UNKNOWN is never rendered as a green (#74 leg 7).
+
+    `HEALTHY` stays in the green line because this factory's law, docs and close-row prose
+    all name that state by it, while `GREEN` is the canonical three-state term -- so the line
+    carries BOTH and no reader has to know which vocabulary the other surface was written in.
+
+    UNKNOWN is printed with the population that produced it (`N of M`), because a third state
+    that renders without its count is indistinguishable from one that never fired.
+    """
+    if verdict.status is None:
+        return "Status: GATES SKIPPED (metrics only)"
+    if verdict.status == "GREEN":
+        return (
+            f"Status: HEALTHY (GREEN) — all {verdict.examined} gate(s) that ran to a "
+            f"verdict passed"
+        )
+    if verdict.status == "UNKNOWN":
+        return (
+            f"Status: UNKNOWN — {len(verdict.unknown)} of {verdict.total} gate(s) "
+            f"exhausted their budget and returned NO verdict; they are counted in no "
+            f"pass total, and this is NOT a green"
+        )
+    line = f"Status: DEGRADED (FAIL) — {len(verdict.failed)} gate(s) failed"
+    if verdict.unknown:
+        line += (
+            f", and {len(verdict.unknown)} more exhausted their budget "
+            f"(UNKNOWN, no verdict taken)"
+        )
+    return line
+
+def render_gate_line(g: dict[str, Any]) -> str:
+    """One gate's verdict line: the cause and the state co-located (#74 leg 7).
+
+    THREE marks, not two: a gate that exhausted its budget is UNKNOWN -- it neither passed
+    nor failed, and printing FAIL would assert a verdict nobody measured. stdout first for
+    the cause (a failing pytest gate writes its summary there), then stderr, which is where a
+    KILLED or crashed gate states its reason.
+
+    The `({dur}s)` parenthesised token KEEPS its exact position and shape, because
+    `tests/test_audit_stamp_duration.py` parses this table with `\\((\\d+(?:\\.\\d+)?)s\\)` to
+    sum the durations the run actually printed -- a budget or a cause INSIDE those parens
+    would stop the pattern matching and turn that gate's own positive control red. The budget
+    and the cause are therefore appended AFTER the token, where they add a fact without
+    moving the one a reader (or a gate) already reads.
+    """
+    mark = "UNKNOWN" if g.get("unknown") else ("PASS" if g["passed"] else "FAIL")
+    dur = f">={g['duration_sec']}" if g.get("duration_is_lower_bound") else f"{g['duration_sec']}"
+    line = f"  [{mark}] {g['cmd']} ({dur}s)"
+    budget = g.get("budget_sec")
+    if budget:
+        line += f" — budget {budget:.2f}s"
+    if mark != "PASS":
+        cause = g.get("note") or ""
+        if cause:
+            line += f" — {cause}"
+    if g.get("retried"):
+        line += f" [retried once — {g.get('attempts', 2)} attempt(s)]"
+    return line
 
 def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     """Execute all discovered mechanical gates."""
@@ -548,7 +805,7 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
         wall = _gate_wall(cmd)
         if wall == DEFAULT_GATE_WALL_SEC:
             print(f"gate budget: {_gate_wall_key(cmd)} uses the declared default {DEFAULT_GATE_WALL_SEC}s")
-        results.append(run_gate(cmd, repo_root, timeout_sec=wall))
+        results.append(run_gate(cmd, repo_root, budget_sec=wall))
     return results
 
 
@@ -587,7 +844,7 @@ def check_cadence_integrity(ledger_path: Path) -> dict[str, Any]:
         return {"cadence_held": False, "hours_since_last_run": None}
 
 
-def gate_note(g: dict[str, Any], max_chars: int = 60) -> str:
+def gate_note(g: dict[str, Any], max_chars: int = GATE_CAUSE_LIMIT) -> str:
     """One-line summary of a gate's outcome, for the scorecard's gate table.
 
     A PASSing gate prints a single summary line, so its LAST line is the summary.
@@ -596,17 +853,22 @@ def gate_note(g: dict[str, Any], max_chars: int = 60) -> str:
     Reporting that line states 1 problem where the gate found N, and a triager
     who repairs the named row believes the gate done. Measured 2026-09-25:
     tests/test_ledger_schema.py found 3 unauthorized-actor violations and the
-    scorecard named one of them (line 30). A FAIL therefore takes the FIRST
-    non-empty line, which is the header carrying the count; the full output of
-    every failing gate follows in section 2.1, so the population is readable
-    without re-running the gate.
+    scorecard named one of them (line 30). A FAIL therefore carries its count.
+
+    The FAIL branch DELEGATES to `reported_cause`, which is the ONE cause predicate
+    (a second implementation of the same job is a second thing to keep in step, and
+    they drift silently -- AGENTS.md rule 14). What stays here is only what is
+    specific to THIS surface: the PASS short-circuit (a passing gate's output must
+    never be scanned for a count) and the `|` -> `/` escape the markdown cell needs,
+    since a raw pipe in a table cell splits the row.
     """
-    stream = g["stdout"] or g["stderr"]
-    rows = [ln.strip() for ln in stream.splitlines() if ln.strip()]
+    if not g["passed"]:
+        stream = g["stdout"] or g["stderr"]
+        return reported_cause(stream, limit=max_chars).replace("|", "/")
+    rows = [" ".join(ln.split()) for ln in (g["stdout"] or g["stderr"]).splitlines() if ln.strip()]
     if not rows:
         return ""
-    note = rows[-1] if g["passed"] else rows[0]
-    return note.replace("|", "/")[:max_chars]
+    return rows[-1].replace("|", "/")[:max_chars]
 
 def format_report_markdown(
     date_str: str,
@@ -616,8 +878,17 @@ def format_report_markdown(
     gate_results: list[dict[str, Any]],
 ) -> str:
     """Format the full audit into markdown document."""
-    all_passed = all(g["passed"] for g in gate_results)
-    verdict = "PASSED" if all_passed and cadence_stats.get("cadence_held", True) else "FAILED"
+    # The report's headline is the SAME three-state verdict the stdout line and the stamp row
+    # carry (#72), taken from the ONE reduction rather than re-derived here: a second
+    # `all(g["passed"])` would count a timed-out gate as a FAILURE, which is the defect this
+    # fix removes, and it would disagree with the JSON payload printed by the same run.
+    report_verdict = judge_gates(gate_results, cadence_ok=cadence_stats.get("cadence_held", True))
+    if report_verdict.status is None:
+        verdict = "SKIPPED"
+    elif report_verdict.status == "GREEN":
+        verdict = "PASSED"
+    else:
+        verdict = report_verdict.status
 
     lines = [
         f"# Operational Process Self-Audit — {date_str}",
@@ -650,23 +921,33 @@ def format_report_markdown(
     ]
 
     for g in gate_results:
-        status = "PASS" if g["passed"] else "FAIL"
-        lines.append(f"| `{g['cmd']}` | `{status}` | `{g['duration_sec']}s` | {gate_note(g)} |")
+        # Three marks, matching the stdout table and the JSON payload (#72). `UNKNOWN` is
+        # neither pass nor fail: the gate exhausted its budget and returned no verdict.
+        status = "UNKNOWN" if g.get("unknown") else ("PASS" if g["passed"] else "FAIL")
+        dur = f">={g['duration_sec']}s" if g.get("duration_is_lower_bound") else f"{g['duration_sec']}s"
+        lines.append(f"| `{g['cmd']}` | `{status}` | `{dur}` | {gate_note(g)} |")
 
-    # A FAIL row above is truncated for the table, so the population it reports
+    # A non-PASS row above is truncated for the table, so the population it reports
     # is repeated in full here. Repair from this section, never from the table.
-    failing = [g for g in gate_results if not g["passed"]]
-    if failing:
+    # UNKNOWN rows are listed beside the FAILs rather than dropped: a gate that took no
+    # verdict is exactly the one a reader must look at, and a section that only carried
+    # FAILs would make a timeout invisible in the artifact the day's record keeps. The
+    # HEADER keeps its pre-#72 wording because `tests/test_audit_gate_note.py` pins the
+    # literal `### 2.1 Failing gate output (full)`; the per-row label carries the
+    # three-state distinction instead, which is where a reader looks anyway.
+    non_passing = [g for g in gate_results if not g["passed"]]
+    if non_passing:
         lines.extend([
             "",
             "### 2.1 Failing gate output (full)",
             "",
         ])
-        for g in failing:
+        for g in non_passing:
             body = (g["stdout"] or g["stderr"] or "(no output)").strip()
             fence = "````" if "```" in body else "```"
+            label = "UNKNOWN (no verdict)" if g.get("unknown") else "FAIL"
             lines.extend([
-                f"**`{g['cmd']}`** -- rc={g['exit_code']}, {g['duration_sec']}s",
+                f"**`{g['cmd']}`** -- {label}, rc={g['exit_code']}, {g['duration_sec']}s",
                 "",
                 fence,
                 body,
@@ -725,9 +1006,17 @@ def main() -> int:
     gate_results = execute_mechanical_gates(REPO_ROOT)
     gate_loop_sec = (datetime.datetime.now() - t_gates0).total_seconds()
 
-    all_gates_pass = all(g["passed"] for g in gate_results)
+    # THREE states, not two (#72 / #74 leg 7). A gate that exhausted its budget did not run
+    # to a verdict, so `all(g["passed"])` would have counted it as a FAILURE -- a verdict
+    # nobody measured -- which is how a healthy gate under co-tenant load turned the daily
+    # audit DEGRADED. `judge_gates` keeps UNKNOWN in its own population and the status line
+    # says so. `attach_gate_causes` fills each non-passing gate's `note` ONCE here, so the
+    # JSON payload, the markdown report and the stdout table cannot disagree about what a
+    # gate said.
+    attach_gate_causes(gate_results)
     cadence_ok = cadence_stats.get("cadence_held", True)
-    healthy = all_gates_pass and cadence_ok
+    verdict = judge_gates(gate_results, cadence_ok=cadence_ok)
+    healthy = bool(verdict.healthy)
 
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
 
@@ -735,7 +1024,9 @@ def main() -> int:
         payload = {
             "date": today,
             "healthy": healthy,
-            "all_gates_pass": all_gates_pass,
+            "status": verdict.status,
+            "all_gates_pass": verdict.all_known_pass,
+            "unknown_gates": len(verdict.unknown),
             "cadence": cadence_stats,
             "delivery": ledger_stats,
             "rework": rework_stats,
@@ -752,7 +1043,17 @@ def main() -> int:
     # failed was not yet in its own denominator. Order is stamp -> re-parse -> report.
     if args.stamp:
         outcome = "accepted" if healthy else "failed"
-        gate_summary = "all-pass" if all_gates_pass else "gate-failure"
+        # The gate summary is derived from the GATES, never from `healthy`: a cadence-only
+        # failure leaves every gate passing, and calling that `gate-failure` would name the
+        # wrong leg. `gate-unknown` is a THIRD token because a gate that exhausted its budget
+        # neither passed nor failed, and folding it into `gate-failure` would put a verdict
+        # nobody measured into the row (#72).
+        if verdict.failed:
+            gate_summary = "gate-failure"
+        elif verdict.unknown:
+            gate_summary = "gate-unknown"
+        else:
+            gate_summary = "all-pass"
         # The yield this row carries is the POST-run figure — the same population the
         # scorecard below reports — so the two artifacts of one run state one number.
         # It is derived rather than read back because the row must be written before the
@@ -767,7 +1068,11 @@ def main() -> int:
         # the gate loop above, so this field tracks the work the row describes instead of
         # standing at a constant. `turns=0` stays a legitimate declaration -- the runner
         # makes no agent turns -- and is unaffected.
-        detail = f"duration={round(gate_loop_sec, 2)}s turns=0 outcome={outcome} gate={gate_summary} yield={yield_pct}%"
+        # `verdict=` carries the THREE-state outcome explicitly (#72): `gate-unknown` alone
+        # would be the only place a reader learned a timeout had happened, and a row whose
+        # only marker is a compound token is one careless regex away from reading as a
+        # failure. The state is named, so the row is self-describing.
+        detail = f"duration={round(gate_loop_sec, 2)}s turns=0 outcome={outcome} gate={gate_summary} verdict={verdict.status} yield={yield_pct}%"
         stamp_cmd = [
             sys.executable,
             "tools/ledger.py",
@@ -799,15 +1104,22 @@ def main() -> int:
         ledger_stats = parse_ledger(ledger_file)
     # Text summary output
     print(f"=== Factory Operational Self-Audit ({today}) ===")
-    print(f"Status: {'HEALTHY (PASS)' if healthy else 'DEGRADED (FAIL)'}")
+    # The THREE-state headline (#72). `render_status_line` is the one place the state is
+    # spelled, so the stdout line, the JSON `status` and the stamp row's `verdict=` token
+    # cannot describe different runs. A timeout reads UNKNOWN here, never DEGRADED: the box
+    # was loaded, the gate was healthy, and the audit took no verdict on it.
+    print(render_status_line(verdict))
     print(f"  - First-Pass Yield: {first_pass_yield_pct(ledger_stats.get('runs_by_outcome', {}).get('accepted', 0), ledger_stats.get('run_events', 0))}%")
     print(f"  - Closed Tasks: {ledger_stats.get('closed_tasks', 0)} | Intake Tasks: {ledger_stats.get('intake_tasks', 0)}")
     print(f"  - Rework Entries: {rework_stats.get('total_entries', 0)} (Rate: {round(rework_stats.get('rework_rate', 0.0) * 100, 1)}%)")
     print(f"  - Cadence: {'HELD' if cadence_ok else 'MISSED'} (last run: {cadence_stats.get('hours_since_last_run')}h ago)")
-    print(f"\nMechanical Gates ({len(gate_results)}):")
+    unknown_note = f", {len(verdict.unknown)} UNKNOWN" if verdict.unknown else ""
+    print(f"\nMechanical Gates ({len(gate_results)}{unknown_note}):")
     for g in gate_results:
-        mark = "PASS" if g["passed"] else "FAIL"
-        print(f"  [{mark}] {g['cmd']} ({g['duration_sec']}s)")
+        # `render_gate_line` carries the mark, the elapsed time, the declared budget and the
+        # gate's own cause on ONE line, so a reader triaging the table does not have to open
+        # the report to learn WHY a gate did not pass (#74 leg 7).
+        print(render_gate_line(g))
 
     if args.report or args.output:
         report_md = format_report_markdown(today, ledger_stats, rework_stats, cadence_stats, gate_results)
