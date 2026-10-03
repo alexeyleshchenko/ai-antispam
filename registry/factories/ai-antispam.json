@@ -11,12 +11,13 @@
       "the outreach campaign repo /root/ai-antispam-outreach and its Postgres state",
       "Postgres ai_spam_bot on apps (schema outreach; single writer outreach/lib/db.py)",
       "the MAX domain - API surface, webhook ingress, subscription, moderation port",
-      "this factory's own chat (-1003993000918), its topics and its 16 cron rows (14 enabled, 2 disabled one-shots parked for 2027)"
+      "this factory's own chat (-1003993000918), its topics and its 19 cron rows (16 enabled, 3 disabled: ai-antispam-62-close-gate is a daily 03:15 UTC trigger-gated close gate, disabled 2026-10-01 and retired per q13; ai-antispam-day7-retire-wake and ai-antispam-watch-funnel-day7-report are 2027 one-shots)",
+      "the ai-gateway ai-antispam route write - its steps, step_timeout and route_timeout (q11, owner-answered 2026-10-01T10:41:21Z: HQ is the single writer; the LLM Gateway lane keeps the repo copy and the drift guard)"
     ],
     "does_not_own": [
       "the OpenCrabs daemon, its core tools, brain/skill loading - OpenCrabs factory",
       "VDS host infrastructure, fleet deploy scripts, Gatus - infra-factory",
-      "token provisioning, model routing, inference pricing - inferhub-watch",
+      "token provisioning, model routing (EXCEPT the ai-gateway ai-antispam route, which this factory writes per q11), inference pricing - inferhub-watch",
       "the factory template and meta-factory law - meta-factory",
       "Miidas accounting - miidas",
       "tg_* tools (fast-mcp-telegram) and telegram_send (OpenCrabs core)"
@@ -111,7 +112,37 @@
       "name": "ai-antispam-outreach-db-sync",
       "audience": "agent",
       "entry": "cron 7ddb69a4-7ec9-4140-9791-2d651cead4c4",
-      "cadence": "daily 09:00 MSK — ENABLED"
+      "cadence": "daily 09:00 MSK \u2014 ENABLED"
+    },
+    {
+      "name": "ai-antispam-52-close-gate",
+      "audience": "agent",
+      "entry": "cron 30 11 * * * UTC, trigger-gated on date>=2026-09-28 AND #52 open",
+      "cadence": "daily 11:30 UTC"
+    },
+    {
+      "name": "ai-antispam-62-close-gate",
+      "audience": "agent",
+      "entry": "cron 15 3 * * * UTC, trigger-gated on date>=2026-09-29 AND #62 open",
+      "cadence": "daily 03:15 UTC \u2014 DISABLED (see anomaly below)"
+    },
+    {
+      "name": "ai-antispam-loss-watch",
+      "audience": "agent",
+      "entry": "cron 65b4457f-2b33-4326-8970-f1973bf77ab1",
+      "cadence": "every 30 min UTC \u2014 ENABLED"
+    },
+    {
+      "name": "ai-antispam-day7-retire-wake",
+      "audience": "agent",
+      "entry": "cron 9caeac81-e355-4bd0-8704-a0e9aad27abc",
+      "cadence": "disabled 2027 one-shot (22 Sep 2027 06:15 UTC)"
+    },
+    {
+      "name": "ai-antispam-watch-funnel-day7-report",
+      "audience": "owner",
+      "entry": "cron 23e41198-75b4-41b4-acc0-4059a1972974",
+      "cadence": "disabled 2027 one-shot (22 Sep 2027 09:00 MSK)"
     }
   ],
   "substrates_owned": [
@@ -178,18 +209,40 @@
       "announcements": []
     },
     {
-      "topic": "Bot lane — ai-antispam service (Bot topic)",
+      "topic": "Bot lane \u2014 ai-antispam service (Bot topic)",
       "thread_id": 10784,
       "role": "bot",
       "announcements": []
     },
     {
-      "topic": "MAX domain — lane acceptance &amp; verification",
+      "topic": "MAX domain \u2014 lane acceptance &amp; verification",
       "thread_id": 11156,
       "role": null,
       "announcements": []
     }
   ],
   "status": "attested",
-  "attested_at": "2026-09-27T06:35:23Z"
+  "attested_at": "2026-10-02T06:48:32Z",
+  "instruments": {
+    "pacemaker": {
+      "state": "adopted",
+      "green": true,
+      "behind_by": 0,
+      "measured_at": "2026-09-27T20:24Z",
+      "reason": "behind_by counts UNDECLARED lag only, not a declared fork. Measured 2026-09-27T20:24Z against the eleven rows of docs/instruments/pacemaker.md section 2, comparing each path byte-for-byte (sha256) with git show HEAD:TEMPLATE/<path> in leshchenko1979/agent-factories: 9 identical, 2 differ, 0 absent. Both differing paths are declared forks in registry/kit-exemptions.json - tests/test_close_board_recorded.py (own INVARIANT_LANDED anchor plus the #59 exemption surface) and tests/test_board_intake_recorded.py (ADAPTED: the live population is legitimately empty, so the loud-fail-on-zero form is wrong here and the probe proves the predicate instead). The pin gate reads both as declared exempt (5 exempt, every carried path matches the pin). Gate receipts: tools/patrol_host_state.py rc=0, 102 checks; tests/test_cron_thinness.py rc=0."
+    },
+    "ledger": {
+      "state": "partial",
+      "green": false,
+      "behind_by": 1,
+      "measured_at": "2026-09-29T13:55:46Z",
+      "reason": "Re-measured and re-declared 2026-09-29 by the member's own HQ, superseding the 2026-09-28T15:21:11Z row, which read behind_by 8. That figure was true when written and is 7 too high now: the migration closed the gap and the declaration did not follow, so a census reader was being told this tree sits eight paths behind when it sits one behind. HELD: 15/15 present (os.path.isfile over the 15 rows of the law doc's declared-set table). The reload link ledger.md is ABSENT - a declared state per frame section 6.1, not a failure. GREEN: false, and the state stays partial BECAUSE of it rather than by choice - validate_disposition refuses `adopted` while green is not true. Gate run over the declared set at this tree's HEAD 31ea7cb: 5 green - test_ledger rc=0 (111s wall), test_ledger_schema rc=0 (131 row(s) audited, 4 excused), test_ledger_no_shrink rc=0, test_ledger_close_preflight rc=0, and test_ledger_commit_cites_no_rows rc=0 WITH 3 excused, which is a visible debt and not a clean run; 1 SKIPs BY DECLARATION - test_ledger_identity rc=0 but SKIPPED, because this tree's Worker lane does not resolve to a live session and every arm below it would pass vacuously; 1 RED - test_ledger_index rc=1 on 2 checks, it is not registered in tools/audit.py and the index path is not gitignored (git check-ignore .ledger-index.sqlite rc=1). PREDICATE, stated because behind_by is validated only as an integer and nothing defines what it counts: raw byte-identity - sha256 of each member half against git show REV:TEMPLATE/<path> - counting EVERY divergent path, which is the same predicate the superseded row used (it counted its one declared fork inside its 8), read at 2026-09-29T13:55:46Z against the donor checkout's HEAD 2287cf4: 14 identical, 1 divergent, 0 absent. CLASSIFICATION of that one, the count being the measurement and the split being my reading: tests/test_ledger_schema.py, a DECLARED fork in registry/kit-exemptions.json (deferred - the pin's copy is pytest-collectable where ours is script-mode only), so UNDECLARED lags = 0. The vendored pin registry/kit.json (kit_version 27b79f289fef) reads identically at 14/1, so pin and HEAD agree and the sole divergence is the declared fork. SECOND READING, recorded so this figure is never quoted as a bare fact: against the donor's origin/main e249022 the count is 4 - tools/ledger.py, tests/test_ledger.py and docs/instruments/ledger.md beyond the declared fork, which is the donor's own movement past the pin and not anything this tree did. The two readings differ because the local donor checkout is not the donor's tip: it read 3 ahead and 86 behind origin/main at the same 13:55:46Z instant. That lag GROWS with every upstream push, so both it and the 4 are bound to that instant and neither is a stable property. The declared behind_by is the HEAD one, per the frame's instruction to read git show HEAD:<path>. #61 IS NOT ABSORBED INTO THIS NUMBER. test_ledger_commit_cites_no_rows, the class that item named, now PASSES with the exemption surface the class requires - anchored on our own first ledger commit cd2a3f8 instead of the KIT's sha, with 3 exemptions each carrying an empty-repair-space proof - and core.hooksPath is now ARMED at tools/hooks, so the item's bound was corrected in the ledger at n=123 rather than folded into a count. Its remaining subject is ordering versus availability, and the ordering half has landed. NOTHING WAS BACKFILLED: the superseded row stands exactly as written, and this row corrects it rather than rewriting it."
+    },
+    "open-questions": {
+      "state": "deferred",
+      "behind_by": 0,
+      "measured_at": "2026-09-29T11:11:04Z",
+      "reason": "HELD COMPLETE, GATE UNKNOWN -- the two axes disagree and this entry names both rather than claiming one. Held: all 4 declared paths byte-identical to canonical at committed HEAD 1ac6129. Gate: NOT green -- its own gate tests/test_questions.py was run at that revision by this lane on 2026-09-29T09:51Z and returned rc=1, \"the selftest exceeded 390 s -- a timeout is UNKNOWN, never a pass\"; no green verdict exists. `adopted` requires green: true (registry validate_disposition, require_green), and the frame is explicit that HELD and GREEN are independent, so adoption is deferred until the gate returns a verdict rather than declared on the axis that happens to read well. `green` is OMITTED, not false: the verdict is UNKNOWN, and false would claim a red that was never measured. behind_by 0 is a byte measurement and says nothing about the gate. What would change this entry: a quiet-box run returning a verdict -- this box carries a measured >=6x runtime variance for this gate (64.8 s quiet against >390 s under contention), and a third concurrent run would make this lane the cause of the timeout it was measuring. Predicate: md5 of each HEAD blob at the member's committed HEAD (frame S7.5 -- committed state, never a working tree) against the canonical file at origin/main b9c20d9; scope: the 4 paths declared in docs/instruments/open-questions.md S2; instant: measured_at below."
+    }
+  }
 }
