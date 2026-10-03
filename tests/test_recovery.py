@@ -163,3 +163,48 @@ async def test_recovery_audit_is_one_row_per_message(patched_db_conn, clean_db):
     assert len(rows) == 1
     assert rows[0]["outcome"] == "recovered"
     assert rows[0]["confidence"] == 99
+
+
+# --- closing: what stops counting as a live loss ---------------------------
+
+
+def test_recovery_close_set_excludes_uncertain_outcomes():
+    """Only a PROVEN non-loss is closed; uncertain rows stay visible.
+
+    Closing hides a row from the loss-watch backlog, so the set is deliberately
+    narrow: gone (the message is absent), skipped (policy says do not moderate),
+    group_missing (out of reach). `terminal_unresolvable` and `terminal_error`
+    must NOT be closed - an unreadable or transient failure is exactly what a
+    later pass still needs to see.
+    """
+    assert rf.CLOSE_OUTCOMES == {
+        "terminal_gone",
+        "terminal_skipped",
+        "terminal_group_missing",
+    }
+    for uncertain in (
+        "terminal_unresolvable",
+        "terminal_error",
+        "terminal_moderation_disabled",
+        "terminal_no_update",
+    ):
+        assert uncertain not in rf.CLOSE_OUTCOMES
+    # no stray value: every closed outcome is also a terminal one
+    assert rf.CLOSE_OUTCOMES <= rf.TERMINAL_OUTCOMES
+
+
+def test_loss_watch_excludes_closed_rows():
+    """The backlog count must not include a row the recovery closed.
+
+    A closed row is a message that is gone, so counting it reports a backlog
+    that cannot be acted on - the exact false signal this change removes. The
+    SQL is pinned because the predicate IS the monitor: dropping
+    `closed_at IS NULL` silently restores the false backlog.
+    """
+    path = Path(__file__).resolve().parents[1] / "scripts" / "loss_watch.py"
+    spec = importlib.util.spec_from_file_location("loss_watch", path)
+    lw = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lw)
+
+    # both the count subquery and the list query gate on closed_at
+    assert lw.LOSS_SQL.count("closed_at IS NULL") >= 2

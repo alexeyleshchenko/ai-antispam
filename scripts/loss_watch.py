@@ -19,8 +19,11 @@ Three properties make this instrument different from that digest:
 
 2. It gates on the LOSS signal, not the warning. ``Gateway spam classification
    failed`` means the fallback caught it (healthy: 13x in 6h, 0 lost).
-   ``status='failed' AND moderated_at IS NULL`` means a message is sitting in a
-   real group, unmoderated. Only the second is harm.
+   ``status='failed' AND moderated_at IS NULL AND closed_at IS NULL`` means a
+   message is sitting in a real group, unmoderated. Only the second is harm.
+   A row the recovery runner has CLOSED (``closed_at`` set) is excluded: it is
+   a message that is gone from the group, or skipped by group policy, so there
+   is nothing left to moderate — counting it would report a false backlog.
 
 3. It is wired to WAKE A LANE (``deliver_to = session:<uuid>``), which starts an
    active turn. A channel post starts nothing.
@@ -74,12 +77,14 @@ SELECT v.chat_id,
        to_char(v.created_at, 'HH24:MI:SS'),
        to_char(now(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
        (SELECT count(*) FROM classification_verdicts
-         WHERE status = 'failed' AND moderated_at IS NULL),
+         WHERE status = 'failed' AND moderated_at IS NULL
+           AND closed_at IS NULL),
        coalesce(g.title, '?')
 FROM classification_verdicts v
 LEFT JOIN groups g ON g.group_id = v.chat_id
 WHERE v.status = 'failed'
   AND v.moderated_at IS NULL
+  AND v.closed_at IS NULL
   AND v.created_at > now() - interval '%(window)d minutes'
   AND v.created_at < now() - interval '%(lag)d minutes'
 ORDER BY v.chat_id, v.created_at
@@ -236,8 +241,8 @@ def render(
     if cause is not None:
         lines.append(f"Gateway leg failures in the same window: **{cause}**.")
     lines.append(
-        "Read from `classification_verdicts` (`status='failed'`, `moderated_at IS NULL`), "
-        "not from the container log."
+        "Read from `classification_verdicts` (`status='failed'`, `moderated_at "
+        "IS NULL`, `closed_at IS NULL`), not from the container log."
     )
     return "\n".join(lines)
 

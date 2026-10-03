@@ -23,6 +23,7 @@ from app.database.classification_verdicts import (
     claim_pending,
     cleanup_old_verdicts,
     cleanup_stale_pending_verdicts,
+    close_verdict,
     ensure_verdict_table,
     mark_failed,
     reclaim_failed,
@@ -334,3 +335,59 @@ async def test_ensure_table_adds_attempts_to_a_legacy_table(patched_db_conn, cle
     # column, so this passes only if the ALTER actually landed.
     assert await claim_pending(CHAT_ID, MESSAGE_ID) is True
     assert (await claim_or_read(CHAT_ID, MESSAGE_ID))["attempts"] == 0
+
+    # Same proof for the recovery columns: the UPDATE names closed_at, so this
+    # returns True only if the ALTER that adds it landed on the old table too.
+    await mark_failed(CHAT_ID, MESSAGE_ID)
+    assert await close_verdict(CHAT_ID, MESSAGE_ID, "terminal_gone") is True
+
+@pytest.mark.asyncio
+async def test_close_verdict_is_idempotent(patched_db_conn, clean_db):
+    """Closing is a claim: the first pass wins, a second changes nothing."""
+    await claim_pending(CHAT_ID, MESSAGE_ID)
+    await mark_failed(CHAT_ID, MESSAGE_ID)
+
+    assert await close_verdict(CHAT_ID, MESSAGE_ID, "terminal_gone") is True
+    assert await close_verdict(CHAT_ID, MESSAGE_ID, "terminal_gone") is False
+
+@pytest.mark.asyncio
+async def test_closed_row_is_never_reclaimed(patched_db_conn, clean_db):
+    """A closed row leaves the retry predicate, so no redelivery resurrects it."""
+    await claim_pending(CHAT_ID, MESSAGE_ID)
+    await mark_failed(CHAT_ID, MESSAGE_ID)
+
+    # the SAME predicate accepts an open failed row ...
+    assert (
+        await reclaim_failed(CHAT_ID, MESSAGE_ID, cooldown=timedelta(hours=-1))
+        is True
+    )
+
+    # ... and refuses it once the row is closed
+    await mark_failed(CHAT_ID, MESSAGE_ID)
+    await close_verdict(CHAT_ID, MESSAGE_ID, "terminal_gone")
+    assert (
+        await reclaim_failed(CHAT_ID, MESSAGE_ID, cooldown=timedelta(hours=-1))
+        is False
+    )
+
+@pytest.mark.asyncio
+async def test_close_keeps_the_axes_separate(patched_db_conn, clean_db):
+    """Closing must not fake a verdict or a moderation - it is its own axis."""
+    from app.database.postgres_connection import get_pool
+
+    await claim_pending(CHAT_ID, MESSAGE_ID)
+    await mark_failed(CHAT_ID, MESSAGE_ID)
+    await close_verdict(CHAT_ID, MESSAGE_ID, "terminal_skipped")
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT status, moderated_at, closed_at, closed_reason "
+            "FROM classification_verdicts WHERE chat_id = $1 AND message_id = $2",
+            CHAT_ID,
+            MESSAGE_ID,
+        )
+    assert row["closed_at"] is not None
+    assert row["closed_reason"] == "terminal_skipped"
+    assert row["status"] == "failed"
+    assert row["moderated_at"] is None

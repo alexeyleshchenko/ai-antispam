@@ -478,6 +478,8 @@ async def create_sqlite_schema(conn):
             decided_at TIMESTAMP,
             moderated_at TIMESTAMP,
             attempts INTEGER NOT NULL DEFAULT 0,
+            closed_at TIMESTAMP,
+            closed_reason TEXT,
             UNIQUE(chat_id, message_id)
         );
     """)

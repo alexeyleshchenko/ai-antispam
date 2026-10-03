@@ -158,6 +158,19 @@ SKIP_OUTCOMES = {
     "message_from_channel_bot_skipped": "terminal_skipped",
 }
 
+# Terminal outcomes that PROVE the row is not a live loss: the message is gone
+# from the group, the group is out of reach, or group policy skips it by design.
+# A row closed with one of these stops counting toward the loss-watch's
+# `status='failed' AND moderated_at IS NULL` backlog, whose own reading is "a
+# message is sitting in a real group, unmoderated". The rest stay visible ON
+# PURPOSE: `terminal_unresolvable` (we could not tell) and `terminal_error`
+# (transient) must keep showing up as possible losses until a later pass settles
+# them, and `terminal_moderation_disabled` is a chat whose operator turned
+# moderation off — its messages are still sitting there, unmoderated.
+CLOSE_OUTCOMES = frozenset(
+    {"terminal_gone", "terminal_skipped", "terminal_group_missing"}
+)
+
 
 async def ensure_recovery_table() -> None:
     """Create the audit table. Idempotent, safe to run on every invocation."""
@@ -494,12 +507,16 @@ async def process_row(
     action, detail = plan_target(presence, prior)
     if action == "terminal":
         record.update(outcome=detail, detail=detail)
+        if apply and detail in CLOSE_OUTCOMES:
+            await close_row(chat_id, message_id, detail)
         return record
 
     exit_reason = await early_exit_reason(message)
     if exit_reason:
         outcome = SKIP_OUTCOMES.get(exit_reason, "terminal_error")
         record.update(outcome=outcome, detail=f"early exit: {exit_reason}")
+        if apply and outcome in CLOSE_OUTCOMES:
+            await close_row(chat_id, message_id, outcome)
         return record
 
     # The ONLY branch that can reach Telegram. Everything above is read-only,
@@ -583,6 +600,18 @@ async def reset_attempts(chat_id: int, message_id: int) -> None:
             message_id,
         )
 
+
+async def close_row(chat_id: int, message_id: int, reason: str) -> None:
+    """Close the verdict row so it stops counting as a live loss.
+
+    Reached ONLY in apply mode, and only for an outcome in ``CLOSE_OUTCOMES``.
+    The store's ``closed_at IS NULL`` guard makes it idempotent, so a second
+    pass over the same row is a no-op and the loss-watch's backlog cannot shrink
+    twice for one message.
+    """
+    from app.database.classification_verdicts import close_verdict
+
+    await close_verdict(chat_id, message_id, reason)
 
 async def drain_inflight(timeout: float = 300.0) -> None:
     """Wait for the detached verdict tasks this row started.

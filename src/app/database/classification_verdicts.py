@@ -24,6 +24,15 @@ is bounded rather than a livelock.
 `moderated_at` is the moderation claim, independent of `status`: it is set by
 `claim_moderation` with an `IS NULL` guard, so exactly one caller wins even if
 two deliveries race.
+
+`closed_at` is the RECOVERY verdict, independent of both: it is set when a
+recovery pass PROVES there is nothing left to moderate — the message is gone
+from the group, or the group's own policy skips it. A closed row is not a live
+loss, so it is excluded from `reclaim_failed` and from the loss-watch's
+`status='failed' AND moderated_at IS NULL` predicate, which reads "a message is
+sitting in a real group, unmoderated" — false once the message is gone.
+`closed_reason` names the recovery outcome that closed it. Set only by the
+recovery runner (scripts/recover_failed.py), which owns the presence check.
 """
 
 import logging
@@ -52,6 +61,8 @@ CREATE TABLE IF NOT EXISTS classification_verdicts (
     decided_at TIMESTAMPTZ,
     moderated_at TIMESTAMPTZ,
     attempts INTEGER NOT NULL DEFAULT 0,
+    closed_at TIMESTAMPTZ,
+    closed_reason TEXT,
     UNIQUE(chat_id, message_id)
 )
 """
@@ -64,6 +75,19 @@ ALTER TABLE classification_verdicts
     ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0
 """
 
+# One ALTER per column, matching VERDICT_ATTEMPTS_DDL above: a single
+# `ALTER TABLE` with two `ADD COLUMN` clauses is rejected by SQLite and by the
+# test harness's IF-NOT-EXISTS emulation, which rewrites one clause per statement.
+VERDICT_CLOSED_AT_DDL = """
+ALTER TABLE classification_verdicts
+    ADD COLUMN IF NOT EXISTS closed_at TIMESTAMPTZ
+"""
+
+VERDICT_CLOSED_REASON_DDL = """
+ALTER TABLE classification_verdicts
+    ADD COLUMN IF NOT EXISTS closed_reason TEXT
+"""
+
 VERDICT_INDEX_DDL = """
 CREATE INDEX IF NOT EXISTS idx_classification_verdicts_created
     ON classification_verdicts(created_at)
@@ -74,6 +98,8 @@ async def ensure_verdict_table(conn) -> None:
     """Create the verdict table, its index and its added columns. Idempotent."""
     await conn.execute(VERDICT_TABLE_DDL)
     await conn.execute(VERDICT_ATTEMPTS_DDL)
+    await conn.execute(VERDICT_CLOSED_AT_DDL)
+    await conn.execute(VERDICT_CLOSED_REASON_DDL)
     await conn.execute(VERDICT_INDEX_DDL)
 
 
@@ -137,10 +163,11 @@ async def reclaim_failed(
     """Claim a retry of a FAILED classification. True if THIS caller won.
 
     The single UPDATE is the whole claim. It matches only a row that is still
-    `failed`, is short of the attempt cap, and has been failed longer than
-    `cooldown`; the row lock serialises concurrent reclaims, so the loser
-    re-evaluates against `pending` and matches nothing. That is the same shape
-    as `claim_pending` and `claim_moderation`: no read-then-write, so no race.
+    `failed` and NOT closed, is short of the attempt cap, and has been failed
+    longer than `cooldown`; the row lock serialises concurrent reclaims, so the
+    loser re-evaluates against `pending` and matches nothing. That is the same
+    shape as `claim_pending` and `claim_moderation`: no read-then-write, so no
+    race.
     """
     if cooldown is None:
         cooldown = timedelta(seconds=DEFAULT_VERDICT_RETRY_COOLDOWN_SECONDS)
@@ -155,6 +182,7 @@ async def reclaim_failed(
             SET status = 'pending'
             WHERE chat_id = $1 AND message_id = $2
               AND status = 'failed'
+              AND closed_at IS NULL
               AND attempts < $3
               AND decided_at < $4
             RETURNING id
@@ -269,6 +297,35 @@ async def store_result_id(chat_id: int, message_id: int, result_id: str) -> None
             message_id,
         )
 
+
+async def close_verdict(chat_id: int, message_id: int, reason: str) -> bool:
+    """Close a failed row: nothing left to moderate. True if THIS caller won.
+
+    Set by the recovery runner once it has PROVED the message cannot be
+    moderated — it is gone from the group, or the group's own policy skips it
+    by design. The `closed_at IS NULL` guard makes it idempotent: a second
+    recovery pass over the same row changes nothing.
+
+    Closing does NOT touch `status` or `moderated_at`: it is a separate axis,
+    so a closed row still reads `failed` and keeps its attempt count. The point
+    is that `reclaim_failed` refuses it and the loss-watch does not count it —
+    a message that is gone is not "sitting in a real group, unmoderated".
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE classification_verdicts
+            SET closed_at = NOW(),
+                closed_reason = $1
+            WHERE chat_id = $2 AND message_id = $3 AND closed_at IS NULL
+            RETURNING id
+            """,
+            reason,
+            chat_id,
+            message_id,
+        )
+    return row is not None
 
 async def cleanup_old_verdicts(days: int = DEFAULT_VERDICT_TTL_DAYS) -> int:
     """Delete verdicts older than `days`. Returns the deleted count."""
