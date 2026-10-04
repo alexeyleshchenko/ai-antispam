@@ -41,6 +41,28 @@ from field_predicate import declared_cause_count  # noqa: E402
 from gate_budget import TIMEOUT_EXIT_CODE  # noqa: E402
 
 
+# The floor below which a rate is WITHHELD rather than printed (#77). A rate over a tiny
+# denominator is noise read as a verdict: one close carrying one rework prints a 300%
+# rework rate, and nothing in the output says the denominator is 1. The COUNTS always
+# print; only the rate is withheld, and the floor is named so a reader learns the
+# threshold instead of having to infer it from a number that looks like a measurement.
+RATE_FLOOR = 5
+
+def render_rate_pct(value_pct: float, n: int, floor: int = RATE_FLOOR) -> str:
+    """Render a rate as a percentage, WITHHOLDING it when its denominator is below the floor (#77).
+
+    ONE site for the withhold decision, so the scorecard's markdown and the stdout line
+    cannot disagree about whether a rate was fit to print -- the same single-site reason
+    `first_pass_yield_pct` exists for the rounding (#38): a second copy of this predicate
+    is a second thing to keep in step, and the two drift silently.
+
+    `n` is the rate's DENOMINATOR -- total runs for the yield, closed tasks for the rework
+    rate -- never a numerator. The returned string carries the floor whenever it withholds,
+    so a reader sees the threshold rather than a bare "withheld".
+    """
+    if n < floor:
+        return f"withheld (n={n} < floor {floor})"
+    return f"{value_pct}%"
 def first_pass_yield_pct(accepted: int, total: int) -> float:
     """The ONE site where a yield becomes a percentage (#38).
 
@@ -948,9 +970,9 @@ def format_report_markdown(
         "|---|---|---|",
         f"| **Total Ledger Events** | `{ledger_stats.get('total_events', 0)}` | Continuous ledger sequence |",
         f"| **Closed Tasks** | `{ledger_stats.get('closed_tasks', 0)}` | Tasks reaching verified close |",
-        f"| **First-Pass Yield** | `{first_pass_yield_pct(ledger_stats.get('runs_by_outcome', {}).get('accepted', 0), ledger_stats.get('run_events', 0))}%` | Accepted runs ÷ total runs |",
+        f"| **First-Pass Yield** | `{render_rate_pct(first_pass_yield_pct(ledger_stats.get('runs_by_outcome', {}).get('accepted', 0), ledger_stats.get('run_events', 0)), ledger_stats.get('run_events', 0))}` | Accepted runs ÷ total runs (floor {RATE_FLOOR}) |",
         f"| **Rework Entries** | `{rework_stats.get('total_entries', 0)}` | Defect count recorded in rework.md |",
-        f"| **Rework Rate** | `{round(rework_stats.get('rework_rate', 0.0) * 100, 1)}%` | Rework entries ÷ closed tasks |",
+        f"| **Rework Rate** | `{render_rate_pct(round(rework_stats.get('rework_rate', 0.0) * 100, 1), ledger_stats.get('closed_tasks', 0))}` | Rework entries ÷ closed tasks (floor {RATE_FLOOR}) |",
         f"| **Avg Task Lead Time** | `{ledger_stats.get('avg_lead_time_sec', 0.0)}s` | Average duration from intake to close |",
         f"| **Total Inference Cost** | `${ledger_stats.get('total_cost_usd', 0.0):.4f}` | Tracked cost across ledger task telemetry |",
         f"| **Avg Cost / Closed Task** | `${ledger_stats.get('avg_cost_per_closed_task_usd', 0.0):.4f}` | Total cost ÷ closed tasks |",
@@ -1154,9 +1176,13 @@ def main() -> int:
     # cannot describe different runs. A timeout reads UNKNOWN here, never DEGRADED: the box
     # was loaded, the gate was healthy, and the audit took no verdict on it.
     print(render_status_line(verdict))
-    print(f"  - First-Pass Yield: {first_pass_yield_pct(ledger_stats.get('runs_by_outcome', {}).get('accepted', 0), ledger_stats.get('run_events', 0))}%")
+    # The rate is WITHHELD below RATE_FLOOR (#77); the counts print regardless, so a small
+    # denominator is visible in the output rather than inferred from a rate that reads as a verdict.
+    _yield_acc = ledger_stats.get('runs_by_outcome', {}).get('accepted', 0)
+    _yield_n = ledger_stats.get('run_events', 0)
+    print(f"  - First-Pass Yield: {render_rate_pct(first_pass_yield_pct(_yield_acc, _yield_n), _yield_n)} ({_yield_acc}/{_yield_n} accepted)")
     print(f"  - Closed Tasks: {ledger_stats.get('closed_tasks', 0)} | Intake Tasks: {ledger_stats.get('intake_tasks', 0)}")
-    print(f"  - Rework Entries: {rework_stats.get('total_entries', 0)} (Rate: {round(rework_stats.get('rework_rate', 0.0) * 100, 1)}%)")
+    print(f"  - Rework Entries: {rework_stats.get('total_entries', 0)} (Rate: {render_rate_pct(round(rework_stats.get('rework_rate', 0.0) * 100, 1), ledger_stats.get('closed_tasks', 0))})")
     print(f"  - Cadence: {'HELD' if cadence_ok else 'MISSED'} (last run: {cadence_stats.get('hours_since_last_run')}h ago)")
     unknown_note = f", {len(verdict.unknown)} UNKNOWN" if verdict.unknown else ""
     print(f"\nMechanical Gates ({len(gate_results)}{unknown_note}):")
