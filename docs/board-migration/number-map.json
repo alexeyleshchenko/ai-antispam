@@ -1,0 +1,482 @@
+{
+ "map": {
+  "10": {
+   "closed": true,
+   "comments": 0,
+   "new": 52,
+   "posted_comments": 0,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/52"
+  },
+  "11": {
+   "closed": true,
+   "comments": 0,
+   "new": 53,
+   "posted_comments": 0,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/53"
+  },
+  "15": {
+   "closed": true,
+   "comments": 0,
+   "new": 54,
+   "posted_comments": 0,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/54"
+  },
+  "17": {
+   "closed": true,
+   "comments": 1,
+   "new": 55,
+   "posted_comments": 1,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/55"
+  },
+  "19": {
+   "closed": true,
+   "comments": 0,
+   "new": 56,
+   "posted_comments": 0,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/56"
+  },
+  "24": {
+   "closed": true,
+   "comments": 1,
+   "new": 57,
+   "posted_comments": 1,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/57"
+  },
+  "25": {
+   "closed": true,
+   "comments": 1,
+   "new": 58,
+   "posted_comments": 1,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/58"
+  },
+  "26": {
+   "closed": true,
+   "comments": 1,
+   "new": 59,
+   "posted_comments": 1,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/59"
+  },
+  "27": {
+   "closed": true,
+   "comments": 2,
+   "new": 60,
+   "posted_comments": 2,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/60"
+  },
+  "28": {
+   "closed": true,
+   "comments": 1,
+   "new": 61,
+   "posted_comments": 1,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/61"
+  },
+  "29": {
+   "closed": true,
+   "comments": 1,
+   "new": 62,
+   "posted_comments": 1,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/62"
+  },
+  "3": {
+   "closed": true,
+   "comments": 0,
+   "new": 49,
+   "posted_comments": 0,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/49"
+  },
+  "30": {
+   "closed": true,
+   "comments": 2,
+   "new": 63,
+   "posted_comments": 2,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/63"
+  },
+  "31": {
+   "closed": true,
+   "comments": 7,
+   "new": 64,
+   "posted_comments": 7,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/64"
+  },
+  "32": {
+   "closed": true,
+   "comments": 1,
+   "new": 65,
+   "posted_comments": 1,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/65"
+  },
+  "33": {
+   "closed": true,
+   "comments": 2,
+   "new": 66,
+   "posted_comments": 2,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/66"
+  },
+  "34": {
+   "comments": 1,
+   "new": 67,
+   "posted_comments": 1,
+   "state": "OPEN",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/67"
+  },
+  "35": {
+   "closed": true,
+   "comments": 3,
+   "new": 68,
+   "posted_comments": 3,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/68"
+  },
+  "36": {
+   "closed": true,
+   "comments": 2,
+   "new": 69,
+   "posted_comments": 2,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/69"
+  },
+  "37": {
+   "closed": true,
+   "comments": 2,
+   "new": 70,
+   "posted_comments": 2,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/70"
+  },
+  "38": {
+   "closed": true,
+   "comments": 5,
+   "new": 71,
+   "posted_comments": 5,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/71"
+  },
+  "39": {
+   "closed": true,
+   "comments": 6,
+   "new": 72,
+   "posted_comments": 6,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/72"
+  },
+  "40": {
+   "comments": 7,
+   "new": 73,
+   "posted_comments": 7,
+   "state": "OPEN",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/73"
+  },
+  "41": {
+   "closed": true,
+   "comments": 4,
+   "new": 74,
+   "posted_comments": 4,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/74"
+  },
+  "42": {
+   "comments": 4,
+   "new": 75,
+   "posted_comments": 4,
+   "state": "OPEN",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/75"
+  },
+  "43": {
+   "comments": 2,
+   "new": 76,
+   "posted_comments": 2,
+   "state": "OPEN",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/76"
+  },
+  "44": {
+   "comments": 2,
+   "new": 77,
+   "posted_comments": 2,
+   "state": "OPEN",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/77"
+  },
+  "45": {
+   "comments": 3,
+   "new": 78,
+   "posted_comments": 3,
+   "state": "OPEN",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/78"
+  },
+  "46": {
+   "closed": true,
+   "comments": 0,
+   "new": 79,
+   "posted_comments": 0,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/79"
+  },
+  "47": {
+   "closed": true,
+   "comments": 2,
+   "new": 80,
+   "posted_comments": 2,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/80"
+  },
+  "48": {
+   "closed": true,
+   "comments": 4,
+   "new": 81,
+   "posted_comments": 4,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/81"
+  },
+  "49": {
+   "closed": true,
+   "comments": 1,
+   "new": 82,
+   "posted_comments": 1,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/82"
+  },
+  "5": {
+   "closed": true,
+   "comments": 0,
+   "new": 50,
+   "posted_comments": 0,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/50"
+  },
+  "50": {
+   "closed": true,
+   "comments": 8,
+   "new": 83,
+   "posted_comments": 8,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/83"
+  },
+  "51": {
+   "comments": 0,
+   "new": 84,
+   "posted_comments": 0,
+   "state": "OPEN",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/84"
+  },
+  "52": {
+   "closed": true,
+   "comments": 6,
+   "new": 85,
+   "posted_comments": 6,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/85"
+  },
+  "53": {
+   "comments": 0,
+   "new": 86,
+   "posted_comments": 0,
+   "state": "OPEN",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/86"
+  },
+  "54": {
+   "comments": 0,
+   "new": 87,
+   "posted_comments": 0,
+   "state": "OPEN",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/87"
+  },
+  "55": {
+   "comments": 2,
+   "new": 88,
+   "posted_comments": 2,
+   "state": "OPEN",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/88"
+  },
+  "56": {
+   "comments": 0,
+   "new": 89,
+   "posted_comments": 0,
+   "state": "OPEN",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/89"
+  },
+  "57": {
+   "comments": 4,
+   "new": 90,
+   "posted_comments": 4,
+   "state": "OPEN",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/90"
+  },
+  "58": {
+   "closed": true,
+   "comments": 8,
+   "new": 91,
+   "posted_comments": 8,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/91"
+  },
+  "59": {
+   "closed": true,
+   "comments": 1,
+   "new": 92,
+   "posted_comments": 1,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/92"
+  },
+  "6": {
+   "closed": true,
+   "comments": 1,
+   "new": 51,
+   "posted_comments": 1,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/51"
+  },
+  "60": {
+   "comments": 1,
+   "new": 93,
+   "posted_comments": 1,
+   "state": "OPEN",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/93"
+  },
+  "61": {
+   "comments": 3,
+   "new": 94,
+   "posted_comments": 3,
+   "state": "OPEN",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/94"
+  },
+  "62": {
+   "closed": true,
+   "comments": 4,
+   "new": 95,
+   "posted_comments": 4,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/95"
+  },
+  "63": {
+   "closed": true,
+   "comments": 1,
+   "new": 96,
+   "posted_comments": 1,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/96"
+  },
+  "64": {
+   "comments": 0,
+   "new": 97,
+   "posted_comments": 0,
+   "state": "OPEN",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/97"
+  },
+  "65": {
+   "comments": 3,
+   "new": 98,
+   "posted_comments": 3,
+   "state": "OPEN",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/98"
+  },
+  "66": {
+   "closed": true,
+   "comments": 2,
+   "new": 99,
+   "posted_comments": 2,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/99"
+  },
+  "67": {
+   "closed": true,
+   "comments": 3,
+   "new": 100,
+   "posted_comments": 3,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/100"
+  },
+  "68": {
+   "comments": 14,
+   "new": 101,
+   "posted_comments": 14,
+   "state": "OPEN",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/101"
+  },
+  "69": {
+   "comments": 0,
+   "new": 102,
+   "posted_comments": 0,
+   "state": "OPEN",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/102"
+  },
+  "70": {
+   "comments": 1,
+   "new": 103,
+   "posted_comments": 1,
+   "state": "OPEN",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/103"
+  },
+  "71": {
+   "closed": true,
+   "comments": 2,
+   "new": 104,
+   "posted_comments": 2,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/104"
+  },
+  "72": {
+   "closed": true,
+   "comments": 3,
+   "new": 105,
+   "posted_comments": 3,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/105"
+  },
+  "73": {
+   "closed": true,
+   "comments": 2,
+   "new": 106,
+   "posted_comments": 2,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/106"
+  },
+  "74": {
+   "comments": 5,
+   "new": 107,
+   "posted_comments": 5,
+   "state": "OPEN",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/107"
+  },
+  "75": {
+   "comments": 2,
+   "new": 108,
+   "posted_comments": 2,
+   "state": "OPEN",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/108"
+  },
+  "76": {
+   "closed": true,
+   "comments": 2,
+   "new": 109,
+   "posted_comments": 2,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/109"
+  },
+  "77": {
+   "closed": true,
+   "comments": 2,
+   "new": 110,
+   "posted_comments": 2,
+   "state": "CLOSED",
+   "url": "https://github.com/leshchenko1979/ai-antispam/issues/110"
+  }
+ },
+ "migrated_at": "2026-10-04T20:42:12.425405+00:00",
+ "source": "alexeyleshchenko/ai-antispam",
+ "target": "leshchenko1979/ai-antispam"
+}

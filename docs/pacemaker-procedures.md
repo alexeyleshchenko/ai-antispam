@@ -6,6 +6,8 @@ Landed 2026-10-04 (board #76, meta-factory #118 shape (b)): 13 rows that carried
 
 Lane session ids — Outreach `acc3fa9b-cefa-4e35-bf87-422696e558f0` · Bot `6d921dca-fb0a-455b-bceb-dfb78dcf1f07` · HQ `cb06a94a-be02-4e8c-b6c6-c8c9f09922f4` · Triage `6ca0d547-4a72-4c29-ac10-967daa98af0a`.
 
+**Board migration 2026-10-04:** the service board moved from `alexeyleshchenko/ai-antispam` to `leshchenko1979/ai-antispam` (owner order; Open Questions q16 = option B, "renumber everything"). All 62 items were recreated on the canonical repo and RENUMBERED — the old→new map is `docs/board-migration/number-map.json`. Where a gate below names its OLD board number in prose (`#43`, `#52`, `#62`, kept as the gate's stable identity), the live issue number is the one given beside it.
+
 ---
 
 ## Outreach lane
@@ -54,19 +56,19 @@ CT=$(ssh apps "docker ps --filter name=ai-antispam --format '{{.Names}}' | head 
 
 Report it verbatim. Field guide: `all= / decided / failed` are durable (every `classification_verdicts` row ever written); `pre-pool n= / failed=` is the baseline the current pool must beat; `post-pool n= / failed=` is the candidate window; `span` is the window's first/last timestamps; `container=` is resolved DYNAMICALLY by name filter (a deploy can leave it hash-prefixed, e.g. 0cf2fa311a3c_ai-antispam); `gateway_fallbacks` is since CONTAINER START ONLY — the container log dies on every recreate, so it is never a durable count. Pool-swap boundary 2026-09-25T16:17:46Z; the pool is dots-studio/dots-3-note-preview:free (accuracy lead) + liquid/lfm-2.5-2.6b:free (availability net). Never read a post-pool zero as proof until n ≥ 29 (the 95% upper bound 3/n first falls below a 10.39% baseline at n=29). Aggregates cannot prove a specific rescue — that needs the per-message log join. Reason language is a live acceptance axis: the fallback model must write `reason` in Russian; a CJK `reason` is the defect the owner banned ling for — report it.
 
-**43-close-gate** (daily 12:05 UTC) — the cron `trigger_cmd` is kept as a FIRE GATE only (the 72 h window from the #43 deploy 2026-09-24T11:33:19Z has passed AND #43 is still open on alexeyleshchenko/ai-antispam). When woken, run both instruments and reproduce their output verbatim:
+**43-close-gate** (daily 12:05 UTC) — the cron `trigger_cmd` is kept as a FIRE GATE only (the 72 h window from the #43 deploy 2026-09-24T11:33:19Z has passed AND the item — board #43 pre-migration, now `leshchenko1979/ai-antispam#76` — is still open). When woken, run both instruments and reproduce their output verbatim:
 
 1. The durable instrument — `classification_verdicts` survives container recreates; the container log does NOT:
 
 ```bash
-[ "$(date -u +%Y%m%d)" -ge 20260927 ] && /usr/local/bin/gh issue view 43 --repo alexeyleshchenko/ai-antispam --json state 2>/dev/null | grep -q OPEN && echo GATE-DUE
+[ "$(date -u +%Y%m%d)" -ge 20260927 ] && /usr/local/bin/gh issue view 76 --repo leshchenko1979/ai-antispam --json state 2>/dev/null | grep -q OPEN && echo GATE-DUE
 ```
 
 2. The log instrument, coverage stated — resolve the container DYNAMICALLY (a deploy can leave it hash-prefixed, and a hardcoded name then fails with "No such container"), read `StartedAt`, and count `Webhook processing timed out after` (the OLD path) and `Classification pending after` (the NEW path).
 
 Interpretation: the #43 fix has two halves — `handle_timeout` (webhook cancelled the work) is the OLD path, `Classification pending after` (the classification runs detached and the redelivery serves the stored verdict) is the NEW one; a healthy post-fix system shows the new path firing and the old one not. A `failed` store row means a message went unclassified and therefore unmoderated. A zero is not proof unless the window is long enough — state n beside any zero (95% upper bound 3/n vs a 10.39% baseline ⇒ n ≥ 29). If the log window is shorter than 72 h, SAY SO plainly — the close must rest on the durable store, not a log a deploy truncated. Do NOT close the issue, edit any file, or investigate further — the Bot lane owns the close and acts on the line.
 
-**52-close-gate** (daily 11:30 UTC) — the cron `trigger_cmd` is kept as a FIRE GATE only (deploy 2026-09-27T11:20:14Z; window ends 2026-09-28T11:20:14Z; #52 still open). When woken:
+**52-close-gate** (daily 11:30 UTC) — the cron `trigger_cmd` is kept as a FIRE GATE only (deploy 2026-09-27T11:20:14Z; window ends 2026-09-28T11:20:14Z; the item — board #52 pre-migration, now `leshchenko1979/ai-antispam#85` — still open). When woken:
 
 1. Measure the window (read rc first-hand): `ssh apps 'docker logs --since 2026-09-27T11:20:14 ai-antispam-ai-antispam-1 2>&1 | grep -c "Unhandled exception in dispatcher"'`, the same for `callback_handlers`, and `wc -l`. Counting trap: each record double-prints (structured logger + Python logging handler) — state which count you are quoting. A container recreate TRUNCATES the log; if `StartedAt` is later than the window start, say so and re-base rather than presenting a short window as the full one.
 
