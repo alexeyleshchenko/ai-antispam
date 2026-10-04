@@ -6,7 +6,7 @@ Landed 2026-10-04 (board #76, meta-factory #118 shape (b)): 13 rows that carried
 
 Lane session ids — Outreach `acc3fa9b-cefa-4e35-bf87-422696e558f0` · Bot `6d921dca-fb0a-455b-bceb-dfb78dcf1f07` · HQ `cb06a94a-be02-4e8c-b6c6-c8c9f09922f4` · Triage `6ca0d547-4a72-4c29-ac10-967daa98af0a`.
 
-**Board migration 2026-10-04:** the service board moved from `alexeyleshchenko/ai-antispam` to `leshchenko1979/ai-antispam` (owner order; Open Questions q16 = option B, "renumber everything"). All 62 items were recreated on the canonical repo and RENUMBERED — the old→new map is `docs/board-migration/number-map.json`. Where a gate below names its OLD board number in prose (`#43`, `#52`, `#62`, kept as the gate's stable identity), the live issue number is the one given beside it.
+**Board migration 2026-10-04:** the service board moved from `alexeyleshchenko/ai-antispam` to `leshchenko1979/ai-antispam` (owner order; Open Questions q16 = option B, "renumber everything"). All 62 items were recreated on the canonical repo and RENUMBERED — the old→new map is `docs/board-migration/number-map.json`. Where a gate below names its OLD board number in prose (`#43`, `#52`, kept as the gate's stable identity), the live issue number is the one given beside it. The third close-gate, `ai-antispam-62-close-gate` (cron `f7d756b6-cead-412f-9291-3585ec218d13`), has no section here: it was RETIRED 2026-10-02 (ruling q13, ledger n=152 — its subject closed on mechanism evidence as canonical `#95`, board #62 pre-migration) and its cron was DELETED 2026-10-04, because its `trigger_cmd` still named the retired `alexeyleshchenko` account and a disabled cron carrying a dead-account literal is exactly the silently-stale class this file exists to prevent.
 
 ---
 
