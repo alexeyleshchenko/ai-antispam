@@ -41,6 +41,12 @@ from ..database.group_operations import (
     clear_no_rights_detected_at,
     set_no_rights_detected_at,
 )
+from ..database.trust_operations import (
+    JOIN_SOURCE_SERVICE_MESSAGE,
+    record_bot_added,
+    record_bot_removed,
+    record_join,
+)
 from ..i18n import normalize_lang, t
 from .dp import dp
 from .message.channel_management import notify_channel_admins_and_leave
@@ -339,6 +345,18 @@ async def _handle_bot_added(
         group_username=getattr(event.chat, "username", None),
     )
 
+    # Stamp the add instant PER ADD — never groups.created_at, which survives a
+    # remove/re-add and would open the trust window at the wrong time (#108).
+    # After update_group_admins so the group row exists for the UPDATE.
+    try:
+        await record_bot_added(chat_id)
+    except Exception:
+        logger.warning(
+            f"Failed to record bot add instant for chat {chat_id} "
+            f"('{chat_title}') — pre-existing trust stays closed here",
+            exc_info=True,
+        )
+
     has_admin_rights = (
         new_status == "administrator"
         and isinstance(event.new_chat_member, types.ChatMemberAdministrator)
@@ -429,6 +447,17 @@ async def _handle_bot_removed(
     logger.info(
         f"Bot removed from chat '{chat_title}' ({chat_id}) by {removed_by_info}"
     )
+
+    # A removal breaks the pre-existing inference: the bot was not watching
+    # when it was absent, so any re-add starts a fresh window (#108).
+    try:
+        await record_bot_removed(chat_id)
+    except Exception:
+        logger.warning(
+            f"Failed to record bot removal instant for chat {chat_id} "
+            f"('{chat_title}')",
+            exc_info=True,
+        )
 
     group = await get_group(chat_id)
     if group and group.admin_ids:
@@ -586,6 +615,37 @@ member_service_message_filter = or_f(
 )
 
 
+async def _persist_service_message_joins(message: types.Message, chat_id: int) -> None:
+    """Record every member this service message says joined. Never raises.
+
+    A join is evidence, but it is not worth failing the handler over: if the
+    store is unavailable the service message is still deleted and the chat
+    stays clean. The cost of a miss is one cold classification, not a lost
+    update — and a missed join can only make the trust predicate MORE
+    conservative, never less (it would leave the sender looking pre-existing).
+    """
+    members: list[types.User] = []
+    single = getattr(message, "new_chat_member", None)
+    if single is not None:
+        members.append(single)
+    many = getattr(message, "new_chat_members", None)
+    if many:
+        members.extend(many)
+
+    for member in members:
+        member_id = getattr(member, "id", None)
+        if member_id is None or getattr(member, "is_bot", False):
+            continue
+        try:
+            await record_join(chat_id, member_id, JOIN_SOURCE_SERVICE_MESSAGE)
+        except Exception:
+            logger.warning(
+                f"Failed to persist join of member {member_id} in chat "
+                f"{chat_id} ('{message.chat.title or ''}')",
+                exc_info=True,
+            )
+
+
 @dp.message(member_service_message_filter)
 async def handle_member_service_message(message: types.Message) -> str:
     """
@@ -601,6 +661,11 @@ async def handle_member_service_message(message: types.Message) -> str:
     try:
         chat_id = message.chat.id
         message_id = message.message_id
+
+        # Persist joins BEFORE the delete: this record is the ONLY thing that
+        # disproves "this sender was already here when the bot arrived", and
+        # the service message is about to be removed from the chat (#108).
+        await _persist_service_message_joins(message, chat_id)
 
         # Log the event
         if getattr(message, "new_chat_member", None) or getattr(

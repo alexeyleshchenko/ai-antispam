@@ -1085,3 +1085,276 @@ class TestServiceMessageDeleteNoAdminSkip:
         assert result == "service_message_no_rights"
         mock_set.assert_awaited_once_with(DISCUSSION_ID)
         mock_notify.assert_awaited_once()
+
+
+class TestPersistJoinsOnServiceMessage:
+    """#108: a join is evidence and must be stored BEFORE the message is deleted.
+
+    The dual-module trap (documented on the awaiting-rights test above): the DB
+    fixtures patch `app.database.postgres_connection._pool`, while the handler's
+    internals live in a SEPARATE `src.app.database.*` module instance. Sync the
+    pool across so the real handler+DB path runs against the test pool.
+    """
+
+    def _sync_pool(self):
+        import app.database.postgres_connection as app_pc
+        import src.app.database.postgres_connection as src_pc
+
+        src_pc._pool = app_pc._pool
+
+    def _clear_pool(self):
+        import src.app.database.postgres_connection as src_pc
+
+        src_pc._pool = None
+
+    def _message(self, *, members, chat_id: int = DISCUSSION_ID) -> MagicMock:
+        msg = MagicMock()
+        msg.chat = MagicMock()
+        msg.chat.id = chat_id
+        msg.chat.title = "Discussion"
+        msg.chat.username = None
+        msg.message_id = 999
+        msg.new_chat_member = None
+        msg.new_chat_members = members
+        msg.left_chat_member = None
+        return msg
+
+    @pytest.mark.asyncio
+    async def test_each_member_persisted_before_the_delete(
+        self, patched_db_conn, clean_db
+    ):
+        """Two members in one service message -> two rows, then the delete."""
+        from app.database.trust_operations import has_join_record
+        from src.app.handlers.status_handlers import handle_member_service_message
+
+        members = [User(id=880001, is_bot=False, first_name="A"), User(id=880002, is_bot=False, first_name="B")]
+
+        # The delete observes the store: this is what pins the ORDER. A join
+        # persisted after the delete would leave this list empty.
+        rows_at_delete: list[list[bool]] = []
+
+        async def _delete_and_probe(chat_id, message_id):
+            rows_at_delete.append(
+                [
+                    await has_join_record(chat_id, m.id)
+                    for m in members
+                ]
+            )
+            return True
+
+        self._sync_pool()
+        try:
+            with patch(
+                "src.app.handlers.status_handlers.bot.delete_message",
+                AsyncMock(side_effect=_delete_and_probe),
+            ):
+                result = await handle_member_service_message(self._message(members=members))
+
+            assert result == "service_message_deleted"
+            assert rows_at_delete == [[True, True]], (
+                "both joins must already be persisted when the delete runs"
+            )
+            for member in members:
+                assert await has_join_record(DISCUSSION_ID, member.id) is True
+        finally:
+            self._clear_pool()
+
+    @pytest.mark.asyncio
+    async def test_single_member_field_is_persisted(self, patched_db_conn, clean_db):
+        """The singular `new_chat_member` field is persisted too."""
+        from app.database.trust_operations import has_join_record
+        from src.app.handlers.status_handlers import handle_member_service_message
+
+        msg = self._message(members=None)
+        msg.new_chat_member = User(id=880003, is_bot=False, first_name="C")
+
+        self._sync_pool()
+        try:
+            with patch(
+                "src.app.handlers.status_handlers.bot.delete_message",
+                AsyncMock(return_value=True),
+            ):
+                await handle_member_service_message(msg)
+
+            assert await has_join_record(DISCUSSION_ID, 880003) is True
+        finally:
+            self._clear_pool()
+
+    @pytest.mark.asyncio
+    async def test_bot_members_are_not_persisted(self, patched_db_conn, clean_db):
+        """A bot joining is not a human member; it must not create a row."""
+        from app.database.trust_operations import has_join_record
+        from src.app.handlers.status_handlers import handle_member_service_message
+
+        members = [User(id=880004, is_bot=True, first_name="Bot")]
+
+        self._sync_pool()
+        try:
+            with patch(
+                "src.app.handlers.status_handlers.bot.delete_message",
+                AsyncMock(return_value=True),
+            ):
+                await handle_member_service_message(self._message(members=members))
+
+            assert await has_join_record(DISCUSSION_ID, 880004) is False
+        finally:
+            self._clear_pool()
+
+    @pytest.mark.asyncio
+    async def test_store_failure_still_deletes(self, patched_db_conn, clean_db):
+        """A store outage must not stop the chat being cleaned."""
+        from src.app.handlers.status_handlers import handle_member_service_message
+
+        members = [User(id=880005, is_bot=False, first_name="D")]
+        delete = AsyncMock(return_value=True)
+
+        self._sync_pool()
+        try:
+            with (
+                patch(
+                    "src.app.handlers.status_handlers.record_join",
+                    AsyncMock(side_effect=RuntimeError("store down")),
+                ),
+                patch(
+                    "src.app.handlers.status_handlers.bot.delete_message", delete
+                ),
+            ):
+                result = await handle_member_service_message(self._message(members=members))
+
+            assert result == "service_message_deleted"
+            delete.assert_awaited_once()
+        finally:
+            self._clear_pool()
+
+
+class TestBotAddRemoveInstants:
+    """#108: the window is opened PER ADD, and a removal closes it."""
+
+    def _sync_pool(self):
+        import app.database.postgres_connection as app_pc
+        import src.app.database.postgres_connection as src_pc
+
+        src_pc._pool = app_pc._pool
+
+    def _clear_pool(self):
+        import src.app.database.postgres_connection as src_pc
+
+        src_pc._pool = None
+
+    @pytest.mark.asyncio
+    async def test_bot_added_stamps_the_instant(self, patched_db_conn, clean_db):
+        from app.database.trust_operations import get_group_bot_state
+        from src.app.handlers.status_handlers import _handle_bot_added
+
+        event = _real_event(from_id=HUMAN_ID, new_status="administrator")
+
+        self._sync_pool()
+        try:
+            with (
+                patch("src.app.handlers.status_handlers._send_promo_message", AsyncMock()),
+                patch("src.app.handlers.status_handlers._resolve_lang", AsyncMock(return_value="en")),
+                patch(
+                    "src.app.handlers.status_handlers.format_chat_or_channel_display",
+                    return_value="Discussion",
+                ),
+                patch("src.app.handlers.status_handlers.bot.send_message", AsyncMock()),
+            ):
+                await _handle_bot_added(
+                    event, DISCUSSION_ID, HUMAN_ID, "Discussion", "administrator"
+                )
+
+            state = await get_group_bot_state(DISCUSSION_ID)
+            assert state is not None
+            assert state["bot_added_at"] is not None
+            assert state["bot_removed_at"] is None
+        finally:
+            self._clear_pool()
+
+    @pytest.mark.asyncio
+    async def test_bot_removed_stamps_the_instant(self, patched_db_conn, clean_db):
+        from app.database.trust_operations import get_group_bot_state
+        from src.app.handlers.status_handlers import _handle_bot_removed
+
+        event = _real_event(from_id=HUMAN_ID, new_status="member")
+
+        self._sync_pool()
+        try:
+            # The group row must exist for the stamp to land, so create it and
+            # assert UNCONDITIONALLY — a conditional assertion here would pass
+            # even with the stamping removed entirely.
+            async with clean_db.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO groups (group_id, title) VALUES ($1, $2)",
+                    DISCUSSION_ID,
+                    "Discussion",
+                )
+            before = await get_group_bot_state(DISCUSSION_ID)
+            assert before is not None and before["bot_removed_at"] is None
+
+            with patch(
+                "src.app.handlers.status_handlers._notify_admins_about_removal",
+                AsyncMock(),
+            ):
+                await _handle_bot_removed(
+                    event, DISCUSSION_ID, HUMAN_ID, "Discussion", "left"
+                )
+
+            after = await get_group_bot_state(DISCUSSION_ID)
+            assert after is not None
+            assert after["bot_removed_at"] is not None
+        finally:
+            self._clear_pool()
+
+    @pytest.mark.asyncio
+    async def test_readd_clears_the_removal_stamp(self, patched_db_conn, clean_db):
+        """A re-add starts a fresh window: bot_removed_at must be cleared."""
+        from app.database.trust_operations import get_group_bot_state
+        from src.app.handlers.status_handlers import (
+            _handle_bot_added,
+            _handle_bot_removed,
+        )
+
+        self._sync_pool()
+        try:
+            async with clean_db.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO groups (group_id, title) VALUES ($1, $2)",
+                    DISCUSSION_ID,
+                    "Discussion",
+                )
+
+            with patch(
+                "src.app.handlers.status_handlers._notify_admins_about_removal",
+                AsyncMock(),
+            ):
+                await _handle_bot_removed(
+                    _real_event(from_id=HUMAN_ID, new_status="member"),
+                    DISCUSSION_ID,
+                    HUMAN_ID,
+                    "Discussion",
+                    "left",
+                )
+            assert (await get_group_bot_state(DISCUSSION_ID))["bot_removed_at"] is not None
+
+            with (
+                patch("src.app.handlers.status_handlers._send_promo_message", AsyncMock()),
+                patch("src.app.handlers.status_handlers._resolve_lang", AsyncMock(return_value="en")),
+                patch(
+                    "src.app.handlers.status_handlers.format_chat_or_channel_display",
+                    return_value="Discussion",
+                ),
+                patch("src.app.handlers.status_handlers.bot.send_message", AsyncMock()),
+            ):
+                await _handle_bot_added(
+                    _real_event(from_id=HUMAN_ID, new_status="administrator"),
+                    DISCUSSION_ID,
+                    HUMAN_ID,
+                    "Discussion",
+                    "administrator",
+                )
+
+            after = await get_group_bot_state(DISCUSSION_ID)
+            assert after["bot_removed_at"] is None
+            assert after["bot_added_at"] is not None
+        finally:
+            self._clear_pool()
