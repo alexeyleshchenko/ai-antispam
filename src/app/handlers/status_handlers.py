@@ -42,6 +42,7 @@ from ..database.group_operations import (
     set_no_rights_detected_at,
 )
 from ..database.trust_operations import (
+    JOIN_SOURCE_CHAT_MEMBER,
     JOIN_SOURCE_SERVICE_MESSAGE,
     record_bot_added,
     record_bot_removed,
@@ -829,3 +830,46 @@ async def _deactivate_admin_after_block(admin_id: int) -> None:
             exc,
             exc_info=True,
         )
+
+
+@dp.chat_member()
+async def handle_chat_member_update(event: types.ChatMemberUpdated) -> str:
+    """Persist a member join observed through a `chat_member` update (#108).
+
+    Two observers see joins and neither is sufficient alone. The service
+    message is what Telegram posts into the chat, and it carries
+    `new_chat_members` (plural) for a bulk add — but it is only sent when the
+    group allows it, and this handler deletes it moments later. `chat_member`
+    fires for every individual status change and cannot be lost to a privacy
+    setting, but reports one member at a time and only while the bot is an
+    administrator. Both write to the same first-wins store, so whichever
+    arrives first wins and the other is a no-op.
+
+    A transition INTO the group (`left`/`kicked` -> `member`/`administrator`/
+    `restricted`) is a join; anything else — a promotion, a mute, a leave — is
+    not. Never raises: a missed join only makes the pre-existing-trust
+    predicate MORE conservative, never less, so a store failure must not take
+    the update down with it.
+    """
+    try:
+        old_status = event.old_chat_member.status
+        new_status = event.new_chat_member.status
+        is_join = old_status in ("left", "kicked") and new_status in (
+            "member",
+            "administrator",
+            "restricted",
+        )
+        user = event.new_chat_member.user
+        if is_join and user is not None and not user.is_bot:
+            await record_join(event.chat.id, user.id, JOIN_SOURCE_CHAT_MEMBER)
+            logger.info(
+                f"Persisted join of member {user.id} in chat {event.chat.id} "
+                f"('{event.chat.title or ''}') via chat_member update"
+            )
+    except Exception:
+        logger.warning(
+            f"Failed to persist chat_member join in chat {event.chat.id} "
+            f"('{event.chat.title or ''}')",
+            exc_info=True,
+        )
+    return "chat_member_handled"

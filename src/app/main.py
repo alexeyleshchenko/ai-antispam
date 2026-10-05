@@ -20,7 +20,11 @@ from aiogram.dispatcher.event.bases import UNHANDLED
 from aiohttp import web
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError
 
-from .background_jobs import scheduled_jobs_loop, stale_pending_reaper_loop
+from .background_jobs import (
+    coverage_heartbeat_loop,
+    scheduled_jobs_loop,
+    stale_pending_reaper_loop,
+)
 from .bot_commands import setup_bot_commands
 from .common.bot import bot
 from .common.llm_budget import WEBHOOK_RESERVE_SECONDS, validate_llm_config
@@ -30,10 +34,11 @@ from .common.trace_context import set_root_span, set_webhook_deadline
 from .common.utils import get_dotted_path, get_webhook_timeout
 from .database.classification_verdicts import ensure_verdict_table
 from .database.postgres_connection import close_pool, get_pool
+from .database.trust_operations import ensure_trust_tables
 
 # Import all handlers to register them with the dispatcher
 from .handlers import *
-from .handlers.dp import dp
+from .handlers.dp import ALLOWED_UPDATES, dp
 from .handlers.message.verdict import (
     RESULT_VERDICT_FAILED,
     RESULT_VERDICT_PENDING,
@@ -330,6 +335,25 @@ async def _on_startup_ensure_verdict_table(app: web.Application) -> None:
         logger.exception("Verdict store setup failed; moderation continues without it")
         return
 
+async def _on_startup_ensure_trust_tables(app: web.Application) -> None:
+    """Create the trust store (tables, columns, index) if any of it is missing.
+
+    Never raises, for the same reason as the verdict store: a crash-looping
+    container is worse than a degraded store. The trust store fails CLOSED —
+    without it the pre-existing predicate reads nothing and grants nothing —
+    so a failed setup costs cold classifications, not an open door.
+    """
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await ensure_trust_tables(conn)
+        logger.info("Trust store ready")
+    except Exception:
+        logger.exception(
+            "Trust store setup failed; pre-existing trust stays closed"
+        )
+        return
+
 
 async def _on_startup_setup_bot(app: web.Application) -> None:
     """Register logging loop, bot command menus, and webhook."""
@@ -342,7 +366,7 @@ async def _on_startup_setup_bot(app: web.Application) -> None:
             logger.error(msg)
             raise ValueError(msg)
         logger.info(f"Setting webhook URL to: {webhook_url}")
-        await bot.set_webhook(webhook_url)
+        await bot.set_webhook(webhook_url, allowed_updates=ALLOWED_UPDATES)
         logger.info("Webhook setup completed successfully")
     except Exception as e:
         logger.error(f"Failed to set webhook: {e}")
@@ -351,6 +375,7 @@ async def _on_startup_setup_bot(app: web.Application) -> None:
 
 _scheduled_jobs_task: asyncio.Task | None = None
 _stale_pending_reaper_task: asyncio.Task | None = None
+_coverage_heartbeat_task: asyncio.Task | None = None
 
 
 async def _on_startup_scheduled_jobs(app: web.Application) -> None:
@@ -372,6 +397,19 @@ async def _on_startup_stale_pending_reaper(app: web.Application) -> None:
     global _stale_pending_reaper_task
     _stale_pending_reaper_task = asyncio.create_task(stale_pending_reaper_loop())
     logger.info("Stale pending reaper loop started")
+
+async def _on_startup_coverage_heartbeat(app: web.Application) -> None:
+    """Start the coverage heartbeat that attests join observation (#108).
+
+    Separate from the scheduled bundle because it runs on a minute-scale
+    cadence, not a daily one: its whole job is to be frequent enough that a
+    gap between beats means something. It beats before its first sleep, so the
+    boot instant — the one a restart is most likely to break continuity at —
+    is covered immediately.
+    """
+    global _coverage_heartbeat_task
+    _coverage_heartbeat_task = asyncio.create_task(coverage_heartbeat_loop())
+    logger.info("Coverage heartbeat loop started")
 
 
 async def _on_startup_seed_protected_channels(app: web.Application) -> None:
@@ -404,6 +442,11 @@ async def _shutdown(app: web.Application) -> None:
         with contextlib.suppress(asyncio.CancelledError):
             await _stale_pending_reaper_task
 
+    if _coverage_heartbeat_task and not _coverage_heartbeat_task.done():
+        _coverage_heartbeat_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await _coverage_heartbeat_task
+
     # Stop TelegramLogHandler before closing the bot session,
     # so that queued messages can still be sent before the connector is closed.
     if telegram_handler := get_telegram_handler():
@@ -431,9 +474,11 @@ async def _shutdown(app: web.Application) -> None:
 
 app.on_startup.append(_on_startup_validate_config)
 app.on_startup.append(_on_startup_ensure_verdict_table)
+app.on_startup.append(_on_startup_ensure_trust_tables)
 app.on_startup.append(_on_startup_setup_bot)
 app.on_startup.append(_on_startup_scheduled_jobs)
 app.on_startup.append(_on_startup_stale_pending_reaper)
+app.on_startup.append(_on_startup_coverage_heartbeat)
 app.on_startup.append(_on_startup_seed_protected_channels)
 app.on_startup.append(_on_startup_log_server_started)
 app.on_shutdown.append(_shutdown)
