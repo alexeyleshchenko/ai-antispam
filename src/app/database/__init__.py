@@ -8,3 +8,4 @@ from .message_operations import *
 from .models import *
 from .postgres_connection import *
 from .spam_examples import *
+from .trust_operations import *

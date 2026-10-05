@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from datetime import UTC, datetime
 from typing import cast
 
 from aiogram.exceptions import (
@@ -414,19 +415,42 @@ async def get_moderation_event_count(group_id: int, member_id: int) -> int | Non
 
 
 async def is_trusted_member(group_id: int, member_id: int) -> bool:
-    """True if member is approved and has completed probation."""
-    count = await get_moderation_event_count(group_id, member_id)
+    """True if member is approved, unexpired, and has completed probation.
+
+    `trusted_until` bounds a reversible grant (issue #108: `pre_existing`
+    trust expires at the window horizon). The comparison is done in Python,
+    not in SQL, so it reads the same on PostgreSQL and on the SQLite test
+    adapter. A grant whose expiry cannot be read is treated as EXPIRED —
+    fail closed, never trust on a value we could not parse.
+    """
+    from .trust_operations import _as_datetime, get_member_trust_row
+
+    row = await get_member_trust_row(group_id, member_id)
+    if row is None:
+        return False
+    trusted_until = row.get("trusted_until")
+    if trusted_until is not None:
+        parsed = _as_datetime(trusted_until)
+        if parsed is None or datetime.now(UTC) >= parsed:
+            return False
+    count = row.get("moderation_event_count")
     return False if count is None else count >= get_probation_min_events()
 
 
 async def increment_moderation_events(group_id: int, member_id: int) -> None:
-    """Increment moderation event counter for an approved member."""
+    """Increment moderation event counter for an approved member.
+
+    A moderated event is real evidence, so it supersedes an inferred grant:
+    the row becomes `probation` and any `trusted_until` expiry is cleared.
+    """
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
             UPDATE approved_members
-            SET moderation_event_count = moderation_event_count + 1
+            SET moderation_event_count = moderation_event_count + 1,
+                trust_source = 'probation',
+                trusted_until = NULL
             WHERE group_id = $1 AND member_id = $2
             """,
             group_id,
@@ -440,10 +464,14 @@ async def set_moderation_events(group_id: int, member_id: int, count: int) -> No
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO approved_members (group_id, member_id, moderation_event_count)
-            VALUES ($1, $2, $3)
+            INSERT INTO approved_members (
+                group_id, member_id, moderation_event_count, trust_source
+            )
+            VALUES ($1, $2, $3, 'admin')
             ON CONFLICT (group_id, member_id) DO UPDATE
-            SET moderation_event_count = EXCLUDED.moderation_event_count
+            SET moderation_event_count = EXCLUDED.moderation_event_count,
+                trust_source = 'admin',
+                trusted_until = NULL
             """,
             group_id,
             member_id,
@@ -474,8 +502,10 @@ async def add_member(group_id: int, member_id: int) -> bool:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO approved_members (group_id, member_id, moderation_event_count)
-            VALUES ($1, $2, 1)
+            INSERT INTO approved_members (
+                group_id, member_id, moderation_event_count, trust_source
+            )
+            VALUES ($1, $2, 1, 'probation')
             ON CONFLICT DO NOTHING
             RETURNING member_id
         """,

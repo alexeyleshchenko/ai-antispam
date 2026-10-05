@@ -81,7 +81,9 @@ async def create_schema(conn: asyncpg.Connection):
                 linked_channel_id BIGINT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 last_active TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                no_rights_detected_at TIMESTAMPTZ
+                no_rights_detected_at TIMESTAMPTZ,
+                bot_added_at TIMESTAMPTZ,
+                bot_removed_at TIMESTAMPTZ
             );
 
             -- Entity lifecycle events (append-only audit log, deletion-policy E+C)
@@ -108,6 +110,8 @@ async def create_schema(conn: asyncpg.Connection):
                 member_id BIGINT NOT NULL,
                 approved_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 moderation_event_count INT NOT NULL DEFAULT 0,
+                trust_source TEXT,
+                trusted_until TIMESTAMPTZ,
                 PRIMARY KEY (group_id, member_id)
             );
 
@@ -178,6 +182,26 @@ async def create_schema(conn: asyncpg.Connection):
                 moderated_at TIMESTAMPTZ,
                 UNIQUE(chat_id, message_id)
             );
+
+            -- Member joins observed while the bot was watching (issue #108).
+            -- A join is the ONE thing that disproves "was already here", so it
+            -- is written before the service message is deleted.
+            CREATE TABLE IF NOT EXISTS member_joins (
+                group_id BIGINT NOT NULL,
+                member_id BIGINT NOT NULL,
+                joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                source TEXT NOT NULL DEFAULT 'service_message',
+                PRIMARY KEY (group_id, member_id)
+            );
+
+            -- Single-row coverage heartbeat (issue #108). `continuous_since`
+            -- is the instant from which join observation has been unbroken; a
+            -- beat past the gap threshold resets it to itself.
+            CREATE TABLE IF NOT EXISTS coverage_state (
+                id INTEGER PRIMARY KEY DEFAULT 1,
+                last_beat_at TIMESTAMPTZ NOT NULL,
+                continuous_since TIMESTAMPTZ NOT NULL
+            );
         """
         )
     except Exception as e:
@@ -194,6 +218,10 @@ async def create_schema(conn: asyncpg.Connection):
             -- Classification verdicts indexes
             CREATE INDEX IF NOT EXISTS idx_classification_verdicts_created
                 ON classification_verdicts(created_at);
+
+            -- Member joins index (issue #108)
+            CREATE INDEX IF NOT EXISTS idx_member_joins_joined_at
+                ON member_joins(joined_at);
 
             -- Groups indexes
             CREATE INDEX IF NOT EXISTS idx_groups_moderation ON groups(moderation_enabled);
@@ -249,6 +277,20 @@ async def create_schema(conn: asyncpg.Connection):
         # Lifecycle status (deletion-policy E+C: soft state replaces hard delete)
         await conn.execute(
             "ALTER TABLE groups ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'active'"
+        )
+        # Pre-existing-member trust (issue #108): the bot add instant, and the
+        # trust provenance/expiry on the member row.
+        await conn.execute(
+            "ALTER TABLE groups ADD COLUMN IF NOT EXISTS bot_added_at TIMESTAMPTZ"
+        )
+        await conn.execute(
+            "ALTER TABLE groups ADD COLUMN IF NOT EXISTS bot_removed_at TIMESTAMPTZ"
+        )
+        await conn.execute(
+            "ALTER TABLE approved_members ADD COLUMN IF NOT EXISTS trust_source TEXT"
+        )
+        await conn.execute(
+            "ALTER TABLE approved_members ADD COLUMN IF NOT EXISTS trusted_until TIMESTAMPTZ"
         )
     except Exception as e:
         raise RuntimeError(f"Failed to run migrations: {e}") from e

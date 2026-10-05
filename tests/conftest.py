@@ -375,7 +375,9 @@ async def create_sqlite_schema(conn):
             topic_updated_at TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            no_rights_detected_at TIMESTAMP
+            no_rights_detected_at TIMESTAMP,
+            bot_added_at TIMESTAMP,
+            bot_removed_at TIMESTAMP
         );
     """)
 
@@ -395,6 +397,8 @@ async def create_sqlite_schema(conn):
             member_id INTEGER,
             approved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             moderation_event_count INTEGER NOT NULL DEFAULT 0,
+            trust_source TEXT,
+            trusted_until TIMESTAMP,
             PRIMARY KEY (group_id, member_id),
             FOREIGN KEY (group_id) REFERENCES groups(group_id)
         );
@@ -496,6 +500,29 @@ async def create_sqlite_schema(conn):
         );
     """)
 
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS member_joins (
+            group_id INTEGER NOT NULL,
+            member_id INTEGER NOT NULL,
+            joined_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            source TEXT NOT NULL DEFAULT 'service_message',
+            PRIMARY KEY (group_id, member_id)
+        );
+    """)
+
+    await conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_member_joins_joined_at
+        ON member_joins(joined_at);
+    """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS coverage_state (
+            id INTEGER PRIMARY KEY DEFAULT 1,
+            last_beat_at TIMESTAMP NOT NULL,
+            continuous_since TIMESTAMP NOT NULL
+        );
+    """)
+
 
 async def truncate_sqlite_tables(conn):
     """Truncate all tables in SQLite"""
@@ -514,6 +541,8 @@ async def truncate_sqlite_tables(conn):
         "groups",
         "administrators",
         "entity_events",
+        "member_joins",
+        "coverage_state",
     ]
 
     for table in tables:
