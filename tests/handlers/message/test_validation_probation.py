@@ -29,7 +29,12 @@ async def test_probation_member_not_skipped():
             return_value=(mock_group, ""),
         ),
         patch(
-            "src.app.handlers.message.validation.is_trusted_member",
+            "src.app.handlers.message.validation.get_trusted_member_row",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "src.app.handlers.message.validation.is_pre_existing_candidate",
             new_callable=AsyncMock,
             return_value=False,
         ),
@@ -56,9 +61,13 @@ async def test_trusted_member_skipped():
             return_value=(mock_group, ""),
         ),
         patch(
-            "src.app.handlers.message.validation.is_trusted_member",
+            "src.app.handlers.message.validation.get_trusted_member_row",
             new_callable=AsyncMock,
-            return_value=True,
+            return_value={
+                "moderation_event_count": 3,
+                "trust_source": "probation",
+                "trusted_until": None,
+            },
         ),
     ):
         _, reason = await validate_group_and_check_early_exits(group_id, user_id)

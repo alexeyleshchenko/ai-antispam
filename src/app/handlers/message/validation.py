@@ -7,8 +7,13 @@ from aiogram import types
 from ...common.bot import bot
 from ...common.utils import format_chat_log
 from ...database import get_group
-from ...database.group_operations import is_trusted_member
+from ...database.group_operations import get_trusted_member_row
 from ...database.models import Group
+from ...database.trust_operations import (
+    TRUST_SOURCE_PRE_EXISTING,
+    grant_pre_existing_trust,
+    is_pre_existing_candidate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +23,11 @@ _moderation_state_cache = {}
 
 
 async def validate_group_and_check_early_exits(
-    chat_id: int, user_id: int, title: str | None = None, username: str | None = None
+    chat_id: int,
+    user_id: int,
+    title: str | None = None,
+    username: str | None = None,
+    source: str = "new",
 ) -> tuple[Group | None, str]:
     """
     Validate group exists and check for early exit conditions.
@@ -32,6 +41,8 @@ async def validate_group_and_check_early_exits(
         user_id: The user ID to check
         title: Optional group title for log enrichment (no re-fetch)
         username: Optional group username for log enrichment (no re-fetch)
+        source: ``"new"`` for a fresh message, ``"edit"`` for an edited one.
+            Gates the pre-existing grant (#108) and the R5 edit carve-out.
 
     Returns:
         Tuple of (group, exit_reason). If exit_reason is non-empty, processing
@@ -50,7 +61,31 @@ async def validate_group_and_check_early_exits(
         return group, "message_from_admin_skipped"
 
     # Trusted members (probation complete) skip full pipeline
-    if await is_trusted_member(chat_id, user_id):
+    trust_row = await get_trusted_member_row(chat_id, user_id)
+    if trust_row is not None:
+        # R5 (#108): `pre_existing` trust is inferred from a join event we
+        # never saw, so an EDIT by such a sender gets a fresh classification
+        # instead of a free pass. `probation`/`admin` trust is untouched —
+        # those members earned their skip from observed moderation events.
+        if (
+            source == "edit"
+            and trust_row.get("trust_source") == TRUST_SOURCE_PRE_EXISTING
+        ):
+            return group, ""
+        return group, "message_trusted_member_skipped"
+
+    # Pre-existing members (#108): someone already in the group when the bot
+    # arrived produced no join event, so a negative inference is the only way
+    # to see them at all. It is sound only while every fail-closed leg holds
+    # (bot present and not removed, inside the window after the add, coverage
+    # unbroken since before it, no join row, no prior moderation row) —
+    # `is_pre_existing_candidate` reads all five and answers False otherwise.
+    # Only on the "new" path: an edit is a second look at a message we may
+    # already have decided, and must not mint trust from a re-delivery.
+    if source == "new" and await is_pre_existing_candidate(chat_id, user_id):
+        # Persist the grant so the decision is auditable, and so it EXPIRES
+        # (`trusted_until`) rather than becoming permanent trust by accident.
+        await grant_pre_existing_trust(chat_id, user_id)
         return group, "message_trusted_member_skipped"
 
     return group, ""

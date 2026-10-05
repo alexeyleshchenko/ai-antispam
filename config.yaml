@@ -113,6 +113,14 @@ spam:
   topic_max_message_chars: 500    # Per-message truncation (head kept)
   topic_max_total_chars: 16000    # Total corpus budget ~= 4K tokens (fits any model)
   notify_spammers_via_mcp: false  # Enable MTProto promo DMs to blocked spammers/channel admins
+  # Pre-existing-member trust (#108). A member who was already in the group
+  # when the bot arrived produced no join event, so trust is inferred — and
+  # only inside this window after groups.bot_added_at, only while join
+  # observation has been continuous (coverage_* below), and it EXPIRES at the
+  # same horizon (approved_members.trusted_until).
+  pre_existing_trust_window_hours: 72
+  coverage_beat_seconds: 60   # Coverage heartbeat cadence
+  coverage_gap_seconds: 300   # A longer gap between beats breaks continuity -> trust stays closed
 
 system:
   admin_chat_id: 133526395  # ID администратора для уведомлений

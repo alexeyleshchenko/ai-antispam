@@ -151,6 +151,7 @@ async def handle_moderated_message(
         user_id,
         getattr(message.chat, "title", None),
         getattr(message.chat, "username", None),
+        source,
     )
     if exit_reason or group is None:
         if exit_reason == "message_trusted_member_skipped":

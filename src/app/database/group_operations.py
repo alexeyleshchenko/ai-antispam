@@ -414,8 +414,13 @@ async def get_moderation_event_count(group_id: int, member_id: int) -> int | Non
         )
 
 
-async def is_trusted_member(group_id: int, member_id: int) -> bool:
-    """True if member is approved, unexpired, and has completed probation.
+async def get_trusted_member_row(group_id: int, member_id: int) -> dict | None:
+    """The member's trust row when it grants trust, else None.
+
+    The same predicate `is_trusted_member` applies, but it returns the row so
+    a caller can also read `trust_source`. Issue #108 R5 needs that: an edit
+    by a `pre_existing` sender is re-classified, so the caller has to know
+    WHERE the trust came from, not merely that it exists.
 
     `trusted_until` bounds a reversible grant (issue #108: `pre_existing`
     trust expires at the window horizon). The comparison is done in Python,
@@ -427,14 +432,21 @@ async def is_trusted_member(group_id: int, member_id: int) -> bool:
 
     row = await get_member_trust_row(group_id, member_id)
     if row is None:
-        return False
+        return None
     trusted_until = row.get("trusted_until")
     if trusted_until is not None:
         parsed = _as_datetime(trusted_until)
         if parsed is None or datetime.now(UTC) >= parsed:
-            return False
+            return None
     count = row.get("moderation_event_count")
-    return False if count is None else count >= get_probation_min_events()
+    if count is None or count < get_probation_min_events():
+        return None
+    return row
+
+
+async def is_trusted_member(group_id: int, member_id: int) -> bool:
+    """True if member is approved, unexpired, and has completed probation."""
+    return await get_trusted_member_row(group_id, member_id) is not None
 
 
 async def increment_moderation_events(group_id: int, member_id: int) -> None:
