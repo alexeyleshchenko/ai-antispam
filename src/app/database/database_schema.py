@@ -278,20 +278,13 @@ async def create_schema(conn: asyncpg.Connection):
         await conn.execute(
             "ALTER TABLE groups ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'active'"
         )
-        # Pre-existing-member trust (issue #108): the bot add instant, and the
-        # trust provenance/expiry on the member row.
-        await conn.execute(
-            "ALTER TABLE groups ADD COLUMN IF NOT EXISTS bot_added_at TIMESTAMPTZ"
-        )
-        await conn.execute(
-            "ALTER TABLE groups ADD COLUMN IF NOT EXISTS bot_removed_at TIMESTAMPTZ"
-        )
-        await conn.execute(
-            "ALTER TABLE approved_members ADD COLUMN IF NOT EXISTS trust_source TEXT"
-        )
-        await conn.execute(
-            "ALTER TABLE approved_members ADD COLUMN IF NOT EXISTS trusted_until TIMESTAMPTZ"
-        )
+        # Pre-existing-member trust (issue #108): the bot add/remove instants on
+        # the group row, and trust provenance/expiry on the member row. One
+        # definition, shared with the boot hook — a deployed DB that predates
+        # these columns is upgraded by the same statements.
+        from .trust_operations import ensure_trust_tables
+
+        await ensure_trust_tables(conn)
     except Exception as e:
         raise RuntimeError(f"Failed to run migrations: {e}") from e
 
