@@ -213,6 +213,8 @@ def get_known_tags() -> List[str]:
         # Spam handling tags
         "spam_no_user_info",
         "spam_auto_deleted",
+        "spam_delete_failed",
+        "spam_delete_expired",
         # Help tags
         "help_back_shown",
     ]

@@ -696,3 +696,115 @@ class TestCheckAdminDeletePreferencesLogging:
                 "opted out" in rec.message.lower() or "auto" in rec.message.lower()
                 for rec in caplog.records
             )
+
+class TestSpamDeleteOutcome:
+    """#48: the deletion outcome must be observable by the caller.
+
+    ``@telegram_action`` swallows the Telegram exception, so a refused delete
+    was indistinguishable from a successful one. The function now returns True
+    only when the message is gone.
+    """
+
+    @pytest.mark.asyncio
+    async def test_successful_delete_returns_true(self, mock_message):
+        with patch("src.app.handlers.handle_spam.bot") as mock_bot:
+            mock_bot.delete_message = AsyncMock()
+
+            assert (
+                await handle_spam_message_deletion(mock_message, [123456789])
+                is True
+            )
+
+    @pytest.mark.asyncio
+    async def test_refused_delete_returns_false(self, mock_message):
+        """Telegram refusing the delete (>48h / no rights) must read as False."""
+        with (
+            patch("src.app.handlers.handle_spam.bot") as mock_bot,
+            patch(
+                "src.app.handlers.handle_spam._get_notification_lang",
+                new_callable=AsyncMock,
+                return_value="en",
+            ),
+            patch(
+                "src.app.handlers.handle_spam.handle_permission_error",
+                new_callable=AsyncMock,
+            ),
+        ):
+            mock_bot.delete_message = AsyncMock(
+                side_effect=MockTelegramBadRequest("message can't be deleted")
+            )
+
+            assert (
+                await handle_spam_message_deletion(mock_message, [123456789])
+                is False
+            )
+
+    @pytest.mark.asyncio
+    async def test_already_deleted_returns_true(self, mock_message):
+        """Already gone satisfies the goal state — no credit is owed back."""
+        with patch("src.app.handlers.handle_spam.bot") as mock_bot:
+            mock_bot.delete_message = AsyncMock(
+                side_effect=MockTelegramBadRequest("message to delete not found")
+            )
+
+            assert (
+                await handle_spam_message_deletion(mock_message, [123456789])
+                is True
+            )
+
+class TestHandleSpamDeleteVerdict:
+    """#48: handle_spam must not report spam_auto_deleted when the delete failed."""
+
+    @pytest.mark.asyncio
+    async def test_refused_delete_yields_spam_delete_failed(self, mock_message):
+        with (
+            patch(
+                "src.app.handlers.handle_spam.check_admin_delete_preferences",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "src.app.handlers.handle_spam.notify_admins",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "src.app.handlers.handle_spam.handle_spam_message_deletion",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "src.app.handlers.handle_spam.ban_user_for_spam",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await handle_spam(mock_message, [123], reason="test")
+
+            assert result == "spam_delete_failed"
+
+    @pytest.mark.asyncio
+    async def test_successful_delete_yields_spam_auto_deleted(self, mock_message):
+        with (
+            patch(
+                "src.app.handlers.handle_spam.check_admin_delete_preferences",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "src.app.handlers.handle_spam.notify_admins",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "src.app.handlers.handle_spam.handle_spam_message_deletion",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "src.app.handlers.handle_spam.ban_user_for_spam",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await handle_spam(mock_message, [123], reason="test")
+
+            assert result == "spam_auto_deleted"

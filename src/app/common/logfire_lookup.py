@@ -59,7 +59,12 @@ async def get_weekly_stats(chat_ids: Sequence[int]) -> dict[int, dict[str, int]]
     chat_ids_str = ", ".join(f"'{chat_id}'" for chat_id in chat_ids)
 
     # Tags indicating different outcomes
-    spam_tags = {"spam_auto_deleted", "spam_admins_notified"}
+    spam_tags = {
+        "spam_auto_deleted",
+        "spam_admins_notified",
+        "spam_delete_failed",
+        "spam_delete_expired",
+    }
     processed_tags = {
         "message_user_approved",
         "message_trusted_member_skipped",

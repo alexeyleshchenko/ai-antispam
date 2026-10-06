@@ -187,6 +187,45 @@ async def deduct_credits_from_admins(group_id: int, amount: int) -> int:
         return admin_row["admin_id"]
 
 
+async def refund_credits(admin_id: int, amount: int) -> None:
+    """Return credits to an admin when a charged action did not happen (#48).
+
+    The mirror of ``deduct_credits_from_admins``: same table, same transaction
+    record, opposite direction. Clearing ``credits_depleted_at`` matters — a
+    refund restores a balance the depletion clock had already marked, and
+    leaving the stamp in place would keep the admin on the deactivation path
+    for a debt that was just repaid.
+
+    Args:
+        admin_id: The admin whose balance was charged.
+        amount: Credits to return. Non-positive values are a no-op.
+    """
+    if amount <= 0:
+        return
+
+    pool = await get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            """
+                UPDATE administrators
+                SET credits = credits + $1, last_active = NOW(),
+                    credits_depleted_at = NULL
+                WHERE admin_id = $2
+            """,
+            amount,
+            admin_id,
+        )
+
+        await conn.execute(
+            """
+                INSERT INTO transactions (admin_id, amount, type, description)
+                VALUES ($1, $2, 'refund', 'Refund: charged action did not complete')
+            """,
+            admin_id,
+            amount,
+        )
+
+
 async def cleanup_group_data(
     group_id: int,
     status: GroupStatus | str = GroupStatus.LEFT,

@@ -11,6 +11,7 @@
 import asyncio
 import logging
 from collections.abc import Sequence
+from typing import Literal
 
 import logfire
 from aiogram.types import ChatMember, ChatMemberAdministrator, ChatMemberOwner
@@ -28,7 +29,9 @@ from ..i18n import normalize_lang, t
 logger = logging.getLogger(__name__)
 
 
-async def try_deduct_credits(chat_id: int, amount: int, reason: str) -> bool:
+async def try_deduct_credits(
+    chat_id: int, amount: int, reason: str
+) -> int | Literal[False]:
     """
     Попытка списать звезды у админов. При неудаче отключает модерацию.
 
@@ -38,10 +41,14 @@ async def try_deduct_credits(chat_id: int, amount: int, reason: str) -> bool:
         reason: Причина списания
 
     Returns:
-        bool: True если списание успешно, False иначе
+        int | False: the paying admin_id when the deduction succeeded — the
+        caller needs it to refund the charge if the action it paid for then
+        fails (#48) — or False when it did not. Both are truthy-compatible with
+        the previous bool contract, so ``if await try_deduct_credits(...)``
+        keeps working; ``amount == 0`` costs nothing and returns 0.
     """
     if amount == 0:
-        return True
+        return 0
 
     admin_id = await deduct_credits_from_admins(chat_id, amount)
 
@@ -60,7 +67,7 @@ async def try_deduct_credits(chat_id: int, amount: int, reason: str) -> bool:
         return False
 
     logger.debug(f"Deducted {amount}★ from {admin_id} in {format_chat_log(chat_id)}")
-    return True
+    return admin_id
 
 
 @logfire.instrument(extract_args=True, record_return=True)

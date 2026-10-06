@@ -202,6 +202,11 @@ async def handle_spam(
         for r in results:
             if isinstance(r, Exception):
                 logger.warning("auto-delete+ban partial failure: %s", r)
+        if results[0] is not True:
+            # Telegram refused the deletion (permission error, group gone, or
+            # any other failure): never report a deletion that did not happen.
+            # The caller reads this to skip charging the delete credit (#48).
+            return "spam_delete_failed"
         return "spam_auto_deleted"
 
     return "spam_admins_notified" if notification_sent else "spam_notification_failed"
@@ -541,10 +546,21 @@ async def notify_admins(
 
 async def handle_spam_message_deletion(
     message: types.Message, admin_ids: list[int]
-) -> None:
-    """Delete the spam message; notify admins on permission failure."""
+) -> bool:
+    """Delete the spam message; notify admins on permission failure.
+
+    Returns True when the message is gone — deleted now, or already absent
+    before this call — and False when the deletion did not happen (Telegram
+    refused it, the group is inaccessible, or no attempt was possible).
+
+    The ``@telegram_action`` decorator swallows every exception, so the caller
+    cannot observe a refusal from the inner call's return: the outcome is
+    recorded here in a flag and returned (#48).
+    """
     if not message.from_user:
-        return
+        return False
+
+    deleted = False
 
     async def _notify_permission_error(_e: Exception) -> None:
         lang = await _get_notification_lang(admin_ids)
@@ -560,15 +576,26 @@ async def handle_spam_message_deletion(
             lang=lang,
         )
 
+    def _note_already_absent(e: Exception) -> bool:
+        """A message that is already gone satisfies the goal state."""
+        nonlocal deleted
+        if is_message_not_found_error(e):
+            deleted = True
+            return True
+        return False
+
     @telegram_action(
         "delete spam message",
-        extra_checks=(is_message_not_found_error,),
+        extra_checks=(_note_already_absent,),
         on_permission_error=_notify_permission_error,
     )
     async def _delete() -> None:
+        nonlocal deleted
         await bot.delete_message(message.chat.id, message.message_id)
+        deleted = True
 
     await _delete()
+    return deleted
 
 
 async def ban_user_for_spam(

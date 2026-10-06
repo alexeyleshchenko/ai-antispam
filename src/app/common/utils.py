@@ -2,6 +2,7 @@ import html
 import logging
 import os
 import re
+from datetime import UTC, datetime, timedelta
 from functools import cache
 from typing import Any
 
@@ -254,6 +255,32 @@ def determine_effective_user_id(message: types.Message) -> int | None:
     elif message.from_user:
         return message.from_user.id
     return None
+
+# Telegram's Bot API allows deleting messages within 48 hours of sending;
+# anything older is refused with "message can't be deleted".
+TELEGRAM_DELETE_WINDOW = timedelta(hours=48)
+
+
+def is_delete_expired(
+    message: types.Message, *, now: datetime | None = None
+) -> bool:
+    """True when Telegram will refuse to delete this message (>48h old).
+
+    Charging a delete credit for such a message bills an action that cannot
+    happen, and the delete handler would report a failure the admins cannot act
+    on (#48). Callers use this to skip both the delete and the charge, and to
+    notify admins for manual handling instead.
+
+    A message with no usable ``date`` is treated as deletable: absence of the
+    field is not evidence of age, and the delete path's own outcome check still
+    guards the charge.
+    """
+    sent = getattr(message, "date", None)
+    if not isinstance(sent, datetime):
+        return False
+    if sent.tzinfo is None:
+        sent = sent.replace(tzinfo=UTC)
+    return (now or datetime.now(UTC)) - sent > TELEGRAM_DELETE_WINDOW
 
 
 def format_chat_or_channel_display(

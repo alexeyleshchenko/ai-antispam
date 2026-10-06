@@ -6,13 +6,18 @@ from typing import Any
 from aiogram import types
 
 from ...common.trace_context import get_root_span
-from ...common.utils import determine_effective_user_id, load_config
+from ...common.utils import (
+    determine_effective_user_id,
+    is_delete_expired,
+    load_config,
+)
 from ...database import (
     APPROVE_PRICE,
     DELETE_PRICE,
     add_member,
     increment_moderation_events,
     is_member_in_group,
+    refund_credits,
     save_message_lookup_entry,
 )
 from ...spam.account_signals import build_account_signals_body
@@ -243,7 +248,22 @@ async def process_spam_or_approve(
 
     if is_spam:
         skip_auto_delete = confidence < threshold
-        if await try_deduct_credits(chat_id, DELETE_PRICE, "delete spam"):
+        if not skip_auto_delete and is_delete_expired(message):
+            # Telegram refuses to delete messages older than 48h. Notify the
+            # admins for manual handling and report the true state — never
+            # charge a delete credit for an action that cannot happen (#48).
+            await handle_spam(
+                message,
+                admin_ids,
+                reason,
+                message_context_result,
+                skip_auto_delete=True,
+            )
+            return "spam_delete_expired", False
+        paying_admin_id = await try_deduct_credits(
+            chat_id, DELETE_PRICE, "delete spam"
+        )
+        if paying_admin_id:
             result = await handle_spam(
                 message,
                 admin_ids,
@@ -251,6 +271,10 @@ async def process_spam_or_approve(
                 message_context_result,
                 skip_auto_delete=skip_auto_delete,
             )
+            if result == "spam_delete_failed":
+                # The delete was charged but Telegram refused it (no rights,
+                # group gone): return the credit instead of billing for nothing.
+                await refund_credits(paying_admin_id, DELETE_PRICE)
             return result, False
 
     elif confidence < threshold:

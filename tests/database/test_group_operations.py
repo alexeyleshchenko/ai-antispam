@@ -20,6 +20,7 @@ from app.database import (
     is_member_in_group,
     is_moderation_enabled,
     is_trusted_member,
+    refund_credits,
     remove_member_from_group,
     set_group_moderation,
     set_moderation_events,
@@ -809,3 +810,64 @@ async def test_heal_bare_group_rows_skips_no_title_chats(patched_db_conn, clean_
         summary = await heal_bare_group_rows(concurrency=2, limit=100)
 
     assert summary == {"healed": 0, "skipped": 1, "total": 1}
+
+@pytest.mark.asyncio
+async def test_refund_credits_restores_balance_and_clears_depletion(
+    patched_db_conn, clean_db
+):
+    """#48: a refund returns the credit and clears credits_depleted_at.
+
+    The depletion stamp matters: a refunded admin must not stay on the
+    deactivation path for a debt that was just repaid.
+    """
+    admin_id = 424242
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO administrators
+                (admin_id, username, credits, credits_depleted_at)
+            VALUES ($1, 'refunded', 0, NOW())
+            """,
+            admin_id,
+        )
+
+    await refund_credits(admin_id, 1)
+
+    async with clean_db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT credits, credits_depleted_at FROM administrators WHERE admin_id = $1",
+            admin_id,
+        )
+        assert row["credits"] == 1
+        assert row["credits_depleted_at"] is None
+
+        txn = await conn.fetchrow(
+            "SELECT amount, type FROM transactions WHERE admin_id = $1 ORDER BY id DESC LIMIT 1",
+            admin_id,
+        )
+        assert txn["amount"] == 1
+        assert txn["type"] == "refund"
+
+@pytest.mark.asyncio
+async def test_refund_credits_non_positive_amount_is_a_noop(
+    patched_db_conn, clean_db
+):
+    """A zero/negative refund must not touch the balance."""
+    admin_id = 424243
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO administrators (admin_id, username, credits) VALUES ($1, 'x', 5)",
+            admin_id,
+        )
+
+    await refund_credits(admin_id, 0)
+
+    async with clean_db.acquire() as conn:
+        credits = await conn.fetchval(
+            "SELECT credits FROM administrators WHERE admin_id = $1", admin_id
+        )
+        assert credits == 5
+        txn_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM transactions WHERE admin_id = $1", admin_id
+        )
+        assert txn_count == 0
