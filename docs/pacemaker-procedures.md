@@ -6,7 +6,7 @@ Landed 2026-10-04 (board #76, meta-factory #118 shape (b)): 13 rows that carried
 
 Lane session ids — Outreach `acc3fa9b-cefa-4e35-bf87-422696e558f0` · Bot `6d921dca-fb0a-455b-bceb-dfb78dcf1f07` · HQ `cb06a94a-be02-4e8c-b6c6-c8c9f09922f4` · Triage `6ca0d547-4a72-4c29-ac10-967daa98af0a`.
 
-**Board migration 2026-10-04:** the service board moved from `alexeyleshchenko/ai-antispam` to `leshchenko1979/ai-antispam` (owner order; Open Questions q16 = option B, "renumber everything"). All 62 items were recreated on the canonical repo and RENUMBERED — the old→new map is `docs/board-migration/number-map.json`. Where a gate below names its OLD board number in prose (`#43`, `#52`, kept as the gate's stable identity), the live issue number is the one given beside it. The third close-gate, `ai-antispam-62-close-gate` (cron `f7d756b6-cead-412f-9291-3585ec218d13`), has no section here: it was RETIRED 2026-10-02 (ruling q13, ledger n=152 — its subject closed on mechanism evidence as canonical `#95`, board #62 pre-migration) and its cron was DELETED 2026-10-04, because its `trigger_cmd` still named the retired `alexeyleshchenko` account and a disabled cron carrying a dead-account literal is exactly the silently-stale class this file exists to prevent.
+**Board migration 2026-10-04:** the service board moved from `alexeyleshchenko/ai-antispam` to `leshchenko1979/ai-antispam` (owner order; Open Questions q16 = option B, "renumber everything"). All 62 items were recreated on the canonical repo and RENUMBERED — the old→new map is `docs/board-migration/number-map.json`. Where a gate below names its OLD board number in prose (`#43`, `#52`, kept as the gate's stable identity), the live issue number is the one given beside it. The third close-gate, `ai-antispam-62-close-gate` (cron `f7d756b6-cead-412f-9291-3585ec218d13`), has no section here: it was RETIRED 2026-10-02 (ruling q13, ledger n=152 — its subject closed on mechanism evidence as canonical `#95`, board #62 pre-migration) and its cron was DELETED 2026-10-04, because its `trigger_cmd` still named the retired `alexeyleshchenko` account and a disabled cron carrying a dead-account literal is exactly the silently-stale class this file exists to prevent. The two remaining close-gates were RETIRED 2026-10-09 (board #115): `ai-antispam-43-close-gate` (subject canonical `#76`, closed 2026-10-09T12:08:58Z) and `ai-antispam-52-close-gate` (subject canonical `#85`, closed 2026-10-04T20:50:19Z) — each `trigger_cmd` fired only while its subject issue was `OPEN`, so both went permanently silent while every run still read `status=success`; both crons were DELETED and their sections removed.
 
 ---
 
@@ -55,34 +55,6 @@ CT=$(ssh apps "docker ps --filter name=ai-antispam --format '{{.Names}}' | head 
 ```
 
 Report it verbatim. Field guide: `all= / decided / failed` are durable (every `classification_verdicts` row ever written); `pre-pool n= / failed=` is the baseline the current pool must beat; `post-pool n= / failed=` is the candidate window; `span` is the window's first/last timestamps; `container=` is resolved DYNAMICALLY by name filter (a deploy can leave it hash-prefixed, e.g. 0cf2fa311a3c_ai-antispam); `gateway_fallbacks` is since CONTAINER START ONLY — the container log dies on every recreate, so it is never a durable count. Pool-swap boundary 2026-09-25T16:17:46Z; the pool is dots-studio/dots-3-note-preview:free (accuracy lead) + liquid/lfm-2.5-2.6b:free (availability net). Never read a post-pool zero as proof until n ≥ 29 (the 95% upper bound 3/n first falls below a 10.39% baseline at n=29). Aggregates cannot prove a specific rescue — that needs the per-message log join. Reason language is a live acceptance axis: the fallback model must write `reason` in Russian; a CJK `reason` is the defect the owner banned ling for — report it.
-
-**43-close-gate** (daily 12:05 UTC) — the cron `trigger_cmd` is kept as a FIRE GATE only (a date guard AND the item — board #43 pre-migration, now `leshchenko1979/ai-antispam#76` — still open). The close window anchors at the **live deploy 2026-10-03T00:44:25Z** (image built 2026-10-03T00:43:44Z; container `ai-antispam-ai-antispam-1`), NOT the fix deploy 2026-09-24T11:33:19Z — HQ ruling on #43, `7a7ab39` rev.2. The ≥72 h window cannot complete before **~2026-10-06T00:44:25Z**, so the gate can fire while the window is still open: when it does, state the window's age and do NOT close. When woken, run all three instruments and reproduce their output verbatim:
-
-1. The fire gate — the cron `trigger_cmd` above, kept only to decide whether to wake. It is NOT the durable instrument:
-
-```bash
-[ "$(date -u +%Y%m%d)" -ge 20260927 ] && /usr/local/bin/gh issue view 76 --repo leshchenko1979/ai-antispam --json state 2>/dev/null | grep -q OPEN && echo GATE-DUE
-```
-
-2. The durable instrument — `classification_verdicts` survives container recreates; the container log does NOT. Read the store on the apps host:
-
-```bash
-ssh apps "docker exec postgres psql -U postgres -d ai_spam_bot -At -c \"SELECT 'all='||count(*)||' decided='||count(*) FILTER (WHERE status='decided')||' failed='||count(*) FILTER (WHERE status='failed')||' | since-live-deploy n='||count(*) FILTER (WHERE created_at >= TIMESTAMPTZ '2026-10-03T00:44:25Z')||' failed='||count(*) FILTER (WHERE created_at >= TIMESTAMPTZ '2026-10-03T00:44:25Z' AND status='failed')||' | span '||to_char(min(created_at),'MM-DD HH24:MI')||' .. '||to_char(max(created_at),'MM-DD HH24:MI') FROM classification_verdicts;\""
-```
-
-Read as of 2026-10-05T12:18:08Z: `all=1699 decided=1608 failed=91 | since-live-deploy n=453 failed=0 | span 09-28 08:36 .. 10-05 11:14`.
-
-3. The log instrument, coverage stated — resolve the container DYNAMICALLY (a deploy can leave it hash-prefixed, and a hardcoded name then fails with "No such container"), read `StartedAt`, and count `Webhook processing timed out after` (the OLD path) and `Classification pending after` (the NEW path).
-
-Interpretation: the #43 fix has two halves — `handle_timeout` (webhook cancelled the work) is the OLD path, `Classification pending after` (the classification runs detached and the redelivery serves the stored verdict) is the NEW one; a healthy post-fix system shows the new path firing and the old one not. A `failed` store row means a message went unclassified and therefore unmoderated. A zero is not proof unless the window is long enough — state n beside any zero (95% upper bound 3/n vs a 10.39% baseline ⇒ n ≥ 29). If the log window is shorter than 72 h, SAY SO plainly — the close must rest on the durable store, not a log a deploy truncated. Do NOT close the issue, edit any file, or investigate further — the Bot lane owns the close and acts on the line.
-
-**52-close-gate** (daily 11:30 UTC) — the cron `trigger_cmd` is kept as a FIRE GATE only (deploy 2026-09-27T11:20:14Z; window ends 2026-09-28T11:20:14Z; the item — board #52 pre-migration, now `leshchenko1979/ai-antispam#85` — still open). When woken:
-
-1. Measure the window (read rc first-hand): `ssh apps 'docker logs --since 2026-09-27T11:20:14 ai-antispam-ai-antispam-1 2>&1 | grep -c "Unhandled exception in dispatcher"'`, the same for `callback_handlers`, and `wc -l`. Counting trap: each record double-prints (structured logger + Python logging handler) — state which count you are quoting. A container recreate TRUNCATES the log; if `StartedAt` is later than the window start, say so and re-base rather than presenting a short window as the full one.
-
-2. If the dispatcher count is 0 and the log covers the window: confirm the artifact (`ssh apps 'docker exec ai-antispam-ai-antispam-1 md5sum /app/app/handlers/callback_handlers.py'` must equal the repo md5), CLOSE THE BOARD FIRST, then write the close row carrying `board=closed`. Do NOT put a close/fix keyword immediately before #N in a commit subject (#56). Ledger: intake n=65 is HQ's, claim n=51 exists; the closer writes the close row.
-
-3. If the count is non-zero: do NOT close — report the lines verbatim, name the handler, and state whether the cause is the #52 class or something new.
 
 ---
 
