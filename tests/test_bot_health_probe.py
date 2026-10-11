@@ -52,12 +52,16 @@ def make_report(**overrides) -> dict:
             "bad_update": 0,
             "llm_gw_fail": 0,
             "llm_or_fail": 0,
+            "llm_all_fail": 0,
             "act_ok": 5,
             "act_perm": 0,
             "act_tg": 0,
             "act_unexp": 0,
             "last_ingress": "2026-09-12T09:00:00",
         },
+        # Live topology: the gateway hop is disabled (config.yaml
+        # llm.gateway_enabled: false), so the pool IS the classification path.
+        "llm_topology": {"gateway_enabled": False},
     }
     for key, value in overrides.items():
         if isinstance(value, dict) and isinstance(report.get(key), dict):
@@ -186,16 +190,67 @@ def test_no_ingress_in_window_warns():
     assert any("no webhook updates" in r for r in reasons)
 
 
-def test_openrouter_failure_alerts_but_gateway_fallback_only_warns():
-    alert, _ = probe.evaluate(make_report(log_window={"llm_or_fail": 1}))
-    assert alert == probe.ALERT
+def test_absorbed_pool_rotation_is_never_an_alert():
+    """Close condition leg 5 (board #117), fixture half one.
 
-    warn, reasons = probe.evaluate(
+    A single pool agent failing while the rotation recovers is the DESIGNED
+    case. Before 2026-10-11 this read ALERT and paged the reader on a
+    self-healed transient — the exact defect the issue records.
+    """
+    verdict, reasons = probe.evaluate(make_report(log_window={"llm_or_fail": 1}))
+    assert verdict == probe.OK, reasons
+    assert reasons == []
+
+def test_pool_rotation_warns_only_in_quantity():
+    verdict, reasons = probe.evaluate(
         make_report(
-            log_window={"llm_gw_fail": probe.THRESHOLDS["gateway_fallback_warn_count"]}
+            log_window={"llm_or_fail": probe.THRESHOLDS["pool_rotation_warn_count"]}
         )
     )
-    assert warn == probe.WARN
+    assert verdict == probe.WARN
+    assert any("rotation absorbed" in r for r in reasons)
+
+def test_all_pool_models_failed_alerts():
+    """Close condition leg 5 (board #117), fixture half two.
+
+    Exhausting every pool model is the terminal condition: classification is
+    dead and the message goes unmoderated.
+    """
+    verdict, reasons = probe.evaluate(make_report(log_window={"llm_all_fail": 1}))
+    assert verdict == probe.ALERT
+    assert any("all classification pool models failed" in r for r in reasons)
+
+def test_gateway_leg_skipped_when_hop_disabled():
+    """Close condition leg 2 (board #117): a disabled hop cannot fail."""
+    verdict, reasons = probe.evaluate(
+        make_report(
+            log_window={"llm_gw_fail": probe.THRESHOLDS["gateway_fallback_warn_count"]},
+            llm_topology={"gateway_enabled": False},
+        )
+    )
+    assert verdict == probe.OK, reasons
+    assert not any("gateway fallback" in r for r in reasons)
+
+def test_gateway_leg_active_when_hop_enabled():
+    """The WARN survives a rollback that re-enables the hop."""
+    verdict, reasons = probe.evaluate(
+        make_report(
+            log_window={"llm_gw_fail": probe.THRESHOLDS["gateway_fallback_warn_count"]},
+            llm_topology={"gateway_enabled": True},
+        )
+    )
+    assert verdict == probe.WARN
+    assert any("gateway fallback" in r for r in reasons)
+
+def test_gateway_leg_kept_when_hop_state_unreadable():
+    """``None`` is unknown, not disabled — never silently drop the check."""
+    verdict, reasons = probe.evaluate(
+        make_report(
+            log_window={"llm_gw_fail": probe.THRESHOLDS["gateway_fallback_warn_count"]},
+            llm_topology={"gateway_enabled": None},
+        )
+    )
+    assert verdict == probe.WARN
     assert any("gateway fallback" in r for r in reasons)
 
 
@@ -281,8 +336,12 @@ def test_log_window_awk_parses_last_ingress_field():
     """The awk END block must emit a word-splittable last_ingress field."""
     assert "last_ingress=%s" in probe.LOG_WINDOW_AWK
     assert 'gsub(/ /,"T",ts)' in probe.LOG_WINDOW_AWK
-    # DEBUG must be in every level anchor: the ingress line is DEBUG-level.
-    assert probe.LOG_WINDOW_AWK.count("(DEBUG|INFO|WARNING|ERROR)") == 8
+    # Every log-line anchor must carry the level group: the ingress line is
+    # DEBUG-level, so a pattern missing it silently never matches. Assert the
+    # relationship, not a magic count that every new counter would bump.
+    anchors = probe.LOG_WINDOW_AWK.count(r"\] app\.")
+    assert anchors > 0
+    assert probe.LOG_WINDOW_AWK.count("(DEBUG|INFO|WARNING|ERROR)") == anchors
 
 
 def test_json_output_is_parseable():

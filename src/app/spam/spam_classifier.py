@@ -150,4 +150,13 @@ async def is_spam(
                 _next_openrouter_agent()
                 continue
 
+        # The terminal condition is logged so the health probe can observe it.
+        # The probe anchors on this canonical ``[LEVEL] app.<logger>:`` line; a
+        # raised exception alone never reaches the container log, so before this
+        # line existed the fatal case was unreadable by any instrument. Every
+        # pool model has been exhausted here — classification is dead.
+        logger.error(
+            "All spam classifiers failed: all %d pool model(s) exhausted",
+            num_models,
+        )
         raise RuntimeError("All spam classifiers failed")

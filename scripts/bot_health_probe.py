@@ -13,7 +13,8 @@ Checks
 4. running image digest vs the published ghcr ``:main`` manifest digest
 5. update ingress count over the log window
 6. ``@telegram_action`` failure counts (permission / Telegram / unexpected)
-7. LLM gateway -> OpenRouter fallback counts
+7. LLM pool rotation / all-models-failed counts (the pool IS the path; the
+   gateway hop is disabled by config)
 
 Exit codes: 0 = OK, 1 = WARN, 2 = ALERT.
 
@@ -52,6 +53,9 @@ THRESHOLDS = {
     "webhook_error_warn_hours": 2.0,
     "malformed_updates_warn": 5,
     "gateway_fallback_warn_count": 5,
+    # A pool rotation the classifier absorbs is designed behaviour (board #117):
+    # it is a WARN only in quantity, never an ALERT on a single occurrence.
+    "pool_rotation_warn_count": 5,
 }
 
 # One awk pass over the docker log window. Anchored on the canonical
@@ -68,11 +72,12 @@ LOG_WINDOW_AWK = (
     r"/\[(DEBUG|INFO|WARNING|ERROR)\] app\.handlers\.handle_spam: .* failed \(unexpected\)/ {act_unexp++}"
     r"/\[(DEBUG|INFO|WARNING|ERROR)\] app\.spam\.spam_classifier: Gateway spam classification failed/ {llm_gw_fail++}"
     r"/\[(DEBUG|INFO|WARNING|ERROR)\] app\.spam\.spam_classifier: OpenRouter agent [0-9]+\/[0-9]+ failed/ {llm_or_fail++}"
+    r"/\[(DEBUG|INFO|WARNING|ERROR)\] app\.spam\.spam_classifier: All spam classifiers failed/ {llm_all_fail++}"
     r"/\[(DEBUG|INFO|WARNING|ERROR)\] app\.handlers\.status_handlers: Received invalid update format/ {bad_update++}"
     r'END {printf "ingress=%d act_ok=%d act_perm=%d act_tg=%d act_unexp=%d '
-    r'llm_gw_fail=%d llm_or_fail=%d bad_update=%d last_ingress=%s\n", ingress+0, '
+    r'llm_gw_fail=%d llm_or_fail=%d llm_all_fail=%d bad_update=%d last_ingress=%s\n", ingress+0, '
     r"act_ok+0, act_perm+0, act_tg+0, act_unexp+0, llm_gw_fail+0, llm_or_fail+0, "
-    r"bad_update+0, last_ingress}"
+    r"llm_all_fail+0, bad_update+0, last_ingress}"
 )
 
 _TOKEN: str | None = None
@@ -147,6 +152,38 @@ def read_bot_token() -> str | None:
         return None
     token = out.strip()
     return token or None
+
+def parse_gateway_enabled(raw: str | None) -> bool | None:
+    """Parse the ``gateway_enabled:`` value out of a config.yaml snippet.
+
+    ``None`` means "could not read it" — callers must treat that as unknown and
+    keep the legacy behaviour rather than assume the hop is off.
+    """
+    if not raw:
+        return None
+    for line in raw.splitlines():
+        if ":" not in line:
+            continue
+        value = line.split(":", 1)[1].split("#", 1)[0].strip().lower()
+        if value in ("true", "false"):
+            return value == "true"
+    return None
+
+def read_gateway_enabled() -> bool | None:
+    """Read the container's effective ``llm.gateway_enabled``.
+
+    The hop's state is not visible in the log window — a disabled hop simply
+    never logs — so read it from the running container's own config. Returns
+    ``None`` when it cannot be read (board #117).
+    """
+    rc, out, _ = remote(
+        f"docker exec {container_name()} sh -lc "
+        "\"grep -E '^[[:space:]]*gateway_enabled:' /app/config.yaml\"",
+        timeout=45,
+    )
+    if rc != 0 or not out.strip():
+        return None
+    return parse_gateway_enabled(out)
 
 
 def check_public_health() -> dict:
@@ -395,11 +432,28 @@ def evaluate(report: dict) -> tuple[int, list[str]]:
     else:
         if (logs.get("ingress") or 0) == 0:
             bump(WARN, "no webhook updates seen in the window")
-        if (logs.get("llm_or_fail") or 0) > 0:
-            bump(ALERT, f"OpenRouter fallback also failing ({logs['llm_or_fail']})")
-        elif (logs.get("llm_gw_fail") or 0) >= THRESHOLDS[
-            "gateway_fallback_warn_count"
-        ]:
+        # The pool IS the classification path while the gateway hop is disabled
+        # (config.yaml ``llm.gateway_enabled: false``, owner directive
+        # 2026-10-01). A single agent failure the rotation absorbs is the
+        # DESIGNED case, not a fault — only exhausting every pool model is
+        # fatal. Before 2026-10-11 the probe ALERTed on any ``N/M failed`` line,
+        # so a recovered transient read the same as a dead classifier (#117).
+        if (logs.get("llm_all_fail") or 0) > 0:
+            bump(
+                ALERT,
+                f"all classification pool models failed ({logs['llm_all_fail']}x)",
+            )
+        elif (logs.get("llm_or_fail") or 0) >= THRESHOLDS["pool_rotation_warn_count"]:
+            bump(
+                WARN,
+                f"classification pool rotation absorbed {logs['llm_or_fail']} failures",
+            )
+        # A disabled hop cannot fail, so the gateway leg applies only when the
+        # hop is known to be enabled. ``None`` (unreadable) keeps the legacy
+        # behaviour rather than silently dropping the check.
+        if report.get("llm_topology", {}).get("gateway_enabled") is not False and (
+            logs.get("llm_gw_fail") or 0
+        ) >= THRESHOLDS["gateway_fallback_warn_count"]:
             bump(WARN, f"gateway fallback engaged {logs['llm_gw_fail']}x")
         action_failures = (
             (logs.get("act_perm") or 0)
@@ -413,6 +467,29 @@ def evaluate(report: dict) -> tuple[int, list[str]]:
 
     return verdict, reasons
 
+
+def render_last_error_age(age_hours: float | None) -> str:
+    """Render the webhook delivery-error age.
+
+    ``None`` means there is no error at all, so it must read ``none`` — the old
+    ``f"{None}h ago"`` rendered the literal ``Noneh ago`` (board #117).
+    """
+    return "none" if age_hours is None else f"{age_hours}h ago"
+
+def render_llm_row(logs: dict, topology: dict) -> str:
+    """One digest row describing the classification path.
+
+    With the gateway hop disabled the pool IS the path, so the legacy
+    ``gateway Nx`` cell would read as a healthy gateway that is not even in the
+    request path (board #117).
+    """
+    pool = (
+        f"{logs.get('llm_or_fail') or 0} rotation · "
+        f"{logs.get('llm_all_fail') or 0} all-failed"
+    )
+    if topology.get("gateway_enabled") is False:
+        return f"| LLM pool | {pool} (gateway hop disabled) |"
+    return f"| LLM pool | gateway {logs.get('llm_gw_fail') or 0}x · {pool} |"
 
 def render_markdown(report: dict, verdict: int, reasons: list[str]) -> str:
     badge = {OK: "🟢 OK", WARN: "🟡 WARN", ALERT: "🔴 ALERT"}[verdict]
@@ -437,17 +514,14 @@ def render_markdown(report: dict, verdict: int, reasons: list[str]) -> str:
         f"| image | {'digest matches :main' if digest.get('match') else 'DIGEST MISMATCH'} |",
         (
             f"| webhook | {webhook.get('pending_update_count')} pending · "
-            f"last error {webhook.get('last_error_age_hours')}h ago |"
+            f"last error {render_last_error_age(webhook.get('last_error_age_hours'))} |"
         ),
         f"| updates ({report['window_hours']}h) | {logs.get('ingress')} received |",
         (
             f"| @telegram_action | {logs.get('act_ok')} ok · "
             f"{logs.get('act_perm', 0) + logs.get('act_tg', 0) + logs.get('act_unexp', 0)} failed |"
         ),
-        (
-            f"| LLM fallback | gateway {logs.get('llm_gw_fail')}x · "
-            f"OpenRouter {logs.get('llm_or_fail')}x |"
-        ),
+        render_llm_row(logs, report.get("llm_topology", {})),
     ]
     if reasons:
         lines += ["", "**Why not OK**"] + [f"- {r}" for r in reasons]
@@ -480,6 +554,9 @@ def main() -> int:
         "container": check_container(),
         "image_digest": {},
         "log_window": check_log_window(args.window_hours),
+        # Read the hop's state so the digest can be honest about which path
+        # actually served (board #117).
+        "llm_topology": {"gateway_enabled": read_gateway_enabled()},
     }
     report["image_digest"] = check_image_digest(report["container"])
 
