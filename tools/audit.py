@@ -838,6 +838,20 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     if (repo_root / "tests/test_audit_stamp_duration.py").is_file():
         gates_to_run.append([sys.executable, "tests/test_audit_stamp_duration.py"])
 
+    # 17. The cadence record (#116) -- the cadence leg must NAME the record it reads and tell a
+    # DROPPED ROW (the run happened; its handoff row never landed) from a MISSED RUN. Measured
+    # 2026-10-03: the scorecard `dd16280` was committed, the owed `run` row was dropped, and the
+    # report read `MISSED: Last run: 39.9h ago`. Those two failures have OPPOSITE remedies --
+    # re-stamp the row vs. fix the pacemaker -- so a leg that cannot separate them sends the
+    # reader to the wrong file, and a dropped handoff on a day the audit already reds for
+    # another reason is invisible entirely.
+    #
+    # SCRIPT-form, matching #16: `main()` under a `__main__` guard, no module-level `def test_*`.
+    # It imports the tool and calls the pure functions with fixture paths, so it never touches
+    # live state and runs in well under a second.
+    if (repo_root / "tests/test_audit_cadence_record.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_audit_cadence_record.py"])
+
     # The commit-citation clause. SCRIPT-MODE (0 test functions collected, `__main__` present),
     # so a script registration is the honest form -- and unlike the cron gate this one is NOT
     # vacuous: it prints "examined N commit(s)" and exits 1 on an unexcused violation.
@@ -876,10 +890,78 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     return results
 
 
-def check_cadence_integrity(ledger_path: Path) -> dict[str, Any]:
-    """Check whether recurring processes ran according to declared schedule."""
+# The cadence leg reads the LEDGER, which records a run's HANDOFF. The scorecard artifact
+# (`evidence/scores/<date>-self-audit.md`) records the run ITSELF. The two can disagree in
+# both directions, and a leg reading only the ledger reported a DROPPED ROW as a MISSED RUN
+# (#116; measured 2026-10-03: the artifact `dd16280` was committed while the owed row never
+# landed, and the report read `MISSED: Last run: 39.9h ago`). So the record is NAMED in the
+# output, and a stale ledger row is classified against the artifact series.
+LEDGER_RECORD = "evidence/ledger.jsonl run/score rows"
+
+# One label per state, shared by the stdout line, the markdown report and the JSON payload
+# so three surfaces cannot name the same run differently.
+CADENCE_STATE_LABEL = {
+    "held": "HELD",
+    "missed_run": "MISSED (run)",
+    "dropped_row": "DROPPED ROW",
+}
+
+def latest_scorecard_date(scores_dir: Path) -> str | None:
+    """The newest dated scorecard artifact as `YYYY-MM-DD`, or None when none parses.
+
+    Only files matching the artifact naming law are read, and the stamp must PARSE as a
+    date: a stray file in the directory is not a run's record. The value is returned as the
+    `YYYY-MM-DD` string because lexicographic order IS chronological in that form.
+    """
+    if not scores_dir.is_dir():
+        return None
+    latest = None
+    for path in scores_dir.glob("*-self-audit.md"):
+        stamp = path.name[: -len("-self-audit.md")]
+        try:
+            datetime.date.fromisoformat(stamp)
+        except ValueError:
+            continue
+        if latest is None or stamp > latest:
+            latest = stamp
+    return latest
+
+def classify_stale_cadence(last_run_ts: str, latest_artifact: str | None) -> str:
+    """Which record failed: a `dropped_row` (the run happened) or a `missed_run` (it did not).
+
+    A scorecard artifact dated strictly AFTER the last ledger row proves a run happened whose
+    handoff never landed, so the ROW was dropped. With no such artifact, nothing recorded a
+    run either, so the run itself was missed. Both are real defects and both leave
+    `cadence_held` False -- only the NAME differs, and naming it is the point: a dropped
+    handoff on a day the audit already reds for another reason is otherwise invisible.
+    """
+    if latest_artifact is None:
+        return "missed_run"
+    return "dropped_row" if latest_artifact > last_run_ts[:10] else "missed_run"
+
+def render_cadence_label(stats: dict[str, Any]) -> str:
+    """The cadence state's label, for every surface that reports it."""
+    state = stats.get("state")
+    if state is None:
+        state = "held" if stats.get("cadence_held") else "missed_run"
+    return CADENCE_STATE_LABEL.get(state, "MISSED")
+
+def check_cadence_integrity(ledger_path: Path, scores_dir: Path | None = None) -> dict[str, Any]:
+    """Check whether recurring processes ran according to declared schedule.
+
+    Reads TWO records and says which: `record_read` names the ledger rows the staleness is
+    measured from, and `artifact_latest_date` is the newest scorecard on disk -- the value
+    that separates a dropped row from a missed run (#116).
+    """
+    latest_artifact = latest_scorecard_date(scores_dir) if scores_dir is not None else None
     if not ledger_path.is_file():
-        return {"cadence_held": False, "hours_since_last_run": None}
+        return {
+            "cadence_held": False,
+            "hours_since_last_run": None,
+            "state": "missed_run",
+            "record_read": LEDGER_RECORD,
+            "artifact_latest_date": latest_artifact,
+        }
 
     now = datetime.datetime.now(datetime.timezone.utc)
     last_ts = None
@@ -895,7 +977,13 @@ def check_cadence_integrity(ledger_path: Path) -> dict[str, Any]:
                     pass
 
     if not last_ts:
-        return {"cadence_held": True, "hours_since_last_run": None}
+        return {
+            "cadence_held": True,
+            "hours_since_last_run": None,
+            "state": "held",
+            "record_read": LEDGER_RECORD,
+            "artifact_latest_date": latest_artifact,
+        }
 
     try:
         t_last = datetime.datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
@@ -906,9 +994,18 @@ def check_cadence_integrity(ledger_path: Path) -> dict[str, Any]:
             "cadence_held": cadence_held,
             "hours_since_last_run": round(hours_diff, 1),
             "last_run_ts": last_ts,
+            "state": "held" if cadence_held else classify_stale_cadence(last_ts, latest_artifact),
+            "record_read": LEDGER_RECORD,
+            "artifact_latest_date": latest_artifact,
         }
     except Exception:
-        return {"cadence_held": False, "hours_since_last_run": None}
+        return {
+            "cadence_held": False,
+            "hours_since_last_run": None,
+            "state": "missed_run",
+            "record_read": LEDGER_RECORD,
+            "artifact_latest_date": latest_artifact,
+        }
 
 
 def gate_note(g: dict[str, Any], max_chars: int = GATE_CAUSE_LIMIT) -> str:
@@ -977,7 +1074,7 @@ def format_report_markdown(
         f"| **Total Inference Cost** | `${ledger_stats.get('total_cost_usd', 0.0):.4f}` | Tracked cost across ledger task telemetry |",
         f"| **Avg Cost / Closed Task** | `${ledger_stats.get('avg_cost_per_closed_task_usd', 0.0):.4f}` | Total cost ÷ closed tasks |",
         f"| **Total Tokens (In/Out)** | `{ledger_stats.get('total_tokens_in', 0)} / {ledger_stats.get('total_tokens_out', 0)}` | Cumulative prompt and completion tokens |",
-        f"| **Cadence Status** | `{'HELD' if cadence_stats.get('cadence_held') else 'MISSED'}` | Last run: {cadence_stats.get('hours_since_last_run')}h ago |",
+        f"| **Cadence Status** | `{render_cadence_label(cadence_stats)}` | Last run: {cadence_stats.get('hours_since_last_run')}h ago · record read: {cadence_stats.get('record_read')} · latest artifact: {cadence_stats.get('artifact_latest_date')} |",
         "",
         "---",
         "",
@@ -1061,7 +1158,7 @@ def main() -> int:
 
     ledger_stats = parse_ledger(ledger_file)
     rework_stats = parse_rework(rework_file, ledger_stats.get("closed_tasks", 0))
-    cadence_stats = check_cadence_integrity(ledger_file)
+    cadence_stats = check_cadence_integrity(ledger_file, REPO_ROOT / "evidence/scores")
 
     # WALL-CLOCK AROUND THE GATE LOOP (#71). The stamp row's `duration=` was the string
     # literal `4s`, so every daily self-audit row carried a duration the audit never
@@ -1183,7 +1280,7 @@ def main() -> int:
     print(f"  - First-Pass Yield: {render_rate_pct(first_pass_yield_pct(_yield_acc, _yield_n), _yield_n)} ({_yield_acc}/{_yield_n} accepted)")
     print(f"  - Closed Tasks: {ledger_stats.get('closed_tasks', 0)} | Intake Tasks: {ledger_stats.get('intake_tasks', 0)}")
     print(f"  - Rework Entries: {rework_stats.get('total_entries', 0)} (Rate: {render_rate_pct(round(rework_stats.get('rework_rate', 0.0) * 100, 1), ledger_stats.get('closed_tasks', 0))})")
-    print(f"  - Cadence: {'HELD' if cadence_ok else 'MISSED'} (last run: {cadence_stats.get('hours_since_last_run')}h ago)")
+    print(f"  - Cadence: {render_cadence_label(cadence_stats)} (last run: {cadence_stats.get('hours_since_last_run')}h ago · record read: {cadence_stats.get('record_read')} · latest artifact: {cadence_stats.get('artifact_latest_date')})")
     unknown_note = f", {len(verdict.unknown)} UNKNOWN" if verdict.unknown else ""
     print(f"\nMechanical Gates ({len(gate_results)}{unknown_note}):")
     for g in gate_results:
