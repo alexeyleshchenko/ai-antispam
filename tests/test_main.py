@@ -6,12 +6,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiogram.exceptions import TelegramNetworkError
+from pydantic_ai.exceptions import ModelAPIError
 
 from src.app.main import (
     WEBHOOK_TIMEOUT,
     _update_type,
     handle_classification_pending,
     handle_classification_retry_later,
+    handle_temporary_error,
     handle_unhandled_exception,
     log_update_received,
 )
@@ -244,6 +246,47 @@ async def test_classification_retry_later_returns_503_with_retry():
     assert body.get("retry") is True
     assert body.get("error") == "Classification failed; retry later"
     assert span.tags == ["classification_retry_later"]
+
+@pytest.mark.asyncio
+async def test_temporary_error_late_in_the_window_still_requests_a_redelivery(caplog):
+    """#103 leg 3: the escaped-error 200 is gone at every elapsed time.
+
+    `remaining < 5` used to answer 200 - "LLM error but no time for retries" -
+    which reads OUR webhook window as the last chance to retry. It is not:
+    Telegram's retry arrives later with a fresh window, so a 200 there stops
+    the only redelivery that would have reclaimed the row. The branch is kept
+    for the log line, and the answer is 503 at any elapsed time.
+    """
+    span = MagicMock()
+    error = ModelAPIError("ag/gemini-3.7-flash-high", "Connection error.")
+
+    with caplog.at_level(logging.WARNING):
+        response = await handle_temporary_error(
+            span, error, elapsed=WEBHOOK_TIMEOUT - 1.0, remaining=1.0
+        )
+
+    assert response.status == 503, "200 here is the silent drop #103 leg 3 names"
+    body = json.loads(response.text)
+    assert body.get("retry") is True
+    assert span.tags == ["model_api_error"]
+    assert any(
+        "still requesting a redelivery" in record.message for record in caplog.records
+    ), "the late-window branch must stay observable in the log"
+
+
+@pytest.mark.asyncio
+async def test_temporary_error_early_in_the_window_also_requests_a_redelivery():
+    """The control: with time left, the answer is the same 503 - one shape."""
+    span = MagicMock()
+    error = ModelAPIError("ag/gemini-3.7-flash-high", "Connection error.")
+
+    response = await handle_temporary_error(
+        span, error, elapsed=1.0, remaining=WEBHOOK_TIMEOUT - 1.0
+    )
+
+    assert response.status == 503
+    assert json.loads(response.text).get("retry") is True
+
 
 @pytest.mark.asyncio
 async def test_handle_update_503_when_a_failed_row_is_inside_its_cooldown(

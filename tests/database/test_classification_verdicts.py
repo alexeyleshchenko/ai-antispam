@@ -113,13 +113,34 @@ async def test_result_id_stored(patched_db_conn, clean_db):
 
 @pytest.mark.asyncio
 async def test_mark_failed_is_recorded(patched_db_conn, clean_db):
-    """Exhausting every leg is visible rather than looking like a lost row."""
+    """Exhausting every leg is visible rather than looking like a lost row.
+
+    The RETURN is load-bearing, not decoration: `_finish` decides between asking
+    for a redelivery and a terminal give-up from it, so it has to be the value
+    the row now carries - and it has to advance per failure, or the retry budget
+    could never be spent.
+    """
     await claim_pending(CHAT_ID, MESSAGE_ID)
-    await mark_failed(CHAT_ID, MESSAGE_ID)
+    attempts = await mark_failed(CHAT_ID, MESSAGE_ID)
+    assert attempts == 1
 
     row = await claim_or_read(CHAT_ID, MESSAGE_ID)
     assert row["status"] == "failed"
     assert row["is_spam"] is None
+    assert row["attempts"] == attempts
+
+    assert await mark_failed(CHAT_ID, MESSAGE_ID) == 2
+
+
+@pytest.mark.asyncio
+async def test_mark_failed_without_a_row_returns_none(patched_db_conn, clean_db):
+    """No row updated reads as UNKNOWN, never as "at the cap".
+
+    `_retryable_after_failure` treats any non-count as NOT retryable, so this is
+    the value that stops a missing row being asked for a redelivery it could
+    never act on.
+    """
+    assert await mark_failed(CHAT_ID, MESSAGE_ID) is None
 
 @pytest.mark.asyncio
 async def test_ensure_table_is_idempotent(patched_db_conn, clean_db):

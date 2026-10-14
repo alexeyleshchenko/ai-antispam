@@ -223,26 +223,35 @@ async def store_verdict(
         )
 
 
-async def mark_failed(chat_id: int, message_id: int) -> None:
+async def mark_failed(chat_id: int, message_id: int) -> int | None:
     """Record that every leg was exhausted for this attempt.
 
-    Increments `attempts` so `reclaim_failed` can bound the retries. A row that
-    reaches the cap stays `failed` and the caller stops answering 503, which is
-    what ends the retry rather than letting it run forever.
+    Increments `attempts` so `reclaim_failed` can bound the retries, and returns
+    the NEW value from the same statement. The caller needs it to tell "this
+    failure is still within its budget" from "the cap is reached", and returning
+    it here is what makes that answer race-free: a separate read could observe a
+    concurrent delivery's increment and read a retryable row as exhausted.
+
+    A row that reaches the cap stays `failed` and the caller stops answering
+    503, which is what ends the retry rather than letting it run forever.
+    Returns None when no row was updated - the caller must read that as UNKNOWN,
+    never as "at the cap".
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
-        await conn.execute(
+        row = await conn.fetchrow(
             """
             UPDATE classification_verdicts
             SET status = 'failed',
                 decided_at = NOW(),
                 attempts = attempts + 1
             WHERE chat_id = $1 AND message_id = $2
+            RETURNING attempts
             """,
             chat_id,
             message_id,
         )
+    return int(row["attempts"]) if row is not None else None
 
 
 async def claim_moderation(chat_id: int, message_id: int) -> bool:

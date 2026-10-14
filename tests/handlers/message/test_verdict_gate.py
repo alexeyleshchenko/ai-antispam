@@ -196,7 +196,13 @@ async def test_unavailable_store_falls_back_to_inline(patched_db_conn, clean_db)
 async def test_classification_failure_is_recorded_as_failed(
     patched_db_conn, clean_db
 ):
-    """A classify that raises marks the row failed; the next delivery re-asks.
+    """A classify that raises marks the row failed AND asks for a redelivery.
+
+    The row is recorded either way; what the return value decides is whether the
+    message ever gets another chance. A first failure is inside the retry budget,
+    so it must come back as RETRY_LATER (503) - FAILED maps to a 200, which tells
+    Telegram the update is consumed, and that is what made a FAST failure
+    terminal after one attempt while a slow one got its retries (#103).
 
     It must NOT re-classify straight away: the cooldown is a backoff, so the
     delivery arriving immediately after the failure is told to come back rather
@@ -210,7 +216,7 @@ async def test_classification_failure_is_recorded_as_failed(
     result = await run_with_verdict(
         CHAT_ID, MESSAGE_ID, _fail, counter.moderate
     )
-    assert result == RESULT_VERDICT_FAILED
+    assert result == RESULT_VERDICT_RETRY_LATER
 
     row = await claim_or_read(CHAT_ID, MESSAGE_ID)
     assert row["status"] == "failed"
@@ -227,6 +233,40 @@ async def test_classification_failure_is_recorded_as_failed(
         CHAT_ID, MESSAGE_ID, retry.classify, retry.moderate
     ) == RESULT_VERDICT_RETRY_LATER
     assert retry.classify_calls == 0, "the cooldown must hold the retry back"
+
+async def test_failure_at_the_cap_is_terminal(patched_db_conn, clean_db):
+    """The retry stops at the cap: FAILED (200), never an endless 503.
+
+    The budget is `verdict_retry_attempts` (3 by default). Reaching it is the
+    only case that may answer 200 - the loud give-up - and it is the half that
+    bounds the loop RETRY_LATER opens. Each round goes through a real reclaim, so
+    this also shows the redelivery path SPENDING the budget rather than the row
+    sitting at attempts=1 forever.
+    """
+
+    async def _fail():
+        raise RuntimeError("every leg exhausted")
+
+    seen = []
+    for _ in range(3):
+        # Move the last failure past the cooldown so the next delivery may
+        # reclaim it. Without this every round would read RETRY_LATER and the
+        # cap would never be reached.
+        await _fail_at(clean_db, datetime.now(UTC) - timedelta(seconds=61))
+        seen.append(
+            await run_with_verdict(CHAT_ID, MESSAGE_ID, _fail, _Counter().moderate)
+        )
+
+    assert seen == [
+        RESULT_VERDICT_RETRY_LATER,
+        RESULT_VERDICT_RETRY_LATER,
+        RESULT_VERDICT_FAILED,
+    ]
+
+    row = await claim_or_read(CHAT_ID, MESSAGE_ID)
+    assert row["status"] == "failed"
+    assert row["attempts"] == 3
+
 
 async def _fail_at(clean_db, when) -> None:
     """Set the failed row's `decided_at` to an explicit instant.

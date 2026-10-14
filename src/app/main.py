@@ -563,16 +563,19 @@ async def handle_temporary_error(
     )
 
     if remaining < 5:
+        # A 200 here tells Telegram the update is consumed, so no redelivery
+        # would ever come and the message would be left unmoderated with only
+        # this log line as a trace. "No time for retries" conflated OUR
+        # remaining webhook window with Telegram's retry, which arrives later
+        # with a fresh window - so the 503 below is right at any elapsed time.
+        # The branch is kept for the log line, not to change the answer.
         logger.warning(
-            "LLM error but no time for retries",
+            "LLM error late in the webhook window; still requesting a redelivery",
             extra={
                 "elapsed": elapsed,
                 "remaining": remaining,
                 "status_code": status_code,
             },
-        )
-        return web.json_response(
-            {"message": "LLM error but no time for retries", "elapsed": elapsed}
         )
 
     if is_rate_limit:

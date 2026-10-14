@@ -86,6 +86,20 @@ def _retry_policy() -> tuple[int, timedelta]:
     )
     return attempts, timedelta(seconds=cooldown_s)
 
+def _retryable_after_failure(attempts: int | None) -> bool:
+    """Is a classification that JUST failed still inside its retry budget?
+
+    `attempts` is what `mark_failed` returned for this failure. Anything that is
+    not a real count - None (no row was updated) or STORE_UNAVAILABLE (the store
+    could not be reached) - reads as NOT retryable, which matches `_retry_failed`:
+    asking for a redelivery that provably cannot move the row is worse than a
+    recorded give-up, because it would loop without ever spending the budget.
+    """
+    if not isinstance(attempts, int):
+        return False
+    max_attempts, _ = _retry_policy()
+    return attempts < max_attempts
+
 def _log_store_error(exc: Exception, operation: str) -> None:
     """Log a store failure once per process, then at debug level."""
     global _store_error_logged
@@ -175,7 +189,20 @@ async def _finish(
         is_spam, confidence, reason = await classify()
     except Exception as e:  # noqa: BLE001 - every leg was exhausted
         logger.warning(f"Classification failed for {chat_id}/{message_id}: {e!r}")
-        await _store_call("mark_failed", mark_failed(chat_id, message_id))
+        attempts = await _store_call("mark_failed", mark_failed(chat_id, message_id))
+        if _retryable_after_failure(attempts):
+            # This is the fast-failure half of the retry. FAILED maps to a 200,
+            # which tells Telegram the update is consumed - so answering it here
+            # guaranteed no redelivery ever arrived to reclaim the row, and the
+            # retry budget went unspent on exactly the commonest failure (a
+            # provider refusing or rate-limiting quickly). The row is `failed`
+            # and short of the cap, so ask for the redelivery instead and let
+            # `reclaim_failed` take it.
+            logger.warning(
+                f"Classification failed on attempt {attempts}; the row is "
+                f"retryable, requesting redelivery for {chat_id}/{message_id}"
+            )
+            return RESULT_VERDICT_RETRY_LATER
         return RESULT_VERDICT_FAILED
 
     stored = await _store_call(
