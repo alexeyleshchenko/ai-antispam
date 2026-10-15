@@ -87,8 +87,17 @@ llm:
   # dead id, all 2 pool models exhausted, attempts 1->2->3). The slot went to
   # ag/gemini-3.8-flash-high - same ag/ prefix, already measured above at
   # parity (p50 7.74s, max 12.59s, 0/6 over a 15s leg).
-  # The pair deliberately keeps TWO provider prefixes (ag/gemini, cb/deepseek)
-  # so one upstream outage cannot empty the pool.
+  # The pair keeps TWO provider prefixes (ag/gemini, cb/deepseek), which
+  # distinguishes two UPSTREAM PROVIDERS (google, deepseek) - it does NOT
+  # provide redundancy against the aggregator itself. CORRECTED 2026-10-15
+  # (#119): both ids are inferhub aliases behind ONE endpoint
+  # (FALLBACK_API_BASE, two lines below), so an aggregator-wide outage empties
+  # the pool in a single stroke. Measured that day, 13:33:36-13:43:20Z: a
+  # ~9.5 min latency event put BOTH legs past the 45s wall on all three
+  # attempts (rows 2797 terminal, 2798 recovered at attempt 2). The retry
+  # budget is 3 attempts x 60s cooldown = 6m19s, which ran out ~3 min before
+  # the spike ended. The prefix pair protects against a per-provider outage;
+  # nothing here protects against the aggregator.
   #
   # Both are inferhub aliases: the endpoint is FALLBACK_API_BASE (set in
   # docker-compose.yml) with credential FALLBACK_API_KEY in .env. OpenRouter's
