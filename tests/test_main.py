@@ -258,7 +258,7 @@ async def test_temporary_error_late_in_the_window_still_requests_a_redelivery(ca
     for the log line, and the answer is 503 at any elapsed time.
     """
     span = MagicMock()
-    error = ModelAPIError("ag/gemini-3.7-flash-high", "Connection error.")
+    error = ModelAPIError("ag/gemini-3.8-flash-high", "Connection error.")
 
     with caplog.at_level(logging.WARNING):
         response = await handle_temporary_error(
@@ -278,7 +278,7 @@ async def test_temporary_error_late_in_the_window_still_requests_a_redelivery(ca
 async def test_temporary_error_early_in_the_window_also_requests_a_redelivery():
     """The control: with time left, the answer is the same 503 - one shape."""
     span = MagicMock()
-    error = ModelAPIError("ag/gemini-3.7-flash-high", "Connection error.")
+    error = ModelAPIError("ag/gemini-3.8-flash-high", "Connection error.")
 
     response = await handle_temporary_error(
         span, error, elapsed=1.0, remaining=WEBHOOK_TIMEOUT - 1.0

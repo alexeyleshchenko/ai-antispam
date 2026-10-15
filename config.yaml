@@ -81,6 +81,12 @@ llm:
   #   cp/cline-pass/deepseek-v4.1-flash p50 10.11s max 20.08s  1/6 OVER - rejected
   #   ali/deepseek-v4-flash-0731       21.6s+ on every call    - rejected
   #   cp/cline-pass/deepseek-v4-flash  22.5-31.5s on every call - rejected
+  # RETIRED 2026-10-14: ag/gemini-3.7-flash-high was withdrawn by the provider
+  # (404 "unknown model") and cost a live message (row 2779,
+  # -1001846673305/10248: cb/deepseek timed out, the rotation landed on the
+  # dead id, all 2 pool models exhausted, attempts 1->2->3). The slot went to
+  # ag/gemini-3.8-flash-high - same ag/ prefix, already measured above at
+  # parity (p50 7.74s, max 12.59s, 0/6 over a 15s leg).
   # The pair deliberately keeps TWO provider prefixes (ag/gemini, cb/deepseek)
   # so one upstream outage cannot empty the pool.
   #
@@ -98,7 +104,7 @@ llm:
   # config edit cannot quietly re-add them.
   # See docs/memos/2026-09-25-fallback-pool-language-and-accuracy.md
   openrouter_models:
-    - ag/gemini-3.7-flash-high
+    - ag/gemini-3.8-flash-high
     - cb/deepseek-v4.1-flash
 
 spam:

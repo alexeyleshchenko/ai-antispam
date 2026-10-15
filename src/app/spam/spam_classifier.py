@@ -38,8 +38,10 @@ def _openrouter_attempt_wall() -> float:
 
     The wall this replaces was DERIVED - ``(budget - gateway) / len(models)`` -
     and never measured against a model. On the shipped config it was 16.0s while
-    ``ag/gemini-3.7-flash-high``, one of the two models behind it, has a measured
-    p50 of 15.9s: the wall sat on that model's median, so half its calls were
+    ``ag/gemini-3.7-flash-high``, then one of the two models behind it (retired
+    by the provider 2026-10-14, its slot taken by ``ag/gemini-3.8-flash-high``),
+    has a measured p50 of 15.9s: the wall sat on
+    that model's median, so half its calls were
     cancelled mid-flight and the fallback paid for the same work again from
     zero.
 

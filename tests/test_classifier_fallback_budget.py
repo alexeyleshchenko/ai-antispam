@@ -50,12 +50,18 @@ MIN_VIABLE_PER_ATTEMPT_SECONDS = 12.0
 DROPPED_MODEL = "nvidia/nemotron-3.5-lightning:free"
 DROPPED_MODEL_MEASURED_SECONDS = (45.2, 55.6, 56.1)
 
-# Models that have LEFT the OpenRouter catalogue. Measured 2026-09-25: both
-# answer 404 "No endpoints found" for every request shape, so a pool entry
-# pointing at either is a guaranteed wasted attempt.
+# Models that have LEFT the catalogue. Two 404 shapes are recorded: the
+# OpenRouter-era "No endpoints found" (2026-09-25) and the inferhub-era
+# "unknown model" (2026-10-14). Either way a pool entry pointing at one is a
+# guaranteed wasted attempt, and the fallback burns an attempt on a corpse.
 DEAD_MODELS = (
     "nex-agi/nex-n2.5-mini:free",  # vanished 2026-09-25 14:20Z
     "z-ai/glm-5.2:free",  # 404 on probe
+    # 2026-10-14: inferhub withdrew it (404 'unknown model'), costing a live
+    # message - row 2779, -1001846673305/10248. cb/deepseek timed out, the
+    # rotation landed on the dead id, all 2 pool models exhausted, attempts
+    # 1->2->3. Slot went to ag/gemini-3.8-flash-high.
+    "ag/gemini-3.7-flash-high",
 )
 
 # Models BANNED by the owner for reason-language defects - distinct from
@@ -158,7 +164,7 @@ def test_no_dead_model_occupies_a_fallback_attempt():
     configured = get_openrouter_models()
     for dead in DEAD_MODELS:
         assert dead not in configured, (
-            f"{dead} has left the OpenRouter catalogue (404 'No endpoints found') "
+            f"{dead} has left the catalogue (404 on every request shape) "
             "and cannot serve a fallback attempt"
         )
 
