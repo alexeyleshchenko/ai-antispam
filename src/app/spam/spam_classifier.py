@@ -9,6 +9,7 @@ from pydantic_ai import ModelSettings
 from ..agents import (
     _get_openrouter_agents,
     _next_openrouter_agent,
+    _reset_openrouter_agent,
     get_gateway_spam_agent,
     get_openrouter_spam_agent,
 )
@@ -141,6 +142,15 @@ async def is_spam(
                     confidence_result if is_spam_result else -confidence_result
                 )
                 attempts_histogram.record(attempt + 1)
+                # #121: a success ENDS the recovery. The index is only ever
+                # moved by a failure met while serving the CURRENT message; it
+                # is not a health ranking that survives across messages.
+                # Without this reset the declared lead is demoted for the life
+                # of the process by one transient error (measured
+                # 2026-10-16T14:47:27Z: one TimeoutError, then 18 of 18
+                # classifications started on slot 2 for 43.52 h). Reset before
+                # the return so the NEXT message starts from the config order.
+                _reset_openrouter_agent()
                 return is_spam_result, confidence_result, reason_result
             except Exception as e:  # noqa: BLE001
                 logger.warning(

@@ -240,6 +240,23 @@ def _next_openrouter(prefix: str, output_type: Any) -> Any:
     return agents[_openrouter_pool_idxs[prefix]]
 
 
+def _reset_openrouter(prefix: str, output_type: Any) -> None:
+    """Return a domain's pool to its declared first slot.
+
+    #121: the index used to advance on failure and never come back, so one
+    transient error demoted the declared lead for the life of the process.
+    Measured in the running container: a single ``TimeoutError`` at
+    2026-10-16T14:47:27Z, and the next 18 classifications (43.52 h) all started
+    on slot 2 while ``config.yaml`` still declared slot 1 first.
+
+    Rotation is a per-message RECOVERY path, not a health ranking: failures met
+    while serving one message may move the index, and a success ends that
+    recovery. Without the reset the declared order is decided by failure
+    HISTORY instead of by configuration.
+    """
+    _openrouter_pool(prefix, output_type)
+    _openrouter_pool_idxs[prefix] = 0
+
 def _current_openrouter(prefix: str, output_type: Any) -> Any:
     """Get the current agent in a domain's pool (round-robin)."""
     agents = _openrouter_pool(prefix, output_type)
@@ -254,6 +271,10 @@ def _get_openrouter_agents() -> Any:
 def _next_openrouter_agent() -> Agent[None, SpamClassification]:
     """Rotate to next OpenRouter spam agent."""
     return _next_openrouter("openrouter-spam", SpamClassification)
+
+def _reset_openrouter_agent() -> None:
+    """Return the OpenRouter spam pool to its declared first slot (#121)."""
+    _reset_openrouter("openrouter-spam", SpamClassification)
 
 
 def get_openrouter_spam_agent() -> Agent[None, SpamClassification]:
