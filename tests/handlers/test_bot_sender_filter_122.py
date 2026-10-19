@@ -61,6 +61,23 @@ class TestUpdatesFilterExcludesBots:
     async def test_edited_message_from_human_passes(self):
         assert await filter_handle_edited_message(_message(is_bot=False)) is True
 
+    @pytest.mark.asyncio
+    async def test_anonymous_sender_still_passes_the_filter(self):
+        """Контроль: `from_user=None` (анонимный админ, пост канала) не отсекается.
+
+        `F.from_user.is_bot` на None даёт False, значит `~` пропускает — и это
+        то, что нужно: такие сообщения разбирает канальная ветка, а не фильтр.
+        """
+        anonymous = Message.model_construct(
+            message_id=1,
+            date=datetime.now(UTC),
+            chat=Chat.model_construct(id=-100, type="supergroup", title="group"),
+            from_user=None,
+            text="/start",
+        )
+        assert await filter_handle_message(anonymous) is True
+        assert await filter_handle_edited_message(anonymous) is True
+
 
 class TestCheckSkipBotSender:
     """Второй рубеж внутри пайплайна — на случай, если фильтр обойдён."""
