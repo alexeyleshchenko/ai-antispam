@@ -63,7 +63,8 @@ async def delete_and_redirect_to_pm(message: types.Message) -> str:
     """Удаляет команду в группе и отправляет сообщение о переходе в ЛС. Использует answer(), т.к. reply() падает после delete()."""
     # #122: в группе с несколькими ботами чужие команды — не наши.
     # Сообщение другого бота не трогаем вовсе: ни удаления, ни ответа.
-    if getattr(message.from_user, "is_bot", False):
+    sender = message.from_user
+    if sender is not None and sender.is_bot:
         return "command_from_bot_skipped"
 
     text = message.text or ""

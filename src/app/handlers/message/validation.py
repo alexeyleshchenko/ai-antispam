@@ -102,10 +102,11 @@ def check_skip_bot_sender(message: types.Message) -> tuple[bool, str]:
     `from_user` может быть None (анонимный админ, пост канала) — такие
     сообщения разбирает канальная ветка ниже, здесь не трогаем.
     """
-    if getattr(message.from_user, "is_bot", False):
+    sender = message.from_user
+    if sender is not None and sender.is_bot:
         logger.debug(
             f"Skip moderation for message {message.message_id} "
-            f"from bot {message.from_user.id} in chat {message.chat.id}"
+            f"from bot {sender.id} in chat {message.chat.id}"
         )
         return True, "message_from_bot_skipped"
     return False, ""
