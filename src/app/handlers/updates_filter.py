@@ -15,6 +15,11 @@ filter_handle_message = and_f(
     F.chat.type.in_(["group", "supergroup"]),
     # 2. Не админ
     ~F.from_user.is_admin,
+    # 2b. Не другой бот (#122): сообщение другого бота — не наша забота.
+    # Без этого оно уходило в полный пайплайн и могло быть удалено как спам.
+    # `from_user is None` (анонимный админ / пост канала) проходит: у него
+    # просто нет флага is_bot, и канальная ветка ниже решает сама.
+    ~F.from_user.is_bot,
     # 3. Не отредактированное сообщение
     ~F.edited_message,
     # 4. Не сервисные сообщения
@@ -47,6 +52,8 @@ filter_handle_message = and_f(
 # Edited messages in groups: same content rules as new messages; admin check is in validation
 filter_handle_edited_message = and_f(
     F.chat.type.in_(["group", "supergroup"]),
+    # Другой бот — не наша забота и на пути правок (#122).
+    ~F.from_user.is_bot,
     ~F.new_chat_member,
     ~F.new_chat_members,
     ~F.left_chat_member,

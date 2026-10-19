@@ -27,6 +27,7 @@ from ...types import ContextStatus, MessageContextResult
 from ..handle_spam import handle_spam
 from ..try_deduct_credits import try_deduct_credits
 from .validation import (
+    check_skip_bot_sender,
     check_skip_channel_bot_message,
     validate_group_and_check_early_exits,
 )
@@ -167,6 +168,12 @@ async def handle_moderated_message(
         f"sender_chat={getattr(message, 'sender_chat', None)}, "
         f"chat.linked_chat_id={getattr(message.chat, 'linked_chat_id', None)}"
     )
+    # #122: сообщение другого бота в группе — не наше. Проверяем ДО канальной
+    # ветки: у обычного бота `sender_chat` пуст, и она его пропускала.
+    skip, reason = check_skip_bot_sender(message)
+    if skip:
+        return reason
+
     skip, reason = await check_skip_channel_bot_message(message)
     if skip:
         return reason

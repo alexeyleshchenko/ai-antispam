@@ -505,11 +505,17 @@ def get_affiliate_url() -> str:
     )
 
 
+def get_bot_username() -> str:
+    """This bot's own Telegram username, without the leading '@'.
+
+    Read from system config so callers that must decide whether a group
+    command is addressed to US stay synchronous (#122).
+    """
+    return _get_cached_system_config().get("bot_username", "ai_spam_blocker_bot")
+
 def get_add_to_group_url() -> str:
     """Deep link to add bot to group with admin permissions (delete_messages, restrict_members)."""
-    cfg = _get_cached_system_config()
-    username = cfg.get("bot_username", "ai_spam_blocker_bot")
-    return f"https://t.me/{username}?startgroup&admin=delete_messages+restrict_members"
+    return f"https://t.me/{get_bot_username()}?startgroup&admin=delete_messages+restrict_members"
 
 
 def get_webhook_timeout() -> int:

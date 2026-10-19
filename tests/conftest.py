@@ -771,6 +771,9 @@ def mock_message():
     user.id = 67890
     user.full_name = "Test User"
     user.username = "testuser"
+    # Явный флаг: MagicMock иначе отдаёт truthy на любое поле, и проверка
+    # `is_bot` (#122) сочла бы каждого тестового отправителя ботом.
+    user.is_bot = False
     message.from_user = user
     message.sender_chat = None
 

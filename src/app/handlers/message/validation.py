@@ -91,6 +91,26 @@ async def validate_group_and_check_early_exits(
     return group, ""
 
 
+def check_skip_bot_sender(message: types.Message) -> tuple[bool, str]:
+    """Другой бот написал — не наша забота (#122).
+
+    В группе с несколькими ботами команды и сообщения соседних ботов адресованы
+    им, а не нам. Раньше они шли в полный пайплайн модерации и могли быть
+    удалены как спам (`sender_chat` у обычного бота пуст, поэтому
+    `check_skip_channel_bot_message` их не ловил).
+
+    `from_user` может быть None (анонимный админ, пост канала) — такие
+    сообщения разбирает канальная ветка ниже, здесь не трогаем.
+    """
+    if getattr(message.from_user, "is_bot", False):
+        logger.debug(
+            f"Skip moderation for message {message.message_id} "
+            f"from bot {message.from_user.id} in chat {message.chat.id}"
+        )
+        return True, "message_from_bot_skipped"
+    return False, ""
+
+
 async def check_skip_channel_bot_message(message: types.Message) -> tuple[bool, str]:
     """
     Check if message from channel bot should be skipped in discussion groups.

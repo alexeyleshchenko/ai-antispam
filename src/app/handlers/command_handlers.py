@@ -1,6 +1,7 @@
 import contextlib
 import html
 import logging
+import re
 from datetime import UTC, datetime
 from typing import cast
 
@@ -19,6 +20,7 @@ from ..common.utils import (
     format_chat_or_channel_display,
     get_add_to_group_url,
     get_affiliate_url,
+    get_bot_username,
     get_setup_guide_url,
 )
 from ..database import (
@@ -42,15 +44,40 @@ from .dp import dp
 logger = logging.getLogger(__name__)
 
 
+_GROUP_COMMAND_RE = re.compile(r"^/([A-Za-z0-9_]+)(?:@([A-Za-z0-9_]+))?")
+
+
+def _command_addressee(text: str) -> tuple[str, str | None]:
+    """Разбирает команду: ("start", "OtherBot") из "/start@OtherBot".
+
+    Второй элемент — None, если команда не адресована конкретному боту (#122).
+    """
+    match = _GROUP_COMMAND_RE.match(text or "")
+    if not match:
+        return "", None
+    return match.group(1), match.group(2)
+
+
 @dp.message(F.text.startswith("/"), F.chat.type != "private")
 async def delete_and_redirect_to_pm(message: types.Message) -> str:
     """Удаляет команду в группе и отправляет сообщение о переходе в ЛС. Использует answer(), т.к. reply() падает после delete()."""
+    # #122: в группе с несколькими ботами чужие команды — не наши.
+    # Сообщение другого бота не трогаем вовсе: ни удаления, ни ответа.
+    if getattr(message.from_user, "is_bot", False):
+        return "command_from_bot_skipped"
+
+    text = message.text or ""
+    _, addressee = _command_addressee(text)
+    # #122: `/cmd@OtherBot` адресована другому боту — молча выходим.
+    # Раньше мы её удаляли и постили в чат памятку про ЛС.
+    if addressee and addressee.lower() != get_bot_username().lower():
+        return "command_addressed_to_other_bot_skipped"
+
     with contextlib.suppress(Exception):
         await message.delete()
     lang = resolve_lang(message, None)
 
     # When /start has a param (e.g. from startgroup=landing deep link), show brief ready message
-    text = message.text or ""
     if text.startswith("/start ") and len(text) > 7:
         param = text[7:].strip()
         if param in ("landing",) or param.startswith("setup_"):
