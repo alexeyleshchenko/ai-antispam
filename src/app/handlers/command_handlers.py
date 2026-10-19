@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import cast
 
 from aiogram import F, types
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import (
     Chat,
@@ -60,41 +60,60 @@ def _command_addressee(text: str) -> tuple[str, str | None]:
 
 @dp.message(F.text.startswith("/"), F.chat.type != "private")
 async def delete_and_redirect_to_pm(message: types.Message) -> str:
-    """Удаляет команду в группе и отправляет сообщение о переходе в ЛС. Использует answer(), т.к. reply() падает после delete()."""
-    # #122: в группе с несколькими ботами чужие команды — не наши.
-    # Сообщение другого бота не трогаем вовсе: ни удаления, ни ответа.
+    """Групповая команда: памятку — в личку, чат не трогаем (#122).
+
+    Раньше команда удалялась, а в группу постилась памятка «команды работают
+    только в ЛС». В чате с несколькими ботами это инвазивно: автодополнение
+    Telegram дописывает @username, команда, набранная для другого бота, может
+    достаться нам — и мы съедаем чужую команду вместе с публичной памяткой.
+
+    Теперь: чужой адресат — не реагируем вовсе; свой — памятку отправляем
+    В ЛИЧКУ, сообщение в группе не удаляем и в чат ничего не пишем.
+    """
+    # Сообщение бота не трогаем. По умолчанию Bot API их и не доставляет
+    # (privacy mode ON ⇒ бот видит только адресованные ему команды); ветка
+    # нужна на случай включённого Bot-to-Bot Communication Mode в BotFather.
     sender = message.from_user
     if sender is not None and sender.is_bot:
         return "command_from_bot_skipped"
 
     text = message.text or ""
     _, addressee = _command_addressee(text)
-    # #122: `/cmd@OtherBot` адресована другому боту — молча выходим.
-    # Раньше мы её удаляли и постили в чат памятку про ЛС.
+    # `/cmd@OtherBot` — не наша команда: ни удаления, ни ответа.
     if addressee and addressee.lower() != get_bot_username().lower():
         return "command_addressed_to_other_bot_skipped"
 
-    with contextlib.suppress(Exception):
-        await message.delete()
     lang = resolve_lang(message, None)
 
-    # When /start has a param (e.g. from startgroup=landing deep link), show brief ready message
+    # startgroup deep link: подтверждение добавления в группу остаётся
+    # публичным — это прямой ответ на осознанное действие.
     if text.startswith("/start ") and len(text) > 7:
         param = text[7:].strip()
         if param in ("landing",) or param.startswith("setup_"):
+            with contextlib.suppress(Exception):
+                await message.delete()
             brief = t(lang, "group_redirect.start_param_brief")
             await message.answer(brief)
             return "command_group_start_param_brief"
 
+    # Всё остальное — в личку, если пользователь её открывал.
+    if sender is None:
+        return "command_group_dm_skipped_no_user"
     group_help_text = t(lang, "group_redirect.title") + t(
         lang, "group_redirect.body", add_to_group_url=get_add_to_group_url()
     )
-    await message.answer(
-        group_help_text,
-        parse_mode="HTML",
-        disable_web_page_preview=True,
-    )
-    return "command_group_redirect_to_pm"
+    try:
+        await bot.send_message(
+            sender.id,
+            group_help_text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    except TelegramAPIError:
+        # Пользователь не начинал диалог с ботом (403) — молчим.
+        logger.debug("group command: DM to %s failed, staying silent", sender.id)
+        return "command_group_dm_failed_silent"
+    return "command_group_dm_sent"
 
 
 async def _try_send_linked_channel_offer(

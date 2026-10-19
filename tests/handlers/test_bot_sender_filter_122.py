@@ -1,15 +1,19 @@
-"""#122 — в группе с несколькими ботами не реагируем на чужих ботов.
+"""#122 — в группе с несколькими ботами не реагируем на чужие команды.
 
-Два входа, обе двери закрыты:
-1. `updates_filter` — сообщение бота не попадает в пайплайн модерации;
+Три входа:
+1. `updates_filter` — сообщение бота не попадает в пайплайн модерации
+   (по умолчанию Bot API их и не доставляет: privacy mode ON);
 2. `delete_and_redirect_to_pm` — команда, адресованная другому боту
-   (`/cmd@OtherBot`), не удаляется и не вызывает памятку про ЛС.
+   (`/cmd@OtherBot`), не удаляется и не вызывает памятку;
+3. та же функция — команда, адресованная НАМ, больше не удаляется и не
+   порождает публичную памятку: памятка уходит в личку, чат молчит.
 """
 
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aiogram.exceptions import TelegramForbiddenError
 from aiogram.types import Chat, Message, User
 
 from src.app.handlers.command_handlers import delete_and_redirect_to_pm
@@ -36,6 +40,7 @@ def _mock_message(*, is_bot: bool = False, text: str = "/start") -> MagicMock:
     message = MagicMock()
     message.text = text
     message.from_user = MagicMock()
+    message.from_user.id = 7
     message.from_user.is_bot = is_bot
     message.delete = AsyncMock()
     message.answer = AsyncMock()
@@ -136,29 +141,89 @@ class TestGroupCommandAddressee:
         message.answer.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_command_addressed_to_us_is_handled(self):
-        """Контроль: команда с нашим @username по-прежнему удаляется и получает ответ."""
+    async def test_command_addressed_to_us_is_answered_in_dm_only(self):
+        """Своя команда: памятка уходит в ЛС, чат не трогаем (#122)."""
         message = _mock_message(is_bot=False, text=f"/respond@{OWN}")
 
-        with patch(
-            "src.app.handlers.command_handlers.get_bot_username", return_value=OWN
+        with (
+            patch(
+                "src.app.handlers.command_handlers.get_bot_username", return_value=OWN
+            ),
+            patch(
+                "src.app.handlers.command_handlers.bot.send_message",
+                new_callable=AsyncMock,
+            ) as send_message,
         ):
             result = await delete_and_redirect_to_pm(message)
 
-        assert result == "command_group_redirect_to_pm"
-        message.delete.assert_awaited_once()
-        message.answer.assert_awaited_once()
+        assert result == "command_group_dm_sent"
+        message.delete.assert_not_awaited()
+        message.answer.assert_not_awaited()
+        send_message.assert_awaited_once()
+        assert send_message.await_args.args[0] == 7
 
     @pytest.mark.asyncio
-    async def test_command_without_addressee_is_handled(self):
-        """Контроль: обычная команда без @username — наша."""
+    async def test_command_without_addressee_is_answered_in_dm_only(self):
+        """Команда без @username — тоже только в ЛС, без публичной памятки."""
         message = _mock_message(is_bot=False, text="/help")
 
-        with patch(
-            "src.app.handlers.command_handlers.get_bot_username", return_value=OWN
+        with (
+            patch(
+                "src.app.handlers.command_handlers.get_bot_username", return_value=OWN
+            ),
+            patch(
+                "src.app.handlers.command_handlers.bot.send_message",
+                new_callable=AsyncMock,
+            ) as send_message,
         ):
             result = await delete_and_redirect_to_pm(message)
 
-        assert result == "command_group_redirect_to_pm"
+        assert result == "command_group_dm_sent"
+        message.delete.assert_not_awaited()
+        message.answer.assert_not_awaited()
+        send_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_dm_refused_stays_silent(self):
+        """Пользователь не начинал диалог (403) — в группе тоже молчим."""
+        message = _mock_message(is_bot=False, text="/help")
+
+        with (
+            patch(
+                "src.app.handlers.command_handlers.get_bot_username", return_value=OWN
+            ),
+            patch(
+                "src.app.handlers.command_handlers.bot.send_message",
+                new_callable=AsyncMock,
+                side_effect=TelegramForbiddenError(
+                    method=MagicMock(),
+                    message="Forbidden: bot can't initiate conversation",
+                ),
+            ),
+        ):
+            result = await delete_and_redirect_to_pm(message)
+
+        assert result == "command_group_dm_failed_silent"
+        message.delete.assert_not_awaited()
+        message.answer.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_startgroup_deeplink_still_confirms_publicly(self):
+        """Контроль: startgroup-диплинк — осознанное действие, ответ публичный."""
+        message = _mock_message(is_bot=False, text="/start setup_123")
+
+        with (
+            patch(
+                "src.app.handlers.command_handlers.get_bot_username", return_value=OWN
+            ),
+            patch(
+                "src.app.handlers.command_handlers.bot.send_message",
+                new_callable=AsyncMock,
+            ) as send_message,
+        ):
+            result = await delete_and_redirect_to_pm(message)
+
+        assert result == "command_group_start_param_brief"
         message.delete.assert_awaited_once()
         message.answer.assert_awaited_once()
+        send_message.assert_not_awaited()
