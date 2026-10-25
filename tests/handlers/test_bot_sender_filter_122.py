@@ -1,8 +1,13 @@
 """#122 — в группе с несколькими ботами не реагируем на чужие команды.
 
 Три входа:
-1. `updates_filter` — сообщение бота не попадает в пайплайн модерации
-   (по умолчанию Bot API их и не доставляет: privacy mode ON);
+1. `updates_filter` — сообщение ЧУЖОГО бота не попадает в пайплайн модерации.
+   Трафик бот-в-бота Bot API отбрасывает вовсе (core.telegram.org/bots/faq,
+   "regardless of mode"), но это не значит, что боты нам не приходят: ответ
+   гостевого бота, которого позвал человек, доставляется как user-initiated и
+   несёт `guest_bot_caller_user`. Такой бот — не чужой, его сообщение
+   модерируется как сообщение вызвавшего (#123), и именно этот случай здесь
+   проверяется наравне с обычным ботом;
 2. `delete_and_redirect_to_pm` — команда, адресованная другому боту
    (`/cmd@OtherBot`), не удаляется и не вызывает памятку;
 3. та же функция — команда, адресованная НАМ, больше не удаляется и не
@@ -16,6 +21,7 @@ import pytest
 from aiogram.exceptions import TelegramForbiddenError
 from aiogram.types import Chat, Message, User
 
+from src.app.common.guest_bots import guest_bot_caller
 from src.app.handlers.command_handlers import delete_and_redirect_to_pm
 from src.app.handlers.message.validation import check_skip_bot_sender
 from src.app.handlers.updates_filter import (
@@ -26,14 +32,24 @@ from src.app.handlers.updates_filter import (
 OWN = "ai_spam_blocker_bot"
 
 
-def _message(*, is_bot: bool = False, text: str = "/start") -> Message:
+def _message(
+    *,
+    is_bot: bool = False,
+    text: str = "/start",
+    guest_bot_caller_user: User | None = None,
+) -> Message:
+    """Сообщение в группе. `guest_bot_caller_user` — человек, вызвавший бота (#123)."""
     return Message.model_construct(
         message_id=1,
         date=datetime.now(UTC),
         chat=Chat.model_construct(id=-100, type="supergroup", title="group"),
         from_user=User.model_construct(id=7, is_bot=is_bot, first_name="x"),
         text=text,
+        guest_bot_caller_user=guest_bot_caller_user,
     )
+
+
+CALLER = User.model_construct(id=555, is_bot=False, first_name="caller")
 
 
 def _mock_message(*, is_bot: bool = False, text: str = "/start") -> MagicMock:
@@ -109,6 +125,57 @@ class TestCheckSkipBotSender:
         skip, reason = check_skip_bot_sender(message)
         assert skip is False
         assert reason == ""
+
+
+class TestGuestBotIsNotAForeignBot:
+    """#123 — вызванный бот проходит оба рубежа, невызванный по-прежнему нет.
+
+    Разница только в `guest_bot_caller_user`: у гостевого бота он заполнен
+    Telegram-ом, у обычного — None. Один и тот же предикат
+    (`common.guest_bots.is_foreign_bot_message`) стоит на фильтре роутинга и
+    внутри валидации, поэтому проверяем обе двери одним набором случаев.
+    """
+
+    @pytest.mark.asyncio
+    async def test_guest_bot_message_passes_both_filters(self):
+        message = _message(is_bot=True, guest_bot_caller_user=CALLER)
+        assert await filter_handle_message(message) is True
+        assert await filter_handle_edited_message(message) is True
+
+    @pytest.mark.asyncio
+    async def test_ordinary_bot_message_is_still_filtered_out(self):
+        """Контроль #122 не ослаблен: без вызвавшего бот отсекается как раньше."""
+        message = _message(is_bot=True, guest_bot_caller_user=None)
+        assert await filter_handle_message(message) is False
+        assert await filter_handle_edited_message(message) is False
+
+    @pytest.mark.asyncio
+    async def test_human_message_is_unaffected_by_the_new_predicate(self):
+        message = _message(is_bot=False)
+        assert await filter_handle_message(message) is True
+        assert await filter_handle_edited_message(message) is True
+
+    def test_guest_bot_sender_is_not_skipped_here(self):
+        """Второй рубеж согласен с первым: гостевого бота модерируем."""
+        skip, reason = check_skip_bot_sender(
+            _message(is_bot=True, guest_bot_caller_user=CALLER)
+        )
+        assert skip is False
+        assert reason == ""
+
+    def test_ordinary_bot_sender_is_still_skipped_here(self):
+        skip, reason = check_skip_bot_sender(
+            _message(is_bot=True, guest_bot_caller_user=None)
+        )
+        assert skip is True
+        assert reason == "message_from_bot_skipped"
+
+    def test_guest_bot_caller_returns_the_human(self):
+        assert guest_bot_caller(_message(is_bot=True, guest_bot_caller_user=CALLER)) == CALLER
+
+    def test_guest_bot_caller_is_none_for_ordinary_bot_and_human(self):
+        assert guest_bot_caller(_message(is_bot=True)) is None
+        assert guest_bot_caller(_message(is_bot=False)) is None
 
 
 class TestGroupCommandAddressee:
