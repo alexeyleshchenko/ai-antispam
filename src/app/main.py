@@ -288,6 +288,15 @@ def extract_update_type_ignored(json: dict) -> str:
     update_keys = [key for key in json if key != "update_id"]
 
     if len(update_keys) == 1:
+        # Бот, которого никто не вызывал, — не «проигнорированное сообщение»
+        # (#123): у него своё имя в телеметрии, иначе пропуск читается как
+        # безобидный. Гостевой бот сюда не попадает: его ведёт пайплайн.
+        # Ключ ограничен message/edited_message намеренно: `*.from.is_bot`
+        # иначе переименовал бы и нажатие кнопки ботом.
+        if update_keys[0] in ("message", "edited_message") and get_dotted_path(
+            json, "*.from.is_bot"
+        ):
+            return f"{update_keys[0]}_foreign_bot_ignored"
         return f"{update_keys[0]}_ignored"
     elif not update_keys:
         return "empty_update_ignored"

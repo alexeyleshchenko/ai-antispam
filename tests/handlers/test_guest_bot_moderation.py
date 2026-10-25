@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from aiogram.types import Chat, Message, User
 
 from src.app.common.utils import determine_effective_user_id
+from src.app.main import extract_update_type_ignored
 from src.app.types import MessageNotificationContext
 
 SUMMONER_ID = 6350489404
@@ -114,3 +115,45 @@ class TestNotificationContext:
         context = MessageNotificationContext.from_message(message)
         assert context.effective_user_id == BOT_ID
         assert context.violator_username == "rates_bot"
+
+
+class TestIgnoredTag:
+    """Пропущенный чужой бот называется своим именем, а не `message_ignored`."""
+
+    def test_extract_update_type_ignored_message_from_bot(self):
+        update = {
+            "update_id": 726166377,
+            "message": {"message_id": 17836, "from": {"id": BOT_ID, "is_bot": True}},
+        }
+        assert extract_update_type_ignored(update) == "message_foreign_bot_ignored"
+
+    def test_extract_update_type_ignored_edited_message_from_bot(self):
+        update = {
+            "update_id": 726166378,
+            "edited_message": {
+                "message_id": 17836,
+                "from": {"id": BOT_ID, "is_bot": True},
+            },
+        }
+        assert (
+            extract_update_type_ignored(update) == "edited_message_foreign_bot_ignored"
+        )
+
+    def test_extract_update_type_ignored_message_from_human(self):
+        update = {
+            "update_id": 726166379,
+            "message": {"message_id": 1, "from": {"id": 42, "is_bot": False}},
+        }
+        assert extract_update_type_ignored(update) == "message_ignored"
+
+    def test_extract_update_type_ignored_message_without_from(self):
+        # Контроль регрессии: tests/test_server.py шлёт апдейт без `from`.
+        update = {"update_id": 726166380, "message": {"message_id": 2}}
+        assert extract_update_type_ignored(update) == "message_ignored"
+
+    def test_extract_update_type_ignored_callback_from_bot(self):
+        update = {
+            "update_id": 726166381,
+            "callback_query": {"id": "1", "from": {"id": BOT_ID, "is_bot": True}},
+        }
+        assert extract_update_type_ignored(update) == "callback_query_ignored"
