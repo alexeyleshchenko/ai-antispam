@@ -137,6 +137,25 @@ async def _save_classification_lookup(
         logger.warning(f"Failed to save message lookup after classification: {e}")
 
 
+def _log_early_exit(
+    message: types.Message, reason: str, *, level: int = logging.DEBUG
+) -> None:
+    """Одна строка на выход, который иначе не оставляет следа (#123).
+
+    chat_id, message_id и reason — минимум, по которому потом ищется инцидент.
+    Уровень выбирает вызывающий: частый доброкачественный выход (админ пишет
+    постоянно) — DEBUG, аномальный и редкий — WARNING. INFO на каждый такой
+    выход был бы лог-флудом, поэтому его здесь нет.
+    """
+    logger.log(
+        level,
+        "Moderation early exit: reason=%s chat_id=%s message_id=%s",
+        reason,
+        message.chat.id,
+        message.message_id,
+    )
+
+
 async def handle_moderated_message(
     message: types.Message, *, source: str = "new"
 ) -> str:
@@ -147,6 +166,9 @@ async def handle_moderated_message(
     """
     user_id = determine_effective_user_id(message)
     if user_id is None:
+        # Аномалия и редкость: групповое сообщение без опознаваемого
+        # отправителя. Раньше выходило молча (#123).
+        _log_early_exit(message, "message_no_user_info", level=logging.WARNING)
         return "message_no_user_info"
 
     chat_id = message.chat.id
@@ -162,6 +184,11 @@ async def handle_moderated_message(
     if exit_reason or group is None:
         if exit_reason == "message_trusted_member_skipped":
             await _handle_trusted_member_exit(message, user_id)
+        if exit_reason == "message_from_admin_skipped":
+            # Валидатор знает только chat_id/user_id, а для лога нужен ещё и
+            # message_id, поэтому строка пишется здесь, где сообщение есть.
+            # DEBUG: админы пишут постоянно, INFO был бы флудом (#123).
+            _log_early_exit(message, exit_reason)
         return exit_reason
 
     logger.debug(

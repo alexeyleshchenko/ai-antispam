@@ -110,10 +110,17 @@ def check_skip_bot_sender(message: types.Message) -> tuple[bool, str]:
     """
     if is_foreign_bot_message(message):
         sender = message.from_user
-        bot_id = sender.id if sender is not None else None
-        logger.debug(
-            f"Skip moderation for message {message.message_id} "
-            f"from bot {bot_id} in chat {message.chat.id}"
+        # INFO: эта ветка редка по построению и обязана быть видна, если
+        # фильтр роутинга когда-нибудь пропустит чужого бота (#123).
+        logger.info(
+            "Skip moderation for foreign bot message: chat_id=%s message_id=%s "
+            "bot_id=%s guest_bot_caller_id=%s",
+            message.chat.id,
+            message.message_id,
+            sender.id if sender is not None else None,
+            message.guest_bot_caller_user.id
+            if message.guest_bot_caller_user is not None
+            else None,
         )
         return True, "message_from_bot_skipped"
     return False, ""

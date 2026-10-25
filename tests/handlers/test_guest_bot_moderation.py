@@ -10,11 +10,15 @@
    не `message_ignored` (шаг 3).
 """
 
+import logging
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from aiogram.types import Chat, Message, User
 
 from src.app.common.utils import determine_effective_user_id
+from src.app.handlers.message.pipeline import handle_moderated_message
 from src.app.main import extract_update_type_ignored
 from src.app.types import MessageNotificationContext
 
@@ -157,3 +161,95 @@ class TestIgnoredTag:
             "callback_query": {"id": "1", "from": {"id": BOT_ID, "is_bot": True}},
         }
         assert extract_update_type_ignored(update) == "callback_query_ignored"
+
+
+class TestEarlyExitLogs:
+    """Выходы, которые раньше молчали, теперь оставляют строку (#123)."""
+
+    @staticmethod
+    def _exit_lines(caplog) -> list[str]:
+        return [
+            r.getMessage()
+            for r in caplog.records
+            if "Moderation early exit" in r.getMessage()
+        ]
+
+    @pytest.mark.asyncio
+    async def test_early_exit_admin_skip_is_logged_at_debug(self, caplog):
+        message = _message(
+            from_user=User.model_construct(id=42, is_bot=False, first_name="Admin")
+        )
+        with (
+            caplog.at_level(logging.DEBUG),
+            patch(
+                "src.app.handlers.message.pipeline.is_member_in_group",
+                new=AsyncMock(return_value=False),
+            ),
+            patch(
+                "src.app.handlers.message.pipeline.validate_group_and_check_early_exits",
+                new=AsyncMock(return_value=(MagicMock(), "message_from_admin_skipped")),
+            ),
+        ):
+            reason = await handle_moderated_message(message)
+
+        assert reason == "message_from_admin_skipped"
+        records = [
+            r
+            for r in caplog.records
+            if "Moderation early exit" in r.getMessage()
+        ]
+        assert len(records) == 1
+        record = records[0]
+        assert record.levelno == logging.DEBUG
+        text = record.getMessage()
+        assert "message_from_admin_skipped" in text
+        assert f"chat_id={GROUP_ID}" in text
+        assert "message_id=17836" in text
+
+    @pytest.mark.asyncio
+    async def test_early_exit_no_user_info_is_logged_at_warning(self, caplog):
+        # Ни from_user, ни sender_chat: effective id не определяется.
+        message = _message()
+        with caplog.at_level(logging.DEBUG):
+            reason = await handle_moderated_message(message)
+
+        assert reason == "message_no_user_info"
+        records = [
+            r
+            for r in caplog.records
+            if "Moderation early exit" in r.getMessage()
+        ]
+        assert len(records) == 1
+        record = records[0]
+        assert record.levelno == logging.WARNING
+        text = record.getMessage()
+        assert "message_no_user_info" in text
+        assert f"chat_id={GROUP_ID}" in text
+        assert "message_id=17836" in text
+
+    @pytest.mark.asyncio
+    async def test_early_exit_absent_for_a_message_that_is_not_an_admin_skip(
+        self, caplog
+    ):
+        message = _message(
+            from_user=User.model_construct(id=42, is_bot=False, first_name="Human")
+        )
+        with (
+            caplog.at_level(logging.DEBUG),
+            patch(
+                "src.app.handlers.message.pipeline.is_member_in_group",
+                new=AsyncMock(return_value=False),
+            ),
+            patch(
+                "src.app.handlers.message.pipeline.validate_group_and_check_early_exits",
+                new=AsyncMock(return_value=(None, "message_trusted_member_skipped")),
+            ),
+            patch(
+                "src.app.handlers.message.pipeline._handle_trusted_member_exit",
+                new=AsyncMock(),
+            ),
+        ):
+            reason = await handle_moderated_message(message)
+
+        assert reason == "message_trusted_member_skipped"
+        assert self._exit_lines(caplog) == []
