@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from .common.guest_bots import guest_bot_caller
 from .common.utils import (
     determine_effective_user_id,
     format_chat_or_channel_display,
@@ -415,6 +416,12 @@ class MessageNotificationContext:
         if is_channel_sender and message.sender_chat is not None:
             violator_name = message.sender_chat.title or "Канал"
             violator_username = getattr(message.sender_chat, "username", None)
+        elif (caller := guest_bot_caller(message)) is not None:
+            # Гостевой бот (#123): нарушитель — вызвавший его человек, иначе
+            # админ увидит в уведомлении одноразового бота, а кнопка забанит
+            # человека. Идентичность должна совпадать с effective_user_id.
+            violator_name = caller.full_name or "Пользователь без имени"
+            violator_username = getattr(caller, "username", None)
         elif message.from_user is not None:
             violator_name = message.from_user.full_name or "Пользователь без имени"
             violator_username = getattr(message.from_user, "username", None)

@@ -25,6 +25,8 @@ from tenacity import (
     wait_exponential,
 )
 
+from .guest_bots import guest_bot_caller
+
 logger = logging.getLogger(__name__)
 
 # Low-level / transport errors retried by retry_on_network_error
@@ -242,6 +244,8 @@ def determine_effective_user_id(message: types.Message) -> int | None:
     Determine the effective user ID for moderation.
 
     For channel messages (sender_chat), use channel ID unless it's the group itself (anonymous admin).
+    For guest bots (#123), use the ID of the human who summoned the bot: the bot
+    account is disposable, the summoner is who to classify and ban.
     For regular users, use their user ID.
 
     Args:
@@ -252,7 +256,9 @@ def determine_effective_user_id(message: types.Message) -> int | None:
     """
     if message.sender_chat and message.sender_chat.id != message.chat.id:
         return message.sender_chat.id
-    elif message.from_user:
+    if (caller := guest_bot_caller(message)) is not None:
+        return caller.id
+    if message.from_user:
         return message.from_user.id
     return None
 
