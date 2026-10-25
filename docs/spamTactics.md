@@ -84,6 +84,17 @@ The project defines spam not just as unsolicited advertising, but as **any conte
 *   **Weakness / detection hints**: `message.external_reply` present (and/or `message.quote`); message feels topically disconnected from surrounding group discussion but exactly matches quoted channel post topic; reply comes from a user who rarely participates but jumps on channel cross-posts.
 *   **Mitigation (2026-06)**: `extract_reply_context()` updated to check `message.external_reply` (fallback to `reply_to_message`); extracts `quote` text for LLM context. Reply context is now tagged as `[REPLY TO EXTERNAL SOURCE from "Channel Title"]` in the prompt, and `add_reply_context_guidance()` explicitly instructs the LLM about this reply type.
 
+### 12. Guest Bot Summoning ("Hire a Bot to Say It")
+*   **Method**: A member mentions a bot in the chat (a one-word "help me"-style trigger); the bot answers **in the group under its own account**, and that answer is the spam payload — vacancies, phones, crypto links. The human who summoned it often posts nothing incriminating himself, so his own message reads as innocent.
+*   **Hook**: The payload arrives from an account the group has never seen and that posts exactly once, while the message that *caused* it belongs to a long-standing member — so a human reading the thread sees a familiar name next to an unfamiliar bot.
+*   **Why it works**:
+    *   Bot-to-bot traffic is not delivered — the Bot API states bots *"will not be able to see messages from other bots regardless of mode"* (core.telegram.org/bots/faq) — so a blanket "skip everything from a bot" filter looks safe. A **guest-bot reply is user-initiated**, so Telegram delivers it and names the summoner in `guest_bot_caller_user`.
+    *   A filter that drops every bot sender therefore drops the payload **before any handler runs**: no classification, no delete, and no trace beyond an ignored-tag.
+    *   The payload comes from a fresh throwaway bot each time, so per-bot blocklists and allowlists are both useless.
+*   **Confirmed case (2026-10-25)**: In chat `-1001503592176`, messages **17836**, **17837**, **17838** (from-ids `8839849835`, `8694772380`, `8967879593`) arrived within 0.09 s of each other, every one carrying `guest_bot_caller_user.id = 6350489404` — the same member whose message **17835** summoned them. Logfire update_ids `726166377` (the summon, `from.id 6350489404`, `is_bot: false`) and `726166378`–`726166380` (the payloads). Production tagged the three payloads `message_ignored`; they had to be deleted by hand.
+*   **Weakness / detection hints**: `message.from_user.is_bot` is true **and** `message.guest_bot_caller_user` is present — that pair is the whole signature, and both halves are already in the delivered update. Correlate a burst of one-shot bot accounts against a single recent human message in the same chat.
+*   **Mitigation (2026-10)**: `#123` adds one predicate, `is_foreign_bot_message()` (`src/app/common/guest_bots.py`), used by **both** routing (`updates_filter.py`) and validation (`check_skip_bot_sender`): a bot message that has a summoner is moderated, a bot message without one stays filtered exactly as `#122` intended. The payload is attributed to the **summoner**, so the ban lands on the account that keeps minting throwaway bots, and an admin or trusted summoner is skipped by the existing early exits rather than moderated. Shipped and deployed as `ef7a031` (run `40245529519`); **no production guest-bot payload has been observed since the swap**, so the mitigation is unproven against live traffic — this clause gets rewritten when one arrives.
+
 ## Mostly Used Spam Tactics
 
 Based on current trends, the most frequent tactics are:
@@ -93,7 +104,7 @@ Based on current trends, the most frequent tactics are:
 4.  **Knowledge Sharing Bait**: Offering free PDFs or courses to start a private conversation.
 5.  **Native Ad Imitation**: Starting a conversation about a specific niche (real estate, crypto) to eventually drop a "recommendation".
 
-**Emerging (monitor)**: **Benign-then-edit** (tactic 10) — partially mitigated for new probation members; monitor grandfathered trusted users on edits. **Cross-Channel Reply Abuse** (tactic 11) — not yet mitigated, requires code fix in `extract_reply_context()` and `establish_peer_resolution_context`.
+**Emerging (monitor)**: **Benign-then-edit** (tactic 10) — partially mitigated for new probation members; monitor grandfathered trusted users on edits. **Cross-Channel Reply Abuse** (tactic 11) — not yet mitigated, requires code fix in `extract_reply_context()` and `establish_peer_resolution_context`. **Guest Bot Summoning** (tactic 12) — filter fixed and deployed (`#123`, `ef7a031`), but not yet observed against a live payload; monitor for the first post-deploy guest bot and for guest-bot **edits**, which only stay moderated if Telegram repeats `guest_bot_caller_user` on `edited_message`.
 
 ## Confirmed Spam Examples from Database
 
