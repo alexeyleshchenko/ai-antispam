@@ -530,3 +530,82 @@ async def test_confirm_pending_example_as_spam_not_found(patched_db_conn, clean_
         chat_id=999999, message_id=999999, admin_id=12345
     )
     assert result is False
+
+
+@pytest.mark.asyncio
+async def test_both_inserters_record_provenance(patched_db_conn, clean_db):
+    """#123: обе вставки пишут chat_id / message_id / effective_user_id.
+
+    Ручной путь (подтверждение пересланного спама) раньше терял все три id,
+    а ожидающая строка их несла — асимметрия и была дефектом.
+    """
+    async with clean_db.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT chat_id, message_id, effective_user_id FROM spam_examples"
+        )
+        assert rows == []
+
+    chat_id, message_id, effective_user_id = -1001503592176, 17836, 6350489404
+
+    pending_row_id = await insert_pending_spam_example(
+        chat_id=chat_id,
+        message_id=message_id,
+        effective_user_id=effective_user_id,
+        text="pending path payload",
+    )
+    assert isinstance(pending_row_id, int)
+
+    assert (
+        await add_spam_example(
+            "manual path payload",
+            100,
+            chat_id=chat_id,
+            message_id=message_id + 1,
+            effective_user_id=effective_user_id,
+        )
+        is True
+    )
+
+    async with clean_db.acquire() as conn:
+        recorded = await conn.fetch(
+            """
+            SELECT text, chat_id, message_id, effective_user_id
+            FROM spam_examples
+            ORDER BY text
+            """
+        )
+
+    by_text = {row["text"]: row for row in recorded}
+    assert set(by_text) == {"manual path payload", "pending path payload"}
+    for text in by_text:
+        row = by_text[text]
+        assert row["chat_id"] == chat_id, text
+        assert row["effective_user_id"] == effective_user_id, text
+    assert by_text["manual path payload"]["message_id"] == message_id + 1
+    assert by_text["pending path payload"]["message_id"] == message_id
+
+
+@pytest.mark.asyncio
+async def test_get_spam_examples_returns_only_content_keys(patched_db_conn, clean_db):
+    """#123: id-колонки не просачиваются в промпт классификатора."""
+    await add_spam_example(
+        "spam with provenance",
+        100,
+        chat_id=-1001503592176,
+        message_id=17836,
+        effective_user_id=6350489404,
+    )
+
+    examples = await get_spam_examples()
+
+    assert len(examples) == 1
+    assert set(examples[0]) == {
+        "text",
+        "name",
+        "bio",
+        "score",
+        "linked_channel_fragment",
+        "stories_context",
+        "reply_context",
+        "account_signals_context",
+    }

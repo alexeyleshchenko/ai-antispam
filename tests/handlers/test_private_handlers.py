@@ -31,6 +31,10 @@ class TestExtractOriginalMessageInfo:
         sender_user.id = 12345
         sender_user.full_name = "Spammer User"
         sender_user.username = "spammeruser"
+        # #123: real types.User always carries a bool here. A bare MagicMock
+        # attribute is truthy, which would flip the guest-bot branch and pass
+        # user_id=None to the lookup without anyone meaning it.
+        sender_user.is_bot = False
         origin.sender_user = sender_user
         forwarded_message.forward_origin = origin
         forwarded_message.forward_from = None
@@ -293,9 +297,30 @@ class TestAppendSpamCleanupTasks:
         }
         with caplog.at_level(logging.WARNING, logger="app.handlers.private_handlers"):
             _append_spam_cleanup_tasks([], info)
-        assert "Group chat ID or message ID not found" in caplog.text
+        assert "Origin carries no group message" in caplog.text
         assert "forward_origin_type=hidden_user" in caplog.text
         assert "candidate_chats=2" in caplog.text
+
+    def test_group_missing_cache_miss_is_distinguishable(self, caplog):
+        """#123: a lookup MISS and a non-group origin are different states.
+
+        Both used to print one sentence, so an ids-unknown defect read exactly
+        like a by-design skip.
+        """
+        info = {
+            "user_id": 12345,
+            "group_chat_id": None,
+            "group_message_id": None,
+            "forward_origin_type": "user",
+            "candidate_chats": 3,
+            "forwarded_sender_is_bot": True,
+            "message_lookup": "miss",
+        }
+        with caplog.at_level(logging.WARNING, logger="app.handlers.private_handlers"):
+            _append_spam_cleanup_tasks([], info)
+        assert "Message lookup cache miss" in caplog.text
+        assert "sender_is_bot=True" in caplog.text
+        assert "Origin carries no group message" not in caplog.text
 
     def test_warnings_without_context_render_none(self, caplog):
         """No origin/lookup ran -> fields absent from info -> render as None, not crash."""

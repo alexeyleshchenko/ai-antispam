@@ -296,8 +296,19 @@ async def add_spam_example(
     stories_context: str | None = None,
     reply_context: str | None = None,
     account_signals_context: str | None = None,
+    *,
+    chat_id: int | None = None,
+    message_id: int | None = None,
+    effective_user_id: int | None = None,
 ) -> bool:
-    """Add a new spam example to PostgreSQL"""
+    """Add a new spam example to PostgreSQL
+
+    `chat_id` / `message_id` / `effective_user_id` (#123) — происхождение
+    примера. `insert_pending_spam_example` пишет их всегда; ручной путь
+    (подтверждение пересланного спама) раньше терял их, и строка оставалась
+    без единой ссылки на сообщение и на аккаунт, который его прислал.
+    Для гостевого бота `effective_user_id` — вызвавший человек.
+    """
     pool = await get_pool()
     async with pool.acquire() as conn, conn.transaction():
         try:
@@ -326,9 +337,12 @@ async def add_spam_example(
                         stories_context,
                         reply_context,
                         account_signals_context,
+                        chat_id,
+                        message_id,
+                        effective_user_id,
                         created_at
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
                 """,
                 cleaned_text,
                 name,
@@ -339,6 +353,9 @@ async def add_spam_example(
                 stories_context,
                 reply_context,
                 account_signals_context,
+                chat_id,
+                message_id,
+                effective_user_id,
             )
             return True
         except Exception as e:  # noqa: BLE001

@@ -476,19 +476,42 @@ def _append_spam_cleanup_tasks(
         )
         return
 
-    logger.warning(
-        "Group chat ID or message ID not found in info, skipping message deletion "
-        "(forward_origin_type=%s, candidate_chats=%s)",
-        info.get("forward_origin_type"),
-        info.get("candidate_chats"),
-        extra={
-            "message_deletion": "skipped",
-            "group_chat_id": group_chat_id,
-            "group_message_id": group_message_id,
-            "forward_origin_type": info.get("forward_origin_type"),
-            "candidate_chats": info.get("candidate_chats"),
-        },
-    )
+    # #123: два РАЗНЫХ состояния раньше выглядели одинаково. Кэш промахнулся —
+    # ids неизвестны, и это дефект поиска. Либо источник вообще не групповое
+    # сообщение (пересылка от пользователя) — тогда удалять нечего by design.
+    if info.get("message_lookup") == "miss":
+        logger.warning(
+            "Message lookup cache miss: origin message ids unknown, "
+            "skipping message deletion "
+            "(forward_origin_type=%s, candidate_chats=%s, sender_is_bot=%s)",
+            info.get("forward_origin_type"),
+            info.get("candidate_chats"),
+            info.get("forwarded_sender_is_bot"),
+            extra={
+                "message_deletion": "skipped_cache_miss",
+                "message_lookup": "miss",
+                "group_chat_id": group_chat_id,
+                "group_message_id": group_message_id,
+                "forward_origin_type": info.get("forward_origin_type"),
+                "candidate_chats": info.get("candidate_chats"),
+            },
+        )
+    else:
+        logger.warning(
+            "Origin carries no group message, message deletion not applicable "
+            "(forward_origin_type=%s, candidate_chats=%s, message_lookup=%s)",
+            info.get("forward_origin_type"),
+            info.get("candidate_chats"),
+            info.get("message_lookup"),
+            extra={
+                "message_deletion": "not_applicable_no_group_origin",
+                "message_lookup": info.get("message_lookup"),
+                "group_chat_id": group_chat_id,
+                "group_message_id": group_message_id,
+                "forward_origin_type": info.get("forward_origin_type"),
+                "candidate_chats": info.get("candidate_chats"),
+            },
+        )
 
 
 @dp.callback_query(F.data.startswith("spam_example:"))
@@ -526,6 +549,11 @@ async def process_spam_example_callback(callback: types.CallbackQuery) -> str:
                 stories_context=info.get("stories_context"),
                 reply_context=info.get("reply_context"),
                 account_signals_context=info.get("account_signals_context"),
+                # #123: провенанс переживает подтверждение. Для гостевого бота
+                # info["user_id"] — вызвавший человек, а не одноразовый бот.
+                chat_id=info.get("group_chat_id"),
+                message_id=info.get("group_message_id"),
+                effective_user_id=info.get("user_id"),
             ),
             bot.edit_message_text(
                 chat_id=callback.message.chat.id,
@@ -596,6 +624,13 @@ def _build_base_forwarded_info(original_message: types.Message) -> dict[str, Any
         "stories_context": None,
         "reply_context": None,
         "account_signals_context": None,
+        # #123: пересланное сообщение гостевого бота несёт sender_user = БОТ,
+        # а строка кэша писалась на ВЫЗВАВШЕГО, поэтому точный матч по user_id
+        # гарантированно промахивался.
+        "forwarded_sender_is_bot": False,
+        # Итог поиска в кэше: skip / miss / success. Нужен, чтобы различать
+        # два разных предупреждения при подтверждении спама.
+        "message_lookup": None,
     }
 
 
@@ -616,6 +651,7 @@ async def _enrich_with_forward_metadata(
         info["name"] = user.full_name
         info["user_id"] = user.id
         info["username"] = user.username
+        info["forwarded_sender_is_bot"] = user.is_bot
         info["bio"] = await _safe_get_chat_bio(user.id)
 
     if isinstance(origin, types.MessageOriginUser):
@@ -623,6 +659,9 @@ async def _enrich_with_forward_metadata(
         info["name"] = info["name"] or sender_user.full_name
         info["user_id"] = sender_user.id
         info["username"] = info["username"] or sender_user.username
+        # #123: гость-бот. Кэш писался на вызвавшего, тут sender_user — бот,
+        # поэтому точный матч по user_id ниже отключён.
+        info["forwarded_sender_is_bot"] = sender_user.is_bot
         if not info["bio"]:
             info["bio"] = await _safe_get_chat_bio(sender_user.id)
     elif isinstance(origin, types.MessageOriginChannel):
@@ -659,6 +698,7 @@ async def _fill_lookup_context_if_needed(
     admin_group_ids = [group["id"] for group in admin_groups]
     info["candidate_chats"] = len(admin_group_ids)
     if not admin_group_ids:
+        info["message_lookup"] = "skip"
         logger.info(
             "Admin has no managed groups, skipping message lookup",
             extra={"message_lookup": "skip", "candidate_chats": 0},
@@ -671,6 +711,7 @@ async def _fill_lookup_context_if_needed(
         admin_group_ids=admin_group_ids,
     )
     if not lookup_result:
+        info["message_lookup"] = "miss"
         logger.info(
             "No matching message found in message_lookup_cache",
             extra={
@@ -683,6 +724,7 @@ async def _fill_lookup_context_if_needed(
 
     _merge_lookup_result_into_info(info, lookup_result)
     await _backfill_account_signals_if_missing(info, original_message)
+    info["message_lookup"] = "success"
     logger.info(
         "Message lookup succeeded",
         extra={
@@ -701,12 +743,18 @@ async def _find_message_lookup_result(
     forward_date = original_message.forward_date or original_message.date
     from_date = forward_date - timedelta(days=3)
     to_date = forward_date + timedelta(days=1)
+    # #123: у пересланного сообщения гостевого бота sender_user — БОТ, а строка
+    # кэша писалась на вызвавшего человека, поэтому точный матч по user_id
+    # промахивался ВСЕГДА. Без user_id остаются текст + чаты админа + окно:
+    # если одинаковый текст есть в двух группах, возьмётся более свежее
+    # сообщение — это строго лучше гарантированного промаха.
+    lookup_user_id = None if info.get("forwarded_sender_is_bot") else info["user_id"]
     return await find_message_by_text_and_user(
         message_text=info["text"],
         admin_chat_ids=admin_group_ids,
         from_date=from_date,
         to_date=to_date,
-        user_id=info["user_id"],
+        user_id=lookup_user_id,
     )
 
 
