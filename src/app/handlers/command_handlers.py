@@ -58,7 +58,7 @@ def _command_addressee(text: str) -> tuple[str, str | None]:
     return match.group(1), match.group(2)
 
 
-@dp.message(F.text.startswith("/"), F.chat.type != "private")
+@dp.message(F.text.startswith("/"), F.chat.type != "private", ~F.from_user.is_bot)
 async def delete_and_redirect_to_pm(message: types.Message) -> str:
     """Групповая команда: памятку — в личку, чат не трогаем (#122).
 

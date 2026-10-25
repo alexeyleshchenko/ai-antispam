@@ -5,6 +5,7 @@ import logging
 from aiogram import types
 
 from ...common.bot import bot
+from ...common.guest_bots import is_foreign_bot_message
 from ...common.utils import format_chat_log
 from ...database import get_group
 from ...database.group_operations import get_trusted_member_row
@@ -92,21 +93,27 @@ async def validate_group_and_check_early_exits(
 
 
 def check_skip_bot_sender(message: types.Message) -> tuple[bool, str]:
-    """Другой бот написал — не наша забота (#122).
+    """Чужой бот написал — не наша забота (#122).
 
     В группе с несколькими ботами команды и сообщения соседних ботов адресованы
     им, а не нам. Раньше они шли в полный пайплайн модерации и могли быть
     удалены как спам (`sender_chat` у обычного бота пуст, поэтому
     `check_skip_channel_bot_message` их не ловил).
 
+    Гостевой бот (#123) — не чужой: его вызвал человек, `guest_bot_caller_user`
+    это фиксирует, и такое сообщение модерируется как сообщение вызвавшего.
+    Предикат общий с фильтром роутинга (`common.guest_bots`), чтобы две
+    двери не разошлись.
+
     `from_user` может быть None (анонимный админ, пост канала) — такие
     сообщения разбирает канальная ветка ниже, здесь не трогаем.
     """
-    sender = message.from_user
-    if sender is not None and sender.is_bot:
+    if is_foreign_bot_message(message):
+        sender = message.from_user
+        bot_id = sender.id if sender is not None else None
         logger.debug(
             f"Skip moderation for message {message.message_id} "
-            f"from bot {sender.id} in chat {message.chat.id}"
+            f"from bot {bot_id} in chat {message.chat.id}"
         )
         return True, "message_from_bot_skipped"
     return False, ""
