@@ -10,7 +10,14 @@
 
 **Гостевые боты: почему спам теперь приходит не с аккаунта спамера**
 
-**Что произошло.** В одной из групп три рекламных сообщения пришли за **0,09 секунды** — с трёх разных аккаунтов, каждый из которых появился в группе ровно один раз и больше не писал. Все три были ответом на одно и то же сообщение участника, и сам он не написал ничего рекламного.
+**Что произошло.** По порядку, как это выглядело в группе:
+
+1. Участник пишет сообщение, в котором нет ничего, кроме трёх упоминаний: `@bot1 @bot2 @bot3`. Ни текста, ни картинки, ни ссылки.
+2. Через **9,4 секунды** отвечает первый бот — реклама обменника USDT.
+3. Через **0,05 секунды** — второй бот, с тем же текстом.
+4. Ещё через **0,04 секунды** — третий, тот же текст с другим вступлением.
+
+Итого: одно сообщение участника и три рекламных ответа за **0,09 секунды**. Все три — с аккаунтов, которых в группе никогда не было: каждый появился ровно один раз и больше не писал. Сам участник рекламы не писал вообще — только упоминания.
 
 **Что изменилось в Telegram.** В мае этого года появились **гостевые боты**. Раньше бот мог писать только там, куда его добавили: чтобы бот оказался в чужой группе, его должен пустить администратор, а во многих группах добавление ботов вообще запрещено. Теперь достаточно упомянуть бота по имени — и он отвечает в чате, участником которого **не является**. Ни приглашения, ни прав администратора, ни согласия владельца чата. В одном сообщении можно позвать до трёх ботов сразу — в том случае спамер использовал ровно три, то есть максимум.
 
@@ -30,14 +37,6 @@
 
 Администраторов и доверенных участников это не касается: если бота позвал админ, сообщение не удаляется — ровно как и сейчас, когда админ пишет что-то сам.
 
-**Как проверить свою группу.**
-
-1. **Права.** Бот должен быть админом с правом удалять сообщения. Без этого он видит спам, но не может его убрать — и честно предупредит вас об этом в личке.
-2. **Режим.** `/mode` в личке с ботом: уведомление на каждое удаление, автоудаление с отчётом или тихое автоудаление. Режим не меняется сам.
-3. **Язык.** `/lang` — интерфейс и уведомления переключаются на английский.
-4. **На что смотреть.** Один и тот же участник за короткое время вызывает несколько ботов, и те отвечают рекламой. Если такое увидели — напишите нам, это самый полезный сигнал, который у нас есть.
-5. **Закрыть лазейку целиком.** В группах с включённой защитой контента гостевые боты не работают вовсе. Минус очевиден: участники не смогут пересылать и сохранять сообщения. Наш бот при этом продолжает работать как обычно — он в группе полноправный участник.
-
 Бот: [@ai_spam_blocker_bot](https://t.me/ai_spam_blocker_bot) · Сайт: [ai-antispam.ru](https://ai-antispam.ru)
 
 ---
@@ -49,6 +48,8 @@
 - **The warning this issue was opened for has fired 0 times since the swap** — `not found in info`: 0, `Message lookup cache miss`: 0, `Origin carries no group message`: 0. Two WARNING lines exist in that window and neither is a moderation warning: one is `Server started`, the other is a credits notice for a chat with no paying admins.
 - **Not yet measured:** zero guest-bot payloads have arrived since the swap, so the end-to-end path has not been exercised by real traffic. `docs/spamTactics.md` tactic 12 states this in its own Mitigation clause and gets rewritten when one arrives. If you would rather publish only after a live catch, hold this draft until then — nothing in it becomes false by waiting.
 - **Mechanic facts, sourced 2026-10-26** (the post states them as plain facts; these are the receipts): guest mode shipped in Bot API 10.0 on 2026-05-08 (`core.telegram.org/bots/api-changelog`); a guest bot replies **once** in a chat it has not joined, "without being added as a member", and "up to 3 guest bots" may be mentioned in one message (`core.telegram.org/bots/features`); guest bots cannot be queried in groups with content protection enabled (`core.telegram.org/api/bots/guest-mode`).
-- **Nothing identifying is in the post:** no chat id, no admin id, no victim handle, no message ids.
+- **Nothing identifying is in the post:** no chat id, no admin id, no victim handle, no message ids, no bot usernames (the three mentions are shown as `@bot1 @bot2 @bot3`).
+- **The incident timeline is measured, not narrated.** Logfire rows for update ids `726166377`–`726166380`, read 2026-10-26: summon at `09:02:46.406Z` (a human, message `17835`, text = the three mentions and nothing else); replies at `09:02:55.780Z` (bot `8839849835`, caller `6350489404`), `09:02:55.833Z` (`8694772380`), `09:02:55.868Z` (`8967879593`). Deltas: 9.374 s / 0.053 s / 0.035 s, first-to-last 0.088 s. Every bot row carries `guest_bot_caller_user = 6350489404`, the summoner — which is the whole point of the fix.
+- **The "how to check your group" section was cut on owner instruction (2026-10-26).** It read as a strange how-to bolted onto a post that explains a mechanic. Its one load-bearing fact — guest bots cannot be queried in groups with content protection enabled — stays in `docs/spamTactics.md` tactic 12, where an admin can find it without the post turning into a manual.
 - **Deliberately not stated (owner instructions, 2026-10-26):** no Bot API terminology (the post speaks about Telegram as a user sees it), and no description of how such messages were handled before this change. The post explains the mechanic, the spammer's economics and the current behaviour. Do not reintroduce either when editing.
 - No publish path was added or invoked: no send tool, no bot-token call, no broadcast script.
