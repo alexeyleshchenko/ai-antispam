@@ -8,22 +8,17 @@
 
 ## RU (primary)
 
-**Спам чужим ботом: схема, которую пропускал любой фильтр «игнорировать ботов»**
+**Спам чужим ботом: реклама приходит не с аккаунта спамера**
 
 **Что произошло.** В одной из групп три сообщения с рекламой пришли за **0,09 секунды** — от трёх разных аккаунтов, каждый из которых появился ровно один раз и больше не писал. Все три были ответом на одно и то же сообщение участника, который сам ничего рекламного не написал.
 
-Наш бот их **не тронул**. Они попали в «игнорировать сообщения от ботов» — и умерли там, не дойдя до классификатора. Удалять пришлось руками.
+Наш бот их **не тронул**. Удалять пришлось руками.
 
-**Почему это работало.** В Bot API есть правило: боты не видят сообщения других ботов. Поэтому фильтр «пропускать всё, что от бота» выглядит безопасным — и так он выглядит у всех.
+**В чём схема.** Рекламу присылает не сам спамер, а бот, которого он вызвал. Аккаунт спамера при этом остаётся чистым: он пишет безобидную реплику, вызывает бота — и текст приходит уже от бота. Каждый раз это новый бот, которого нет ни в одном чёрном списке. Завтра будет следующий.
 
-Но ответ бота, которого **позвал человек**, — это не болтовня ботов между собой. Telegram доставляет его в группу и отдельно сообщает, **кто именно его вызвал**. Спамер этим и пользуется: пишет безобидную реплику, вызывает бота, а реклама приходит с чистого одноразового аккаунта, которого нет ни в одном чёрном списке. Завтра будет другой аккаунт.
+Чёрные списки ботов тут бесполезны: список всегда отстаёт на один аккаунт.
 
-Чёрные списки ботов тут бесполезны: каждый раз новый бот.
-
-**Что мы изменили.** Фильтр больше не «всё, что от бота». Он различает два случая:
-
-- **Бот, которого никто не звал** — отбрасывается, как раньше. Это шум, и трогать его незачем.
-- **Бот, которого позвал участник** — идёт в классификатор как обычное сообщение.
+**Что мы сделали.** Бот смотрит, кто вызвал бота, и проверяет такое сообщение как обычное — вместе с текстом и ссылками.
 
 И второе, что важнее: наказание получает **тот, кто вызвал бота**, а не одноразовый бот. Бот — расходник, его не жалко. Аккаунт, который раз за разом вызывает новых ботов, — не расходник.
 
@@ -47,4 +42,5 @@
 - **The warning this issue was opened for has fired 0 times since the swap** — `not found in info`: 0, `Message lookup cache miss`: 0, `Origin carries no group message`: 0. Two WARNING lines exist in that window and neither is a moderation warning: one is `Server started`, the other is a credits notice for a chat with no paying admins.
 - **Not yet measured:** zero guest-bot payloads have arrived since the swap, so the end-to-end path has not been exercised by real traffic. `docs/spamTactics.md` tactic 12 states this in its own Mitigation clause and gets rewritten when one arrives. If you would rather publish only after a live catch, hold this draft until then — nothing in it becomes false by waiting.
 - **Nothing identifying is in the post:** no chat id, no admin id, no victim handle, no message ids.
+- **Deliberately not stated (owner instruction, 2026-10-26):** the post does not name the delivery mechanism and does not describe prior handling. It states the tactic and the current behaviour only. Do not reintroduce either when editing.
 - No publish path was added or invoked: no send tool, no bot-token call, no broadcast script.
