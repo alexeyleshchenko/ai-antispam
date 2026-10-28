@@ -58,11 +58,18 @@ def _utcnow() -> datetime.datetime:
     return datetime.datetime.now(datetime.timezone.utc)
 
 
-def build_fixture(root: Path, *, row_hours_ago: float | None, artifact: bool) -> tuple[Path, Path]:
+def build_fixture(
+    root: Path, *, row_hours_ago: float | None, artifact: bool, subject: str = "internal-self-audit"
+) -> tuple[Path, Path]:
     """A throwaway `(ledger, scores)` pair. `row_hours_ago=None` writes no ledger at all.
 
     When `artifact` is set, the scorecard is dated the DAY AFTER the last recorded row --
     which is the semantic under test: a run happened for which no row was ever written.
+
+    The row carries the SELF-AUDIT subject by default (#124): the leg's clock is bound to that
+    subject, so a fixture row without one is not a self-audit run at all and the leg would
+    correctly ignore it. A case that wants a row the clock must NOT count passes another
+    subject -- that is the control, not a variation of this one.
     """
     ledger = root / "evidence" / "ledger.jsonl"
     scores = root / "evidence" / "scores"
@@ -74,6 +81,7 @@ def build_fixture(root: Path, *, row_hours_ago: float | None, artifact: bool) ->
             "ts": row_dt.isoformat().replace("+00:00", "Z"),
             "event": "run",
             "actor": "hq",
+            "subject": subject,
             "detail": "fixture row",
         }
         ledger.write_text(json.dumps(row) + "\n", encoding="utf-8")

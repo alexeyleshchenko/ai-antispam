@@ -852,6 +852,17 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     if (repo_root / "tests/test_audit_cadence_record.py").is_file():
         gates_to_run.append([sys.executable, "tests/test_audit_cadence_record.py"])
 
+    # 18. The cadence SUBJECT binding (#124) -- #17 above tells a DROPPED ROW from a MISSED RUN,
+    # but it read the clock off ANY `run`/`score` row, so an unrelated ledger row landing on a
+    # quiet day moved the clock and the leg read HELD while the self-audit had not run at all.
+    # Measured 2026-10-27: the day's audit never ran, and `n=267` -- a `#123` correction row --
+    # satisfied the leg's staleness check; the report read HELD. The clock is now bound to
+    # `subject == internal-self-audit`, and this gate reds if that binding is removed.
+    #
+    # SCRIPT-form, matching #16/#17.
+    if (repo_root / "tests/test_audit_cadence_subject.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_audit_cadence_subject.py"])
+
     # The commit-citation clause. SCRIPT-MODE (0 test functions collected, `__main__` present),
     # so a script registration is the honest form -- and unlike the cron gate this one is NOT
     # vacuous: it prints "examined N commit(s)" and exits 1 on an unexcused violation.
@@ -896,7 +907,24 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
 # (#116; measured 2026-10-03: the artifact `dd16280` was committed while the owed row never
 # landed, and the report read `MISSED: Last run: 39.9h ago`). So the record is NAMED in the
 # output, and a stale ledger row is classified against the artifact series.
-LEDGER_RECORD = "evidence/ledger.jsonl run/score rows"
+LEDGER_RECORD = "evidence/ledger.jsonl run/score rows with subject internal-self-audit"
+
+# The subject that marks a SELF-AUDIT run row. Binding the clock to it is the fix for #124:
+# before it, `event in ("run","score")` alone fed the clock, so ANY unrelated board row
+# satisfied the daily check. Measured: the `#123` correction row n=267 (2026-10-25T10:21:27Z)
+# was the newest `run` row of ANY subject until the 2026-10-28 stamp (n=269) -- 2.81 days --
+# and the 2026-10-26 scorecard says so in its own words, `Cadence Status HELD · Last run:
+# 19.5h ago`, with verdict PASSED, on a day whose handoff row was never written. Across that
+# window TWO rows were dropped (10-25, 10-26) and ONE run never happened (10-27); the clock
+# could not tell either from a healthy day while an unrelated row kept it fresh.
+SELF_AUDIT_SUBJECT = "internal-self-audit"
+
+# How far back a HOLE is looked for, in days ending at the newest scorecard. Bounded on
+# purpose: a hole is proved by an artifact whose row never landed, and the append-only law
+# forbids writing that row after the fact -- so an old hole has no repair space and an
+# unbounded rule would be a permanent red. Bounded, it names recent debt and ages out as the
+# window moves.
+CADENCE_HOLE_LOOKBACK_DAYS = 7
 
 # One label per state, shared by the stdout line, the markdown report and the JSON payload
 # so three surfaces cannot name the same run differently.
@@ -904,27 +932,59 @@ CADENCE_STATE_LABEL = {
     "held": "HELD",
     "missed_run": "MISSED (run)",
     "dropped_row": "DROPPED ROW",
+    "hole": "HOLE",
 }
 
-def latest_scorecard_date(scores_dir: Path) -> str | None:
-    """The newest dated scorecard artifact as `YYYY-MM-DD`, or None when none parses.
+def scorecard_dates(scores_dir: Path) -> list[str]:
+    """Every dated scorecard artifact as `YYYY-MM-DD`, ascending.
 
-    Only files matching the artifact naming law are read, and the stamp must PARSE as a
-    date: a stray file in the directory is not a run's record. The value is returned as the
-    `YYYY-MM-DD` string because lexicographic order IS chronological in that form.
+    Only files matching the artifact naming law are read, and each stamp must PARSE as a
+    date: a stray file in the directory is not a run's record. `YYYY-MM-DD` sorts
+    chronologically, so the list's order is the calendar's.
     """
     if not scores_dir.is_dir():
-        return None
-    latest = None
+        return []
+    dates = []
     for path in scores_dir.glob("*-self-audit.md"):
         stamp = path.name[: -len("-self-audit.md")]
         try:
             datetime.date.fromisoformat(stamp)
         except ValueError:
             continue
-        if latest is None or stamp > latest:
-            latest = stamp
-    return latest
+        dates.append(stamp)
+    return sorted(dates)
+
+def latest_scorecard_date(scores_dir: Path) -> str | None:
+    """The newest dated scorecard artifact as `YYYY-MM-DD`, or None when none parses."""
+    dates = scorecard_dates(scores_dir)
+    return dates[-1] if dates else None
+
+def find_cadence_holes(
+    row_dates: set[str], artifact_dates: list[str], latest_artifact: str | None
+) -> list[str]:
+    """Days inside the lookback window that carry a scorecard but NO self-audit row.
+
+    An artifact proves the run HAPPENED; a missing row proves the handoff never landed. The
+    pre-#124 leg compared only the NEWEST artifact with the last row, so it could name one
+    such day and only once the row series had already gone stale -- a hole sitting between two
+    healthy rows was invisible (#124 leg A). Here the two series are compared in full.
+    """
+    if not artifact_dates or not latest_artifact:
+        return []
+    try:
+        newest = datetime.date.fromisoformat(latest_artifact)
+    except ValueError:
+        return []
+    oldest = (newest - datetime.timedelta(days=CADENCE_HOLE_LOOKBACK_DAYS - 1)).isoformat()
+    return sorted(d for d in artifact_dates if oldest <= d <= latest_artifact and d not in row_dates)
+
+def render_cadence_holes(holes: list[str]) -> str:
+    """The hole days as `first..last`, or a single date when there is only one."""
+    if not holes:
+        return ""
+    if len(holes) == 1:
+        return holes[0]
+    return f"{holes[0]}..{holes[-1]}"
 
 def classify_stale_cadence(last_run_ts: str, latest_artifact: str | None) -> str:
     """Which record failed: a `dropped_row` (the run happened) or a `missed_run` (it did not).
@@ -940,11 +1000,20 @@ def classify_stale_cadence(last_run_ts: str, latest_artifact: str | None) -> str
     return "dropped_row" if latest_artifact > last_run_ts[:10] else "missed_run"
 
 def render_cadence_label(stats: dict[str, Any]) -> str:
-    """The cadence state's label, for every surface that reports it."""
+    """The cadence state's label, for every surface that reports it.
+
+    A `hole` label carries the DAYS it names: a state word alone would tell a reader that
+    something is missing without saying which handoffs, which is the same silence the state
+    was added to break (#124).
+    """
     state = stats.get("state")
     if state is None:
         state = "held" if stats.get("cadence_held") else "missed_run"
-    return CADENCE_STATE_LABEL.get(state, "MISSED")
+    label = CADENCE_STATE_LABEL.get(state, "MISSED")
+    holes = stats.get("holes") or []
+    if state == "hole" and holes:
+        return f"{label} {render_cadence_holes(holes)}"
+    return label
 
 def check_cadence_integrity(ledger_path: Path, scores_dir: Path | None = None) -> dict[str, Any]:
     """Check whether recurring processes ran according to declared schedule.
@@ -954,6 +1023,7 @@ def check_cadence_integrity(ledger_path: Path, scores_dir: Path | None = None) -
     that separates a dropped row from a missed run (#116).
     """
     latest_artifact = latest_scorecard_date(scores_dir) if scores_dir is not None else None
+    artifact_dates = scorecard_dates(scores_dir) if scores_dir is not None else []
     if not ledger_path.is_file():
         return {
             "cadence_held": False,
@@ -961,20 +1031,34 @@ def check_cadence_integrity(ledger_path: Path, scores_dir: Path | None = None) -
             "state": "missed_run",
             "record_read": LEDGER_RECORD,
             "artifact_latest_date": latest_artifact,
+            "holes": [],
         }
 
     now = datetime.datetime.now(datetime.timezone.utc)
     last_ts = None
+    row_dates: set[str] = set()
     with open(ledger_path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
                 try:
                     data = json.loads(line)
-                    if data.get("event") in ("run", "score"):
-                        last_ts = data.get("ts")
+                    # #124: the clock is fed ONLY by self-audit rows. An unrelated `run` row
+                    # (a board item's correction receipt) is not this process running, and
+                    # letting one feed the clock is how three handoffs went unnoticed.
+                    if data.get("event") not in ("run", "score"):
+                        continue
+                    if data.get("subject") != SELF_AUDIT_SUBJECT:
+                        continue
+                    ts = data.get("ts")
+                    if not ts:
+                        continue
+                    row_dates.add(ts[:10])
+                    last_ts = ts
                 except Exception:
                     pass
+
+    holes = find_cadence_holes(row_dates, artifact_dates, latest_artifact)
 
     if not last_ts:
         return {
@@ -983,6 +1067,7 @@ def check_cadence_integrity(ledger_path: Path, scores_dir: Path | None = None) -
             "state": "held",
             "record_read": LEDGER_RECORD,
             "artifact_latest_date": latest_artifact,
+            "holes": holes,
         }
 
     try:
@@ -990,13 +1075,20 @@ def check_cadence_integrity(ledger_path: Path, scores_dir: Path | None = None) -
         hours_diff = (now - t_last).total_seconds() / 3600.0
         # Expected daily cadence: interval <= 30 hours
         cadence_held = hours_diff <= 30.0
+        if cadence_held:
+            # A hole is invisible to the staleness clock: two healthy rows can bracket a day
+            # whose handoff never landed. This is #124 leg A -- the state must name it.
+            state = "hole" if holes else "held"
+        else:
+            state = classify_stale_cadence(last_ts, latest_artifact)
         return {
-            "cadence_held": cadence_held,
+            "cadence_held": cadence_held and not holes,
             "hours_since_last_run": round(hours_diff, 1),
             "last_run_ts": last_ts,
-            "state": "held" if cadence_held else classify_stale_cadence(last_ts, latest_artifact),
+            "state": state,
             "record_read": LEDGER_RECORD,
             "artifact_latest_date": latest_artifact,
+            "holes": holes,
         }
     except Exception:
         return {
@@ -1005,6 +1097,7 @@ def check_cadence_integrity(ledger_path: Path, scores_dir: Path | None = None) -
             "state": "missed_run",
             "record_read": LEDGER_RECORD,
             "artifact_latest_date": latest_artifact,
+            "holes": holes,
         }
 
 
