@@ -274,3 +274,4 @@
 {"n": 274, "ts": "2026-10-28T13:03:02Z", "event": "run", "actor": "hq", "subject": "#124", "detail": "SETTLEMENT RECEIPT for the close row at n=273 — the sequence check ran with that row present and covered verified_rows=273 row(s) of #124, and found no problem"}
 {"n": 275, "ts": "2026-10-29T05:54:06Z", "event": "run", "actor": "hq", "subject": "internal-self-audit", "detail": "duration=55.5s turns=0 outcome=failed gate=all-pass verdict=DEGRADED yield=85.7%"}
 {"n": 276, "ts": "2026-10-30T05:54:38Z", "event": "run", "actor": "hq", "subject": "internal-self-audit", "detail": "duration=51.23s turns=0 outcome=failed gate=all-pass verdict=DEGRADED yield=84.8%"}
+{"n": 277, "ts": "2026-10-31T05:53:40Z", "event": "run", "actor": "hq", "subject": "internal-self-audit", "detail": "duration=52.03s turns=0 outcome=failed gate=all-pass verdict=DEGRADED yield=83.9%"}
