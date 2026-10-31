@@ -56,9 +56,23 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime, timedelta
 
 SSH_TARGET = "apps"
+
+# A single-shot ssh read turns a TRANSIENT transport reset into a READ ERROR
+# wake, which is a false alarm that costs a lane a whole turn. Measured
+# 2026-10-31 18:44:58Z: a brute-force burst filled sshd's pre-auth slots on the
+# apps host (six fail2ban bans in 40 s) and sshd's MaxStartups throttle dropped
+# THIS connection — "drop connection #10 from [78.17.187.4]:58598 past
+# MaxStartups" — which the client sees as "kex_exchange_identification: read:
+# Connection reset by peer". The store was healthy the whole time.
+# rc=255 is ssh's OWN error and rc=124 is our own timeout: both are transport,
+# both are worth another go. A remote command's real exit code is returned
+# immediately, because retrying a genuine failure only hides it.
+RETRY_ATTEMPTS = 3
+RETRY_BACKOFF_S = (2, 5)
 PG_CONTAINER = "postgres"
 PG_DB = "ai_spam_bot"
 DEFAULT_STATE = "/root/.cache/ai-antispam/loss_watch.json"
@@ -110,11 +124,26 @@ def sh(args: list[str], timeout: int = 90, stdin: str | None = None) -> tuple[in
 
 
 def remote(script: str, timeout: int = 90, stdin: str | None = None) -> tuple[int, str, str]:
-    return sh(
-        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", SSH_TARGET, script],
-        timeout=timeout,
-        stdin=stdin,
-    )
+    """Run a snippet on the apps host, retrying TRANSPORT failures only.
+
+    A dropped TCP handshake (``kex_exchange_identification: read: Connection
+    reset by peer``) is ssh's own rc=255, not a verdict about the store, so it
+    is retried. A remote command that ran and failed returns its own exit code
+    and is passed straight through on the first attempt.
+    """
+    last: tuple[int, str, str] = (255, "", "no attempt made")
+    for attempt in range(RETRY_ATTEMPTS):
+        rc, out, err = sh(
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", SSH_TARGET, script],
+            timeout=timeout,
+            stdin=stdin,
+        )
+        if rc not in (255, 124):
+            return rc, out, err
+        last = (rc, out, err)
+        if attempt + 1 < RETRY_ATTEMPTS:
+            time.sleep(RETRY_BACKOFF_S[attempt])
+    return last
 
 
 def read_losses(window_min: int, lag_min: int) -> tuple[str | None, int | None, list[dict]]:
@@ -126,7 +155,10 @@ def read_losses(window_min: int, lag_min: int) -> tuple[str | None, int | None, 
         stdin=sql,
     )
     if rc != 0:
-        raise RuntimeError(f"psql rc={rc}: {(err or out).strip()[:300]}")
+        leg = "ssh transport" if rc == 255 else ("ssh timeout" if rc == 124 else "psql")
+        raise RuntimeError(
+            f"{leg} rc={rc} after {RETRY_ATTEMPTS} attempt(s): {(err or out).strip()[:300]}"
+        )
 
     rows: list[dict] = []
     instant: str | None = None

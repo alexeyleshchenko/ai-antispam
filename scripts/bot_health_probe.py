@@ -41,6 +41,11 @@ from datetime import UTC, datetime
 OK, WARN, ALERT = 0, 1, 2
 
 SSH_TARGET = "apps"
+
+# Transport retry (see remote()). rc=255 is ssh's own error, rc=124 our own
+# timeout; neither is a verdict about the host, so both get another attempt.
+RETRY_ATTEMPTS = 3
+RETRY_BACKOFF_S = (2, 5)
 CONTAINER = "ai-antispam"
 IMAGE = "ghcr.io/leshchenko1979/ai-antispam:main"
 REGISTRY_REPO = "leshchenko1979/ai-antispam"
@@ -104,19 +109,34 @@ def sh(args: list[str], timeout: int = 60) -> tuple[int, str, str]:
 
 
 def remote(script: str, timeout: int = 90) -> tuple[int, str, str]:
-    """Run a shell snippet on the apps host."""
-    return sh(
-        [
-            "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=10",
-            SSH_TARGET,
-            script,
-        ],
-        timeout=timeout,
-    )
+    """Run a shell snippet on the apps host, retrying TRANSPORT failures only.
+
+    Same defect class as ``loss_watch.remote``: a dropped TCP handshake is
+    ssh's own rc=255 and says nothing about the host, so one transient reset
+    must not fail a whole daily digest leg. Measured 2026-10-31 18:44:58Z —
+    sshd's MaxStartups throttle dropped our connection during a brute-force
+    burst ("past MaxStartups"), client side "Connection reset by peer".
+    """
+    last: tuple[int, str, str] = (255, "", "no attempt made")
+    for attempt in range(RETRY_ATTEMPTS):
+        rc, out, err = sh(
+            [
+                "ssh",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                SSH_TARGET,
+                script,
+            ],
+            timeout=timeout,
+        )
+        if rc not in (255, 124):
+            return rc, out, err
+        last = (rc, out, err)
+        if attempt + 1 < RETRY_ATTEMPTS:
+            time.sleep(RETRY_BACKOFF_S[attempt])
+    return last
 
 
 _RESOLVED_CONTAINER: str | None = None
