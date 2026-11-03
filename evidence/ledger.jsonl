@@ -277,3 +277,6 @@
 {"n": 277, "ts": "2026-10-31T05:53:40Z", "event": "run", "actor": "hq", "subject": "internal-self-audit", "detail": "duration=52.03s turns=0 outcome=failed gate=all-pass verdict=DEGRADED yield=83.9%"}
 {"n": 278, "ts": "2026-11-01T05:54:22Z", "event": "run", "actor": "hq", "subject": "internal-self-audit", "detail": "duration=52.31s turns=0 outcome=failed gate=all-pass verdict=DEGRADED yield=83.0%"}
 {"n": 279, "ts": "2026-11-02T05:55:53Z", "event": "run", "actor": "hq", "subject": "internal-self-audit", "detail": "duration=78.45s turns=0 outcome=failed gate=all-pass verdict=DEGRADED yield=82.1%"}
+{"n": 280, "ts": "2026-11-03T05:54:08Z", "event": "run", "actor": "hq", "subject": "internal-self-audit", "detail": "duration=55.93s turns=0 outcome=failed gate=all-pass verdict=DEGRADED yield=81.2%"}
+{"n": 281, "ts": "2026-11-03T06:06:01Z", "event": "run", "actor": "hq", "subject": "internal-self-audit", "detail": "duration=66.42s turns=0 outcome=accepted gate=all-pass verdict=GREEN yield=81.4%"}
+{"n": 282, "ts": "2026-11-03T06:10:18Z", "event": "run", "actor": "hq", "subject": "internal-self-audit", "detail": "duration=78.22s turns=0 outcome=accepted gate=all-pass verdict=GREEN yield=81.6%"}
