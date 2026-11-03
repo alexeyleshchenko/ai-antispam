@@ -1015,15 +1015,37 @@ def render_cadence_label(stats: dict[str, Any]) -> str:
         return f"{label} {render_cadence_holes(holes)}"
     return label
 
-def check_cadence_integrity(ledger_path: Path, scores_dir: Path | None = None) -> dict[str, Any]:
+def check_cadence_integrity(
+    ledger_path: Path,
+    scores_dir: Path | None = None,
+    own_run_date: str | None = None,
+) -> dict[str, Any]:
     """Check whether recurring processes ran according to declared schedule.
 
     Reads TWO records and says which: `record_read` names the ledger rows the staleness is
     measured from, and `artifact_latest_date` is the newest scorecard on disk -- the value
     that separates a dropped row from a missed run (#116).
+
+    `own_run_date` is the date of the run being computed, and its artifact is EXCLUDED from
+    the hole set: the process computing cadence owns that artifact, and the row proving its
+    handoff is written after this function returns (or, when a cron reports and a lane
+    stamps in a separate invocation, in a later one). Counting it makes a clean day read as
+    its own hole -- measured 2026-11-03: `--stamp` on a run whose own report said HELD wrote
+    `verdict=DEGRADED`, because the artifact that same report had just written had no row
+    yet, and every day since the #124 fix (n>=269) carried the same false red. The day is
+    still caught: on the next run it is no longer "own", and the lookback window keeps it
+    in scope for the full 7 days.
     """
     latest_artifact = latest_scorecard_date(scores_dir) if scores_dir is not None else None
     artifact_dates = scorecard_dates(scores_dir) if scores_dir is not None else []
+    # The exclusion is applied to the HOLE INPUT ONLY -- never to `latest_artifact`. That value
+    # is the newest scorecard ON DISK (what this function's docstring promises), it ANCHORS the
+    # lookback window in `find_cadence_holes` (rewriting it to yesterday's date silently shortens
+    # the window from CADENCE_HOLE_LOOKBACK_DAYS to one day less), and `classify_stale_cadence`
+    # compares it against the last row to name `dropped_row` vs `missed_run` (rewriting it turns
+    # today's dropped handoff into a "missed run"). Only the hole set needs the run's own day
+    # removed, because that is the one comparison that reads the artifact as a missing row.
+    hole_dates = [d for d in artifact_dates if d != own_run_date] if own_run_date else artifact_dates
     if not ledger_path.is_file():
         return {
             "cadence_held": False,
@@ -1058,7 +1080,7 @@ def check_cadence_integrity(ledger_path: Path, scores_dir: Path | None = None) -
                 except Exception:
                     pass
 
-    holes = find_cadence_holes(row_dates, artifact_dates, latest_artifact)
+    holes = find_cadence_holes(row_dates, hole_dates, latest_artifact)
 
     if not last_ts:
         return {
@@ -1251,7 +1273,13 @@ def main() -> int:
 
     ledger_stats = parse_ledger(ledger_file)
     rework_stats = parse_rework(rework_file, ledger_stats.get("closed_tasks", 0))
-    cadence_stats = check_cadence_integrity(ledger_file, REPO_ROOT / "evidence/scores")
+    # This run's OWN date, read BEFORE cadence so the artifact this run writes (or wrote in an
+    # earlier `--report` pass) is never counted as a hole against itself. Hoisted here from
+    # below the gate loop, where it sat after the cadence call it is now an input to.
+    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+    cadence_stats = check_cadence_integrity(
+        ledger_file, REPO_ROOT / "evidence/scores", own_run_date=today
+    )
 
     # WALL-CLOCK AROUND THE GATE LOOP (#71). The stamp row's `duration=` was the string
     # literal `4s`, so every daily self-audit row carried a duration the audit never
@@ -1274,8 +1302,6 @@ def main() -> int:
     cadence_ok = cadence_stats.get("cadence_held", True)
     verdict = judge_gates(gate_results, cadence_ok=cadence_ok)
     healthy = bool(verdict.healthy)
-
-    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
 
     if args.json:
         payload = {
