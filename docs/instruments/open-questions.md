@@ -14,7 +14,7 @@ Frame §1 fixes the declaration form: **an instrument is a DECLARED object**, de
 |---|---|
 | **name** | Open Questions register |
 | **executable(s)** | the CLI; verbs `ask` · `answer` · `amend` · `notify` · `list` · `publish` · `lint` · `gc`. Its path law is §5.1 |
-| **closure** | the render asset that must sit BESIDE the binary, and `node` on PATH — declared, never derived (frame §1.1). A one-file install is INCOMPLETE, not minimal: it registers happily and publishes nothing (§5.2) |
+| **closure** | the render asset that must sit BESIDE the binary, its **dependency manifest** (`tools/questions-render.package.json`, which the tool places in the render directory as `package.json`), and `node` on PATH — declared, never derived (frame §1.1). The packages that manifest pins are installed by a MANUAL `npm install` in the render directory: a network step, so no gate may depend on it (#520). A one-file install is INCOMPLETE, not minimal: it registers happily and publishes nothing (§5.2) |
 | **gate set** | the instrument's own suite, `tests/test_questions.py`; this law pair is gated by `tests/test_docs_sync.py` |
 | **version source** | the kit manifest — DERIVED, never hand-typed (frame §7.1) |
 | **data surfaces** | the register store in the profile home, shared by every install shape, so no member owes a migration; shipped `.example` versus factory-owned is declared at adoption (§5.4) |
@@ -24,6 +24,8 @@ Frame §1 fixes the declaration form: **an instrument is a DECLARED object**, de
 ## 2. The declared file set
 
 **Predicate:** the shipped paths the kit manifest classifies `standalone` that carry this instrument —
+plus the one path it classifies `closure` — a data file with no interface of its own, which the
+instrument cannot render without (#520) —
 plus, per frame §1.4, every path the executable reaches **indirectly**, which here is **none**: the CLI
 imports only the standard library and its one repo-relative path constant is the render asset that must
 sit beside it. **Scope:** `registry/kit.json`, whose population is the `TEMPLATE/` half. Both halves are
@@ -35,6 +37,7 @@ listed because the pair is what a member adopts; the manifest hashes the `TEMPLA
 | 2 | `tools/questions-render.mjs` ↔ `TEMPLATE/tools/questions-render.mjs` | `standalone` | **the render asset**, resolved beside the binary — a one-file install registers happily and publishes nothing (§5.2) |
 | 3 | `tests/test_questions.py` ↔ `TEMPLATE/tests/test_questions.py` | `standalone` | **the gate** — invokes the tool's own `selftest` |
 | 4 | `docs/instruments/open-questions.md` ↔ `TEMPLATE/docs/instruments/open-questions.md` | `standalone` | this file |
+| 5 | `tools/questions-render.package.json` ↔ `TEMPLATE/tools/questions-render.package.json` | `closure` | **the dependency manifest** — the five npm packages the renderer imports, pinned. The tool places it in the render directory as `package.json`, so the member's one step is `npm install` THERE (§5.2). `closure` because it has no interface of its own and a port without it renders nothing |
 
 **A reader holding this file and a tree can answer *"is this instrument complete here?"* without
 enumerating imports**, which is what frame §1 requires of a declaration. The member's reload link
@@ -170,11 +173,13 @@ The CLI is located by a glob under the skill's tools root, and the resolution de
 
 The path is resolved at call time, so no clause in this file may pin it.
 
-### 5.2 The install closure is TWO files, and the failure is SILENT
+### 5.2 The install closure is THREE files, and the failure is SILENT
 
-The binary resolves its render asset BESIDE ITSELF, by a name that tracks the binary's own name. The closure is therefore the tool PLUS that asset, and the two names are coupled: renaming or relocating one leg without the other breaks the render path.
+The binary resolves its render asset BESIDE ITSELF, by a name that tracks the binary's own name. The closure is therefore the tool PLUS that asset PLUS the dependency manifest the asset's imports require (#520), and the names are coupled: renaming or relocating one leg without the others breaks the render path.
 
 The hazard is NAMING, not content — a rename separates the halves while each file remains individually correct. And the failure is soft: a half-install registers a question happily and publishes nothing, so a caller checking only the exit code reads a stranded question as a success. This is why §1's `closure` field is DECLARED rather than derived (frame §1.1), and why a one-file install is INCOMPLETE rather than minimal.
+
+The dependency manifest is the leg that is easiest to miss, because nothing at the tool's own path names it: it is reached only from the renderer's `import` statements. The tool copies it into the render directory as `package.json`; the packages it pins are then installed by a **manual** `npm install` THERE — a network operation, so no gate may depend on it. A missing package fails fast (`ERR_MODULE_NOT_FOUND`, rc=1) and the page keeps serving the last good build, which is the correct failure: a render that cannot resolve its imports must never publish a half-built page.
 
 ### 5.3 The stranded question — a fault that reaches nobody (#189)
 
@@ -197,7 +202,7 @@ The member leg is an ADOPTION STEP, not a push from here: the transport copies f
 
 ### 5.5 Assert SHAPE, not hash
 
-Every copy named in this file MOVES — one of them moved twice while this file was being written. So no clause here may pin a byte size, a digest, or a line number of any copy. Derive a boundary at run time from heading text rather than from a remembered position, and state the PROPERTY that must hold — the closure is two files, exactly one CLI resolves, every page's `meta.sets` covers the cards it renders — never the measurement that happened to hold at writing time. (The properties named here have themselves been corrected once: this clause used to require that "the pointer is read first", which the 2026-09-28 split made false. A property list is a claim about behaviour and goes stale the same way a number does.)
+Every copy named in this file MOVES — one of them moved twice while this file was being written. So no clause here may pin a byte size, a digest, or a line number of any copy. Derive a boundary at run time from heading text rather than from a remembered position, and state the PROPERTY that must hold — the closure is three files, exactly one CLI resolves, every page's `meta.sets` covers the cards it renders — never the measurement that happened to hold at writing time. (The properties named here have themselves been corrected once: this clause used to require that "the pointer is read first", which the 2026-09-28 split made false. A property list is a claim about behaviour and goes stale the same way a number does.)
 
 ### 5.6 The ontology collapse — fields that were written and never read
 
