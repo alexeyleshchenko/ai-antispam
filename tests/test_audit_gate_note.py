@@ -65,6 +65,9 @@ GATE_PASS = {
 def _render(gates: list[dict[str, Any]]) -> str:
     return format_report_markdown(
         "2026-09-25",
+        # The start-of-run snapshot instant is a FIXTURE value here, never a claim about the
+        # world: this arm renders a report from a synthetic gate list and asserts its rows.
+        "2026-09-25T00:00:00Z",
         {"total_events": 32, "closed_tasks": 5, "run_events": 12, "runs_by_outcome": {}},
         {"total_entries": 3, "rework_rate": 0.75},
         {"cadence_held": True, "hours_since_last_run": 24.0},

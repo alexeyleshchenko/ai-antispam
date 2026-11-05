@@ -187,7 +187,7 @@ def leg_surface(problems: list[str]) -> None:
         stats = _cadence(ledger, scores, problems, "surface[end-to-end]")
     if not stats:
         return
-    md = audit.format_report_markdown("2026-10-05", {}, {}, stats, [])
+    md = audit.format_report_markdown("2026-10-05", "2026-10-05T00:00:00Z", {}, {}, stats, [])
     rows = [ln for ln in md.splitlines() if "Cadence Status" in ln]
     if not rows:
         problems.append("surface: the report carries no Cadence Status row")

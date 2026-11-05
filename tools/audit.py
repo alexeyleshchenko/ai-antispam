@@ -445,7 +445,14 @@ def run_gate(cmd: list[str], cwd: Path, budget_sec: float = DEFAULT_GATE_WALL_SE
                 "cmd": " ".join(cmd),
                 "exit_code": res.returncode,
                 "passed": res.returncode == 0,
-                "unknown": False,
+                # #552 (ruling n=4167): a gate that CHOOSES the kill code exited NORMALLY and
+                # was recorded `unknown: False`, so the audit counted it FAILED while the
+                # gate-side split read the same run as NO VERDICT -- one run described two
+                # ways by two surfaces. The kill code IS the gate's own statement that it
+                # took no verdict, so it is UNKNOWN here too. The discriminating arm is a
+                # genuine non-zero exit (exit 3), which stays FAILED: the change cannot pass
+                # by calling every non-zero exit unknown.
+                "unknown": res.returncode == TIMEOUT_EXIT_CODE,
                 "duration_sec": round(t_el, 2),
                 "duration_is_lower_bound": False,
                 "budget_sec": budget_sec,
@@ -663,6 +670,47 @@ def render_status_line(verdict: GateVerdict) -> str:
         )
     return line
 
+def attach_gate_staleness(gate_results: list[dict], stale) -> None:
+    """Set `stale_basis` on every gate whose declared basis no longer describes it (#231).
+
+    THE JOIN, at the report layer and nowhere else. The staleness sweep and the gate
+    verdicts are computed in the same run but in different scopes, and they are printed
+    apart -- so a reader meeting a kill sees ONE word, UNKNOWN, for TWO different questions:
+    "is the cap a valid load bound?" (#226) and "does the basis describe a DIFFERENT test?"
+    (#231). Joining them here is what lets the verdict LINE say which question the kill is
+    evidence for.
+
+    It computes nothing. Both operands already exist, and it touches NO value -- the values
+    are the process owner's, never the implementing lane's (n=574 PART 5). The staleness
+    sweep REPORTS and never gates; so does this join, and for the same reason: a basis whose
+    bytes moved can be LOOSER than reality, so acting on it automatically would tighten a
+    cap that was containing its gate.
+    """
+    by_key = {s.key: s for s in (stale or ())}
+    for g in gate_results:
+        s = by_key.get(g.get("gate_key"))
+        if s is None:
+            g.pop("stale_basis", None)
+            continue
+        g["stale_basis"] = {"legs": list(s.legs), "detail": s.detail}
+
+def format_stale_basis_mark(g: dict) -> str:
+    """The staleness suffix for one gate's line, or "" where its basis still describes it.
+
+    Both legs are named (`[STALE:bytes]`, `[STALE:bytes+runner]`) and the evidence carries
+    the two blobs, so the reader sees WHICH comparison moved rather than a bare warning.
+    """
+    s = g.get("stale_basis")
+    if not s:
+        return ""
+    legs = "+".join(s.get("legs") or [])
+    detail = (s.get("detail") or "").replace("|", "/")
+    return f" [STALE:{legs}] {detail}" if detail else f" [STALE:{legs}]"
+
+def stale_killed_gates(gate_results: list[dict]) -> list[dict]:
+    """The KILLED/UNKNOWN gates whose declared basis is stale -- the join's own population."""
+    return [g for g in gate_results if g.get("unknown") and g.get("stale_basis")]
+
 def render_gate_line(g: dict[str, Any]) -> str:
     """One gate's verdict line: the cause and the state co-located (#74 leg 7).
 
@@ -688,6 +736,11 @@ def render_gate_line(g: dict[str, Any]) -> str:
         cause = g.get("note") or ""
         if cause:
             line += f" — {cause}"
+    # The basis join, on the SAME line (#231): a kill under a stale basis and a kill under a
+    # sound one are the same UNKNOWN, so the staleness the sweep already computed is printed
+    # beside the verdict it bears on. Appended AFTER the `({dur}s)` token for the reason
+    # stated above -- the stamp-duration gate parses that token and must keep matching.
+    line += format_stale_basis_mark(g)
     if g.get("retried"):
         line += f" [retried once — {g.get('attempts', 2)} attempt(s)]"
     return line
@@ -1151,6 +1204,7 @@ def gate_note(g: dict[str, Any], max_chars: int = GATE_CAUSE_LIMIT) -> str:
 
 def format_report_markdown(
     date_str: str,
+    ledger_read_at: str,
     ledger_stats: dict[str, Any],
     rework_stats: dict[str, Any],
     cadence_stats: dict[str, Any],
@@ -1173,6 +1227,13 @@ def format_report_markdown(
         f"# Operational Process Self-Audit — {date_str}",
         "",
         f"> **Verdict:** `{verdict}` · Process 3 (Internal Self-Audit)",
+        "",
+        f"> **Ledger read at:** `{ledger_read_at}` "
+        f"({ledger_stats.get('total_events', 0)} events) — this artifact describes the ledger "
+        f"AS OF THAT INSTANT, before this run's own row was appended. It is a START-OF-RUN "
+        f"SNAPSHOT, not the ledger's state when you read it: the run row this audit writes "
+        f"lands after the read, and concurrent lanes append throughout the gate window "
+        f"(#142, ruling n=919).",
         "",
         "---",
         "",
@@ -1271,6 +1332,11 @@ def main() -> int:
     ledger_file = REPO_ROOT / "evidence/ledger.jsonl"
     rework_file = REPO_ROOT / "evidence/rework.md"
 
+    # START-OF-RUN SNAPSHOT INSTANT (#142, ruling n=919). Read HERE, immediately before the
+    # ledger is parsed, so the report states the instant its figures describe rather than
+    # implying they hold when the reader opens the file: this run's own row lands after this
+    # line. Read, never composed -- it is a clock read at the point of the read.
+    ledger_read_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     ledger_stats = parse_ledger(ledger_file)
     rework_stats = parse_rework(rework_file, ledger_stats.get("closed_tasks", 0))
     # This run's OWN date, read BEFORE cadence so the artifact this run writes (or wrote in an
@@ -1409,7 +1475,7 @@ def main() -> int:
         print(render_gate_line(g))
 
     if args.report or args.output:
-        report_md = format_report_markdown(today, ledger_stats, rework_stats, cadence_stats, gate_results)
+        report_md = format_report_markdown(today, ledger_read_at, ledger_stats, rework_stats, cadence_stats, gate_results)
         out_path = Path(args.output) if args.output else (REPO_ROOT / f"evidence/scores/{today}-self-audit.md")
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(report_md, encoding="utf-8")
