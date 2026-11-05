@@ -854,6 +854,49 @@ def resolved_sequence_problems(
         for _s, leg, message in problems if leg in missing_here
     ]
 
+
+def canonical_subject(
+    subject: str, renumbers: dict[str, tuple[str, str]] | None,
+) -> tuple[str, str | None]:
+    """A subject's NEWEST declared number, with the evidence for the last step.
+
+    THE DIRECTION `resolved_sequence_problems` DOES NOT GO. That predicate walks a
+    CLOSE *down* to the number its legs were filed under. The claim-lifecycle leg needs
+    the opposite, and the defect was measured the same day the close landed: `verify`
+    printed
+
+        ledger clean: 287 row(s), ... sequences complete
+        open claim: n=148 #74 claimed by hq -- no close after it
+
+    in one breath. Both halves were true and the pair was a lie: the close for that item
+    was written under `#107`, the claim under `#74`, and a `close_index` keyed on the raw
+    subject can never pair them. An instrument that accepts a close and then reports the
+    claim it just closed as open teaches the reader to disbelieve the whole verdict --
+    which is worse than either reading alone.
+
+    INERT BY DEFAULT, like its sibling: no declaration naming the subject returns it
+    unchanged, so a factory that declares no renumber sees exactly the old behaviour.
+    Chains are followed upward, bounded to eight hops with a visited set, because an item
+    can legitimately carry three numbers across two migrations.
+    """
+    if not subject or not renumbers:
+        return subject, None
+    upward = {was: (new, evidence) for new, (was, evidence) in renumbers.items()}
+    cursor = subject
+    evidence: str | None = None
+    seen = {subject}
+    for _ in range(8):
+        step = upward.get(cursor)
+        if step is None:
+            break
+        new, step_evidence = step
+        if new in seen:
+            break
+        seen.add(new)
+        cursor = new
+        evidence = step_evidence
+    return cursor, evidence
+
 # --- the dispatch leg (#45, ruling n=255, refined n=524) ------------------------
 #
 # `verify` modelled a subject's life as intake -> claim -> close, and `dispatch` was not
@@ -2131,13 +2174,22 @@ def cmd_verify(args: argparse.Namespace) -> int:
     close_index: dict[str, list[int]] = {}
     for _i, _r in enumerate(rows):
         if _r.get("event") == "close":
-            close_index.setdefault(_r.get("subject"), []).append(_i)
+            _canon, _ev = canonical_subject(_r.get("subject") or "", _renumbers)
+            close_index.setdefault(_canon, []).append(_i)
     released_claims: list[dict] = []
     open_claims: list[dict] = []
+    # A claim filed under a pre-migration number and closed under the number the board
+    # uses TODAY must pair, or this leg contradicts the verdict beside it. The pairing
+    # is recorded and PRINTED rather than silently absorbed: a resolution nobody sees
+    # is exempt-by-silence (n=571).
+    resolved_claim_pairs: list[tuple[dict, str]] = []
     for _i, _r in claim_life_rows:
+        _canon, _ev = canonical_subject(_r.get("subject") or "", _renumbers)
         if release_targets.get(_r.get("n")):
             released_claims.append(_r)
-        elif any(_j > _i for _j in close_index.get(_r.get("subject"), [])):
+        elif any(_j > _i for _j in close_index.get(_canon, [])):
+            if _canon != _r.get("subject"):
+                resolved_claim_pairs.append((_r, _canon))
             continue
         else:
             open_claims.append(_r)
@@ -2154,7 +2206,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
         f"  claim lifecycle examined: {len(claim_life_rows)} claim row(s) over "
         f"{len({r.get('subject') for _i, r in claim_life_rows})} subject(s) — "
         f"{len(claim_life_rows) - len(released_claims) - len(open_claims)} terminal by "
-        f"close, {len(released_claims)} terminal by release, {len(open_claims)} open; "
+        f"close, {len(released_claims)} terminal by release, {len(open_claims)} open "
+        f"({len(resolved_claim_pairs)} of the closed ones pair ONLY through a declared "
+        f"renumber, so they are counted here and printed below); "
         f"{len(release_targets)} release(s) examined"
     )
     for _r in released_claims:
@@ -2169,6 +2223,13 @@ def cmd_verify(args: argparse.Namespace) -> int:
             f"{_r.get('actor')} — no close after it and no release naming it, so the "
             f"ledger cannot tell in-flight work from withdrawn work. A withdrawal is "
             f"recorded as a `release` naming this row"
+        )
+    for _r, _canon in resolved_claim_pairs:
+        print(
+            f"  renumber-paired claim: n={_r.get('n')} {_r.get('subject')} — closed by a "
+            f"row filed under {_canon}, the number this item carries since the declared "
+            f"board renumber; the pair exists only because the declaration names it, and "
+            f"without it this claim would be reported open"
         )
     for _r in orphan_releases:
         print(
