@@ -91,6 +91,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gate_registry import (  # noqa: E402
+    DUAL_FORM,
     LAW_COVERAGE_PREDICATE,
     OPENER_ONLY_NOTE,
     OPTIONAL_GATES,
@@ -106,6 +107,7 @@ from gate_registry import (  # noqa: E402
     gate_registration_problems,
     law_coverage_problems,
     declared_splits,
+    dual_form,
     manifest_drift_problems,
     optional_gate_lines,
     reads_a_docstring,
@@ -1047,6 +1049,104 @@ def probe_a_file_with_a_main_guard_is_still_pytest_form() -> None:
     check("direction 5 — a file with NO test function stays script-form",
           no_test_fn == SCRIPT_RUNNER,
           f"got {no_test_fn}")
+
+DUAL_DIRECT = """\
+def check_one() -> None:
+    assert True
+
+def test_one() -> None:
+    check_one()
+
+def main() -> int:
+    for name, value in sorted(globals().items()):
+        if name.startswith("test_"):
+            value()
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+"""
+
+DUAL_COLLECTED = """\
+def check_one() -> None:
+    assert True
+
+def test_one() -> None:
+    check_one()
+
+def main() -> int:
+    checks = [value for name, value in sorted(globals().items())
+              if name.startswith("test_")]
+    for check in checks:
+        check()
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+"""
+
+DUAL_WITH_A_GAP = """\
+def check_one() -> None:
+    assert True
+
+def test_one() -> None:
+    check_one()
+
+def test_a_meta_assertion() -> None:
+    assert "marker" in open("somewhere").read()
+
+def main() -> int:
+    check_one()
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+"""
+
+def probe_a_dual_form_target_is_NOT_a_mismatch() -> None:
+    """A file whose `main()` runs the same checks the wrappers do CAN run under a script.
+
+    #124's rule read every `def test_*` file as pytest-form, so four registered gates were
+    reported "cannot run its target" while demonstrably running it (measured 2026-11-05,
+    #107). This is a THIRD ANSWER, not a retraction: the wrappers ARE dead under a script
+    runner, and the assertions are NOT, because `main()` runs the work they delegate to.
+    """
+    for label, text in (("direct", DUAL_DIRECT), ("collected", DUAL_COLLECTED)):
+        check(f"direction 5 — a dual-form target ({label} globals loop) is NOT pytest-form",
+              target_form(text) == DUAL_FORM, f"got {target_form(text)}")
+        check(f"direction 5 — and it reports NO dead wrapper ({label})",
+              dual_form(text) == (True, ()), f"got {dual_form(text)}")
+
+    # THE CONTROL. Deleting `main()` must put the file back in the pytest bucket: without
+    # it, "everything with a def test_* is dual" would pass every leg above.
+    vacuous = DUAL_DIRECT.split("def main() -> int:")[0]
+    check("direction 5 — CONTROL: the same file WITHOUT `main()` is still pytest-form",
+          target_form(vacuous) == PYTEST_RUNNER, f"got {target_form(vacuous)}")
+    check("direction 5 — CONTROL: and dual_form refuses it",
+          dual_form(vacuous) == (False, ()), f"got {dual_form(vacuous)}")
+
+    # A wrapper the script path does not reproduce is NAMED, never counted as coverage.
+    is_dual, gaps = dual_form(DUAL_WITH_A_GAP)
+    check("direction 5 — a wrapper `main()` never reaches is still dual-form",
+          is_dual is True, f"got {is_dual}")
+    check("direction 5 — and the gap is NAMED, not swallowed",
+          gaps == ("test_a_meta_assertion",), f"got {gaps}")
+
+def probe_the_dual_form_gaps_reach_the_report() -> None:
+    """The report carries the gaps per target, so a reader sees them without re-deriving."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tests, audit = _synthetic_tree(
+            Path(tmp), {"test_gapful.py": DUAL_WITH_A_GAP}, _register("test_gapful.py"),
+        )
+        problems, report = runner_form_problems(tests, audit)
+        check("direction 5 — a dual-form registration is not a problem",
+              problems == [], str(problems)[:80])
+        check("direction 5 — but its unreached wrapper is in the report by name",
+              report["dual_gaps"] == {"test_gapful.py": ("test_a_meta_assertion",)},
+              str(report["dual_gaps"])[:100])
+        check("direction 5 — and the count is printed beside the form line",
+              any("dual-form: 1 wrapper(s)" in line for line in report["forms"]),
+              str(report["forms"])[-100:])
 
 def probe_the_runner_is_read_from_argv_not_guessed_from_the_target() -> None:
     """The runner comes from the APPEND; the shape from the TARGET. Neither implies the other."""
@@ -4477,6 +4577,8 @@ def main() -> int:
     probe_the_same_target_under_the_pytest_runner_is_clean()
     probe_a_script_style_target_under_the_pytest_runner_is_not_reported()
     probe_a_file_with_a_main_guard_is_still_pytest_form()
+    probe_a_dual_form_target_is_NOT_a_mismatch()
+    probe_the_dual_form_gaps_reach_the_report()
     probe_the_runner_is_read_from_argv_not_guessed_from_the_target()
     probe_an_absent_target_is_skipped_and_named_not_double_reported()
     probe_a_tool_invocation_carries_no_target_shape()

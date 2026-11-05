@@ -105,6 +105,7 @@ Only the declaration discriminates.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import sys
@@ -227,6 +228,121 @@ SCRIPT_RUNNER = "script"
 _TEST_FUNC = re.compile(r"^def test_[A-Za-z0-9_]*\(", re.M)
 _MAIN_GUARD = re.compile(r"^if __name__ == ['\"]__main__['\"]:", re.M)
 
+# A DUAL-FORM target: module-level `def test_*` wrappers that delegate to named check
+# functions, AND a `main()` that calls those SAME functions behind the `__main__` guard.
+DUAL_FORM = "dual"
+
+
+def _direct_callees(node: ast.AST) -> set[str]:
+    """Every bare-name function call inside `node`."""
+    return {
+        call.func.id
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+    }
+
+
+def _generic_runner(main: ast.FunctionDef) -> bool:
+    """True when `main()` runs the module's own `test_*` functions (#107).
+
+    The SECOND dual shape, and the stronger one: `main()` builds its list from
+    `globals()` and calls each entry, so the script path runs the WRAPPERS themselves and
+    nothing is dead. Read from the AST rather than from a function name, because the name
+    is what a future edit changes.
+
+    THE ITERABLE IS NOT READ, and that is deliberate. The first form of this predicate
+    required the `for`'s own iterable to reach `globals()`/`vars()`, which is the shape
+    `for name, check in sorted(globals().items())` has — and it MISSED the equally common
+    one where the collection is built first and iterated by name:
+
+        checks = [v for n, v in sorted(globals().items()) if n.startswith("test_")]
+        for check in checks: check()
+
+    Measured 2026-11-05 (#107): `test_patrol_host_state.py` is exactly that shape and was
+    still reported unable to run its target. So the test is two facts about `main()` as a
+    whole — it REACHES `globals()`/`vars()` somewhere, and it has a `for` whose body CALLS
+    its own loop variable. Reaching globals while calling a loop variable is what running
+    the module's own functions looks like; a `main()` that does neither is left to the
+    callee comparison in `dual_form`.
+    """
+    if not (_direct_callees(main) & {"globals", "vars"}):
+        return False
+    for node in ast.walk(main):
+        if not isinstance(node, ast.For):
+            continue
+        targets = {n.id for n in ast.walk(node.target) if isinstance(n, ast.Name)}
+        if targets & _direct_callees(node):
+            return True
+    return False
+
+
+def dual_form(text: str) -> tuple[bool, tuple[str, ...]]:
+    """(is_dual, the wrappers the script path does NOT reproduce) (#107).
+
+    THE THIRD SHAPE, and the reason the second one was too coarse. `target_form` read any
+    file carrying `def test_*` as pytest-form, so a file with BOTH wrapper functions and a
+    real `main()` was reported as unable to run under a script runner. That reading is
+    right about the WRAPPERS and wrong about the FILE: under the script runner pytest
+    never collects the wrappers, but `main()` runs the work they delegate to, so the
+    assertions execute anyway. Measured 2026-11-05 (#107): four registered gates —
+    test_audit_yield, test_audit_gate_note, test_close_board_recorded,
+    test_patrol_host_state — were each reported "cannot run its target" while
+    demonstrably running it.
+
+    THE PREDICATE. The `__main__` guard must call `main()`; there must be wrappers; and
+    `main()` must either run the wrappers themselves (`_generic_runner`) or share
+    module-level work with them. Two shapes, one answer, because both mean the same
+    thing: the script path executes assertions the pytest path also executes.
+
+    THE GAPS ARE RETURNED, never swallowed. A wrapper that delegates to no module
+    function at all — `test_gate_is_registered_in_the_audit` reads tools/audit.py and
+    asserts a substring — is a META-assertion the script path does not reproduce, and a
+    wrapper whose checks `main()` never calls is a real gap. Both are named by the caller
+    with their count rather than counted as coverage: a dual-form registration CAN run its
+    target, which is this direction's whole question, and pretending the remaining gap
+    does not exist would be the same silent-absence defect one level down.
+
+    THE BOUND, stated because a green here is otherwise overread: this compares DIRECT
+    callees, so a wrapper delegating to a helper that `main()` reaches only through
+    another call is named as a gap — a false gap, which is the safe direction. It also
+    cannot see ARGUMENTS: `check_x(tmp_path)` in a wrapper and `check_x(Path(td))` in
+    `main()` compare equal on the name, and the check itself decides whether the argument
+    matters.
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return False, ()
+    funcs = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    module_funcs = set(funcs)
+    main = funcs.get("main")
+    wrappers = {name: node for name, node in funcs.items() if name.startswith("test_")}
+    if main is None or not wrappers:
+        return False, ()
+    guard = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, ast.If) and "__main__" in ast.dump(node.test)
+        ),
+        None,
+    )
+    if guard is None or "main" not in _direct_callees(guard):
+        return False, ()
+    if _generic_runner(main):
+        return True, ()
+    main_targets = _direct_callees(main) & module_funcs
+    if not main_targets:
+        return False, ()
+    gaps: list[str] = []
+    shared = False
+    for name, node in sorted(wrappers.items()):
+        if (_direct_callees(node) & module_funcs) & main_targets:
+            shared = True
+        else:
+            gaps.append(name)
+    return shared, tuple(gaps)
+
 RUNNER_FORM_PREDICATE = (
     "a registered gate whose target is pytest-style (module-level `def test_*`, no "
     "`__main__` guard) must be registered under the pytest runner. The runner is read "
@@ -236,7 +352,11 @@ RUNNER_FORM_PREDICATE = (
     "PYTEST-form: runs under either runner is true of the FILE and false of each "
     "RUNNER, and this direction answers the latter. Measured 2026-09-20 (#124): six "
     "registered files carried 99 dead legs between them while the audit printed PASS "
-    "for every one. ONE-WAY BY DESIGN: a target carrying NO module-level `def test_*` "
+    "for every one. THE THIRD SHAPE (#107, measured 2026-11-05): where `main()` runs the "
+    "SAME checks the wrappers delegate to, the script path executes every assertion the "
+    "pytest path does, so the file is DUAL-FORM and its script registration is NOT a "
+    "mismatch — four live gates were reported unable to run while they demonstrably ran. "
+    "ONE-WAY BY DESIGN: a target carrying NO module-level `def test_*` "
     "under the pytest runner is NOT reported — pytest collects nothing and exits 5, so "
     "that direction is LOUD rather than silent, and this direction answers only whether "
     "a given registration CAN run its target."
@@ -1588,22 +1708,27 @@ def law_coverage_problems(
     return problems, report
 
 def target_form(text: str) -> str:
-    """'pytest' when the file is pytest-style, else 'script'.
+    """'dual', 'pytest' or 'script' — what a registration must use to RUN this file.
 
     pytest-style is a module-level `def test_*` with NO `__main__` guard. A file carrying
     NEITHER is script-form by the same rule, and that is deliberate: this predicate
-    answers what the registration MUST use, not what the file is, and it does not invent
-    a third answer it cannot act on.
+    answers what the registration MUST use, not what the file is.
 
-    A file carrying BOTH is PYTEST-form (#124). The earlier reading — that a both-file
-    "runs under either runner", so flagging it would be a false red — was measured FALSE.
-    Under the script runner pytest never collects the file, so its module-level
-    `def test_*` legs never execute: six registered files carried 99 such legs, every one
-    of them dead, and a script runner exits 0 having run nothing, which is
+    A file carrying BOTH is normally PYTEST-form (#124). The earlier reading — that a
+    both-file "runs under either runner", so flagging it would be a false red — was
+    measured FALSE. Under the script runner pytest never collects the file, so its
+    module-level `def test_*` legs never execute: six registered files carried 99 such
+    legs, every one of them dead, and a script runner exits 0 having run nothing, which is
     indistinguishable from passing.
+
+    DUAL-FORM is the exception that #124's reading missed, and it is a THIRD ANSWER rather
+    than a retraction (#107): where `main()` runs the same checks the wrappers delegate to
+    (`dual_form`, above), the script path executes every assertion the pytest path does,
+    so the registration CAN run its target and is not a mismatch. Without this shape the
+    direction reported four live gates as unable to run while they demonstrably ran.
     """
     if _TEST_FUNC.search(text):
-        return PYTEST_RUNNER
+        return DUAL_FORM if dual_form(text)[0] else PYTEST_RUNNER
     return SCRIPT_RUNNER
 
 def runner_form_problems(tests_dir: Path, audit_path: Path) -> tuple[list[str], dict]:
@@ -1634,6 +1759,7 @@ def runner_form_problems(tests_dir: Path, audit_path: Path) -> tuple[list[str], 
 
     forms: list[str] = []
     mismatches: list[str] = []
+    dual_gaps: dict[str, tuple[str, ...]] = {}
     for entry in entries:
         if entry["kind"] != "tests":
             forms.append(f"{entry['argv']} — tool invocation, no target shape to read")
@@ -1648,6 +1774,18 @@ def runner_form_problems(tests_dir: Path, audit_path: Path) -> tuple[list[str], 
         text = path.read_text(encoding="utf-8")
         form = target_form(text)
         forms.append(f"{entry['argv']} — runner={entry['runner']}, target form={form}")
+        if form == DUAL_FORM:
+            # A dual-form target CAN run under either runner, so it is not a mismatch --
+            # but the wrappers its `main()` does not reproduce are NAMED with their count,
+            # never counted as coverage (#107).
+            gaps = dual_form(text)[1]
+            if gaps:
+                dual_gaps[entry["name"]] = gaps
+                forms.append(
+                    f"{entry['argv']} — dual-form: {len(gaps)} wrapper(s) the script "
+                    f"path does not reproduce: {', '.join(gaps)}"
+                )
+            continue
         if form == PYTEST_RUNNER and entry["runner"] == SCRIPT_RUNNER:
             mismatches.append(
                 f"{entry['name']} carries module-level `def test_*` but is registered "
@@ -1663,6 +1801,7 @@ def runner_form_problems(tests_dir: Path, audit_path: Path) -> tuple[list[str], 
         "registrations": len(entries),
         "forms": forms,
         "mismatches": mismatches,
+        "dual_gaps": dual_gaps,
     }
     return problems, report
 
