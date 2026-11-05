@@ -78,8 +78,12 @@ Exit: 0 clean, non-zero on any gate that is unregistered, non-canonical, or sile
 
 from __future__ import annotations
 
+import inspect
 import json
+import os
+import re
 import subprocess
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -101,14 +105,18 @@ from gate_registry import (  # noqa: E402
     first_docstring_line,
     gate_registration_problems,
     law_coverage_problems,
+    declared_splits,
     manifest_drift_problems,
     optional_gate_lines,
     reads_a_docstring,
     registration_entries,
     required_gate_problems,
+    exit_declaration_problems,
+    invoked_gates,
     runner_form_problems,
     target_form,
 )
+
 
 TESTS_DIR = REPO / "tests"
 AUDIT = REPO / "tools" / "audit.py"
@@ -141,6 +149,19 @@ def _synthetic_tree(root: Path, files: dict[str, str], audit: str) -> tuple[Path
 
 def _register(*names: str) -> str:
     return "".join(f'gates_to_run.append([sys.executable, "tests/{n}"])\n' for n in names)
+
+
+def _names_its_tool(entry: str) -> bool:
+    """True when a run-list entry names a `tools/` script that exists in THIS tree.
+
+    Read from the entry itself rather than from a count of entries: the kit's tree and this
+    one register different NUMBERS of tool invocations, so a leg asserting a count asserts
+    the kit's shape, not this gate's intent (#107).
+    """
+    return any(
+        token.startswith("tools/") and (REPO / token).is_file()
+        for token in entry.split()
+    )
 
 CANONICAL_GATE = '#!/usr/bin/env python3\n"""Gate: a synthetic gate.\n\nBody.\n"""\n'
 
@@ -323,21 +344,106 @@ def probe_the_live_tree_is_clean() -> None:
 
 def probe_the_scan_is_not_vacuous() -> None:
     _, report = gate_registration_problems(TESTS_DIR, AUDIT)
-    check("the live scan finds gates to check", len(report["declared"]) >= 20,
+    # `>= 20` here too, and for the same reason (#107): a floor read from the KIT'S population
+    # reds any member tree that declares fewer gates, which is a difference in size and not a
+    # defect in the scan. The population is what makes this non-vacuous; direction 1 below is
+    # what makes a truncated one loud.
+    check("the live scan finds gates to check", len(report["declared"]) > 0,
           f"{len(report['declared'])} declared gate(s)")
+    # The population is read from the RUN LIST, never from a constant: the kit's tree runs more
+    # tests/ gates than this one does, so `>= 20` measured the KIT'S SHAPE and was red here by
+    # construction -- a difference in SIZE reported as a defect in the scan (#107).
+    #
+    # Non-vacuity is the whole of this leg, and direction 1 above is what keeps it honest: a
+    # truncated run list leaves declared gates unregistered, which that leg names loudly. A
+    # stricter form was tried and WITHDRAWN -- flagging a registered path that is absent from
+    # tests/ -- because a CONDITIONAL registration is lawful here: `tools/audit.py:773` appends
+    # tests/test_template_sync.py only `if (repo_root / "tests/test_template_sync.py").is_file()`,
+    # and this factory does not carry that gate. The append is real, the gate is deliberately
+    # optional, and the parse cannot see the guard, so the clause reported a lawful no-op as a
+    # defect. `probe_the_vacuity_predicates_still_fail_a_vacuous_scan` pins that decision.
+    registered = report["registered_tests"]
     check("the reverse direction finds registered gates to check",
-          len(report["registered_tests"]) >= 20,
-          f"{len(report['registered_tests'])} registered tests/ path(s)")
+          len(registered) > 0,
+          f"{len(registered)} registered tests/ path(s)")
 
 def probe_the_report_states_the_tool_gap() -> None:
     """Scope (i): the run list's tool invocations are named, so the gap is not implied."""
     _, report = gate_registration_problems(TESTS_DIR, AUDIT)
+    # `== 3` counted the KIT'S tool invocations. This factory registers four -- it also runs
+    # tools/roadmap.py --audit -- so the leg was red here for having MORE coverage than the
+    # template, which is the opposite of a defect (#107). The intent is that each invocation is
+    # NAMED, which is a property of the entry, not of how many entries there are.
     tools = report["tool_invocations"]
+    unnamed = [t for t in tools if not _names_its_tool(t)]
     check("scope (i) — the tool invocations are counted and named",
-          len(tools) == 3, f"{len(tools)}: {tools}")
+          len(tools) > 0 and not unnamed,
+          f"{len(tools)}: {tools}"
+          + (f"; {len(unnamed)} name no tools/ script on disk: {unnamed}" if unnamed else ""))
     check("scope (i) — the scope note says a tests/-scoped parse cannot see them",
           "tool" in TOOL_INVOCATION_NOTE and "tests/" in TOOL_INVOCATION_NOTE,
           TOOL_INVOCATION_NOTE[:70])
+
+def probe_the_vacuity_predicates_still_fail_a_vacuous_scan() -> None:
+    """CONTROL: the portable predicates must still FAIL a vacuous scan (#107).
+
+    Without this, "derived from the run list" is satisfied by any predicate that happens to be
+    true of whatever list it is handed — including an empty one — and both legs would pass on a
+    tree whose audit registers nothing, which is the exact defect the constants they replaced
+    were standing in for. Two arms: an EMPTY list must still FAIL non-vacuity, and a
+    registered-but-ABSENT target must stay LAWFUL — the second pins the clause this gate
+    withdrew, so a later "strengthening" cannot quietly reinstate a false positive.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        empty_tests, empty_audit = _synthetic_tree(
+            Path(tmp) / "empty", {"test_ok.py": CANONICAL_GATE},
+            "# an audit that registers nothing\n")
+        _, empty = gate_registration_problems(empty_tests, empty_audit)
+        registered = empty["registered_tests"]
+        absent = [n for n in registered if not (empty_tests / n).is_file()]
+        tools = empty["tool_invocations"]
+        unnamed = [t for t in tools if not _names_its_tool(t)]
+        check("CONTROL: an EMPTY run list still FAILS the vacuity leg",
+              not (len(registered) > 0 and not absent), f"registered={registered}")
+        check("CONTROL: an EMPTY run list still FAILS the named-tool leg",
+              not (len(tools) > 0 and not unnamed), f"tools={tools}")
+
+        ghost_tests, ghost_audit = _synthetic_tree(
+            Path(tmp) / "ghost", {"test_ok.py": CANONICAL_GATE},
+            _register("test_ok.py", "test_ghost.py"))
+        ghost_problems, ghost = gate_registration_problems(ghost_tests, ghost_audit)
+        # The WITHDRAWN clause, pinned so it is not silently re-added as a "strengthening": a
+        # registered path this tree does not carry is a lawful CONDITIONAL registration
+        # (tools/audit.py:773 appends tests/test_template_sync.py only if it is present), and
+        # direction 2 skips it by design. It must therefore raise NO problem.
+        check("CONTROL: a registered-but-ABSENT target is a lawful conditional registration",
+              ghost["registered_tests"] == ["test_ghost.py", "test_ok.py"]
+              and not any("test_ghost.py" in p for p in ghost_problems),
+              f"problems={ghost_problems}")
+
+
+def probe_the_live_tool_invocations_are_never_truncated() -> None:
+    """The live tree corroborates it: no tool invocation reads as a command the audit omits.
+
+    The fixture above is the control; this reads the real registration the audit runs, so the
+    defect #436 clause 3 names — `tools/hygiene.py` reported as a bare `--namespace` — is
+    caught on the artifact that produced it and not only on a synthetic lookalike.
+    """
+    _, report = gate_registration_problems(TESTS_DIR, AUDIT)
+    # `len(hygiene) == 1` is the same kit-shape count as `len(tools) == 3` one probe above: this
+    # tree registers hygiene TWICE (--clean and --audit), so the leg was red for having more
+    # coverage, not for losing the namespace (#107). Requiring it of ALL of them is strictly
+    # stronger than requiring it of the single entry the template happens to have.
+    hygiene = [a for a in report["tool_invocations"] if "hygiene.py" in a]
+    check("clause 3 — every live hygiene invocation carries its COMPUTED namespace",
+          len(hygiene) > 0 and all("<hygiene_namespace(repo_root)>" in a for a in hygiene),
+          str(hygiene)[:90])
+    check("clause 3 — no live tool invocation ends at a bare `--namespace`",
+          all(not a.rstrip().endswith("--namespace") for a in report["tool_invocations"]),
+          str(report["tool_invocations"])[:120])
+    check("clause 3 — every live tool invocation is a DECLARED FORM, never a command line",
+          all("<sys.executable>" in a.split() for a in report["tool_invocations"]),
+          str(report["tool_invocations"])[:120])
 
 def _naive_declared_names(tests_dir: Path) -> set[str]:
     """A deliberately INDEPENDENT re-scan, used to cross-check the resolver's own reader.
@@ -400,7 +506,9 @@ def probe_the_live_required_set_is_present() -> None:
         print(f"    {problem}")
     check("every required gate is PRESENT in the live tree",
           not problems, "; ".join(problems)[:90])
-    check("the manifest is non-vacuous", len(report["required"]) >= 20,
+    # Same class as the two legs above (#107): the count is the KIT'S inventory, and a member
+    # that requires fewer gates is not thereby vacuous.
+    check("the manifest is non-vacuous", len(report["required"]) > 0,
           f"{len(report['required'])} required gate(s)")
     drift, drift_report = manifest_drift_problems(TEMPLATE_TESTS_DIR)
     for problem in drift:
@@ -485,6 +593,35 @@ def _law_tree(
     skill_path = root / "SKILL.md"
     skill_path.write_text(skill, encoding="utf-8")
     return tests, audit_path, rework_path, skill_path
+
+def _splits_tree(root: Path, retired: str, successors: list[str]) -> Path:
+    """A throwaway `docs/mechanism-splits.json` declaring ONE split; returns its path.
+
+    Written at the store's REAL relative path under `root`, so a probe can hand it over
+    explicitly OR leave it to be discovered beside the synthetic `tests/` directory —
+    both routes are exercised, and neither can pass by the other's accident.
+    """
+    path = root / "docs" / "mechanism-splits.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "_note": "synthetic split store",
+                "splits": [
+                    {
+                        "retired": retired,
+                        "successors": successors,
+                        "issue": 602,
+                        "date": "2026-11-03",
+                    }
+                ],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
 
 def probe_a_law_named_unregistered_mechanism_is_named() -> None:
     """Direction 4 (a): a law names a mechanism that exists but never runs."""
@@ -593,6 +730,157 @@ def probe_a_dead_reference_is_reported() -> None:
         check("direction 4 — a dead reference is not counted as merely unregistered",
               report["unregistered"] == [] and len(report["dead_reference"]) == 1,
               str(report["dead_reference"]))
+
+def probe_a_declared_split_resolves_a_retired_name() -> None:
+    """Direction 4 (c): a law names a file the tree SPLIT into legs that all run.
+
+    The shape is #602's: a gate too large to measure was divided into leg-scoped gates,
+    and the law rows that named the undivided file are still TRUE because the probes they
+    cite still run. The store declares the division, so the name RESOLVES instead of
+    reading as a dead reference — and the resolution is PRINTED, never assumed.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        tests, audit, rework, skill = _law_tree(
+            root,
+            {"test_leg_a.py": CANONICAL_GATE, "test_leg_b.py": CANONICAL_GATE},
+            _register("test_leg_a.py", "test_leg_b.py"),
+            _rework("tests/test_retired.py"),
+            "no mechanism named here\n",
+        )
+        splits = _splits_tree(root, "test_retired.py",
+                              ["test_leg_a.py", "test_leg_b.py"])
+        problems, report = law_coverage_problems(
+            tests, audit, rework, skill, splits_path=splits
+        )
+        check("direction 4 — a declared split RESOLVES the retired name",
+              problems == [] and report["dead_reference"] == [],
+              f"problems={problems} dead={report['dead_reference']}")
+        check("direction 4 — and the resolution NAMES its successors",
+              report["split_resolved"]
+              == ["test_retired.py -> test_leg_a.py, test_leg_b.py"],
+              str(report["split_resolved"]))
+        check("direction 4 — the store is printed as READ, not silently skipped",
+              report["law_sources"][2] == "mechanism-splits store: 1 split(s) declared",
+              str(report["law_sources"]))
+
+def probe_a_split_with_an_absent_successor_does_not_resolve() -> None:
+    """A split is a resolution only when EVERY successor EXISTS.
+
+    A declared division that points at a file the tree does not carry is a dead reference
+    with paperwork: the law's claim is that the probes still run, and one of them cannot.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        tests, audit, rework, skill = _law_tree(
+            root,
+            {"test_leg_a.py": CANONICAL_GATE},
+            _register("test_leg_a.py"),
+            _rework("tests/test_retired.py"),
+            "no mechanism named here\n",
+        )
+        splits = _splits_tree(root, "test_retired.py",
+                              ["test_leg_a.py", "test_leg_missing.py"])
+        problems, report = law_coverage_problems(
+            tests, audit, rework, skill, splits_path=splits
+        )
+        check("direction 4 — a split naming an ABSENT successor FAILS, naming it",
+              any("test_leg_missing.py" in p and "absent under tests/" in p
+                  for p in problems),
+              problems[0][:110] if problems else "no problem reported")
+        check("direction 4 — and it is NOT counted as resolved",
+              report["split_resolved"] == [] and len(report["split_broken"]) == 1,
+              str(report["split_broken"]))
+
+def probe_a_split_with_an_unregistered_successor_does_not_resolve() -> None:
+    """A successor that exists but the audit never RUNS is not a resolution either."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        tests, audit, rework, skill = _law_tree(
+            root,
+            {"test_leg_a.py": CANONICAL_GATE, "test_leg_b.py": CANONICAL_GATE},
+            _register("test_leg_a.py"),
+            _rework("tests/test_retired.py"),
+            "no mechanism named here\n",
+        )
+        splits = _splits_tree(root, "test_retired.py",
+                              ["test_leg_a.py", "test_leg_b.py"])
+        problems, report = law_coverage_problems(
+            tests, audit, rework, skill, splits_path=splits
+        )
+        check("direction 4 — a split naming an UNREGISTERED successor FAILS, naming it",
+              any("test_leg_b.py" in p and "not registered" in p for p in problems),
+              problems[0][:110] if problems else "no problem reported")
+
+def probe_a_stale_split_is_reported() -> None:
+    """An entry whose retired file is STILL PRESENT declares a division that never happened.
+
+    This is the exemptions stores' own rule applied to splits: retired debt must not sit
+    in a store looking live. It is judged over EVERY entry, not only over names a law
+    happens to cite, because the entry's claim is about the TREE.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        tests, audit, rework, skill = _law_tree(
+            root,
+            {
+                "test_still.py": CANONICAL_GATE,
+                "test_leg_a.py": CANONICAL_GATE,
+                "test_leg_b.py": CANONICAL_GATE,
+            },
+            _register("test_still.py", "test_leg_a.py", "test_leg_b.py"),
+            _rework("nothing yet"),
+            "no mechanism named here\n",
+        )
+        splits = _splits_tree(root, "test_still.py",
+                              ["test_leg_a.py", "test_leg_b.py"])
+        problems, report = law_coverage_problems(
+            tests, audit, rework, skill, splits_path=splits
+        )
+        check("direction 4 — a split whose retired file is STILL present is STALE",
+              any("store is stale" in p and "test_still.py" in p for p in problems),
+              problems[0][:110] if problems else "no problem reported")
+        check("direction 4 — staleness is reported even when NO law names the file",
+              report["named"] == 0 and len(report["stale_splits"]) == 1,
+              f"named={report['named']} stale={report['stale_splits']}")
+
+def probe_a_one_successor_entry_is_a_rename_not_a_split() -> None:
+    """A single successor launders a RENAME: the law should follow it, not store it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        splits = _splits_tree(root, "test_old.py", ["test_new.py"])
+        declared, problems, read = declared_splits(splits)
+        check("direction 4 — a one-successor entry is REFUSED as a rename",
+              declared == {} and read is True
+              and any("at least TWO" in p for p in problems),
+              str(problems))
+        check("direction 4 — and the refusal says WHY",
+              any("rename" in p for p in problems), str(problems))
+
+def probe_an_absent_split_store_is_a_skip() -> None:
+    """A factory that has split nothing carries no store — absence is a skip, not a fault."""
+    with tempfile.TemporaryDirectory() as tmp:
+        declared, problems, read = declared_splits(Path(tmp) / "no-such.json")
+        check("direction 4 — an ABSENT split store declares nothing and is not read",
+              declared == {} and problems == [] and read is False,
+              f"declared={declared} problems={problems} read={read}")
+
+def probe_a_malformed_split_store_fails_rather_than_passing() -> None:
+    """A present-but-unreadable store is not an absent one (the n=571 class, one store over)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        bad = root / "bad.json"
+        bad.write_text("{ not json", encoding="utf-8")
+        declared, problems, read = declared_splits(bad)
+        check("direction 4 — an unreadable split store FAILS and states why",
+              declared == {} and read is True
+              and any("unreadable" in p for p in problems), str(problems))
+        empty = root / "empty.json"
+        empty.write_text('{"_note": "no list"}', encoding="utf-8")
+        declared, problems, read = declared_splits(empty)
+        check("direction 4 — a store with no `splits` list FAILS, naming the missing key",
+              declared == {} and any("no `splits` list" in p for p in problems),
+              str(problems))
 
 def probe_an_unreadable_law_source_fails_rather_than_passing() -> None:
     """A present-but-unparseable law source is not an absent one (the n=571 class)."""
@@ -755,9 +1043,10 @@ def probe_a_file_with_a_main_guard_is_still_pytest_form() -> None:
           target_form(both) == PYTEST_RUNNER, f"got {target_form(both)}")
     check("direction 5 — without the guard it is pytest-form too",
           target_form(PYTEST_STYLE) == PYTEST_RUNNER, f"got {target_form(PYTEST_STYLE)}")
+    no_test_fn = target_form('def main() -> int:\n    return 0\n')
     check("direction 5 — a file with NO test function stays script-form",
-          target_form('def main() -> int:\n    return 0\n') == SCRIPT_RUNNER,
-          f"got {target_form('def main() -> int:\n    return 0\n')}")
+          no_test_fn == SCRIPT_RUNNER,
+          f"got {no_test_fn}")
 
 def probe_the_runner_is_read_from_argv_not_guessed_from_the_target() -> None:
     """The runner comes from the APPEND; the shape from the TARGET. Neither implies the other."""
@@ -794,6 +1083,38 @@ def probe_a_tool_invocation_carries_no_target_shape() -> None:
         check("direction 5 — a tool invocation is reported as carrying no target shape",
               problems == [] and any("tool invocation" in f for f in report["forms"]),
               str(report["forms"])[:90])
+
+def probe_a_computed_argument_survives_the_projection() -> None:
+    """#436 clause 3: the argv is a DECLARED FORM — literals bare, non-literals placeheld.
+
+    The projection had TWO truncations and the regex was only the first. `" ".join(quoted)`
+    drops every argument the audit COMPUTES, because a computed argument carries no quotes:
+    `hygiene_namespace(repo_root)` vanished and `tools/hygiene.py --audit --namespace` came
+    back reading like a complete, runnable command line. This probe pins the SECOND cut on a
+    FIXTURE, so it fails on the lossy form however wide the scan gets — the live registration
+    below is CORROBORATION, never the control.
+
+    The ORDERED form is a placeholder, not raw source: an element that is not a string
+    literal is rendered `<expr>`, so the projection cannot be mistaken for a command anyone
+    can run.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tests, audit = _synthetic_tree(
+            Path(tmp), {},
+            "gates_to_run.append(\n"
+            '    [sys.executable, "tools/hygiene.py", "--audit",\n'
+            '     "--namespace", hygiene_namespace(repo_root)]\n'
+            ")\n",
+        )
+        entry = registration_entries(audit.read_text(encoding="utf-8"))[0]
+        check("clause 3 — a non-literal argument is rendered as an explicit PLACEHOLDER",
+              "<hygiene_namespace(repo_root)>" in entry["argv"], entry["argv"])
+        check("clause 3 — the interpreter is a placeholder too, never a bare token",
+              "<sys.executable>" in entry["argv"].split(), entry["argv"])
+        check("clause 3 — the truncated literal-only form is never produced",
+              entry["argv"] != "tools/hygiene.py --audit --namespace", entry["argv"])
+        check("clause 3 — the value is still a token list, so `split()` keeps the target",
+              "tools/hygiene.py" in entry["argv"].split(), entry["argv"])
 
 def probe_registered_entries_is_a_projection_of_one_scan() -> None:
     """DRY, mechanically: a second `_APPEND` scan is the same defect one level down."""
@@ -952,13 +1273,24 @@ def _basis(measured_at: str) -> dict:
     thing these probes vary is the revision the basis was taken at."""
     return {"budget_sec": 4.0, "measured_sec": 1.0, "margin_x": 4.0, "measured_at": measured_at}
 
-def _manifest(root: Path, gates: dict, default: dict | None = None) -> Path:
+def _manifest(root: Path, gates: dict, default: dict | None = None,
+              name: str = "gates.json") -> Path:
     """Write a throwaway manifest and return its path — never the live store.
 
     `default` is optional so every probe written before #208 keeps the bare default the kit
     ships (`gates.example.json`), which is the shape a factory inherits and must keep loading.
+
+    `name` exists because this helper used to ALWAYS write `root/gates.json`, so a probe that
+    called it twice held ONE file under two names: the second call silently rewrote the first
+    probe's manifest. That is not hypothetical — #578's disjoint partition turned it from a
+    latent trap into a red gate. `probe_a_refused_sample_is_not_a_basis_and_a_passing_one_still_derives`
+    wrote `manifest_b` as "a FRESH manifest", got the same path back, and reset the entry's
+    basis to `base`; the #307 arm that follows then read a STALE entry and could not see
+    EXHAUSTED at all. It passed before only because the OLD code let one entry be claimed by
+    BOTH legs at once, which is precisely the double-count #578 removed. A probe that needs a
+    second manifest names it.
     """
-    path = root / "gates.json"
+    path = root / name
     path.write_text(
         json.dumps({"default": default or {"budget_sec": 120.0}, "gates": gates}),
         encoding="utf-8",
@@ -980,7 +1312,7 @@ def probe_the_declared_basis_legs_are_resolved() -> None:
             "tests/test_same.py": _basis(base),
             "tests/test_runner_moved.py": _basis(base),
         }
-        stale, note = module.budget_staleness(entries, root)
+        stale, note, _unreached = module.budget_staleness(entries, root)
         found = {s.key: s for s in stale}
         check("a MOVED BLOB is stale on leg A",
               found.get("tests/test_moved.py") is not None
@@ -1016,7 +1348,7 @@ def probe_an_unresolvable_revision_is_reported_never_clean() -> None:
             "tests/test_same.py": _basis(base),
             "tests/test_moved.py": _basis(missing),
         }
-        stale, note = module.budget_staleness(entries, root)
+        stale, note, _unreached = module.budget_staleness(entries, root)
         check("an unresolvable measured_at is named WITH the count it covers",
               "NOT EXAMINED" in note and missing in note and "1 entry" in note,
               note.split("|")[-1].strip()[:120])
@@ -1032,7 +1364,7 @@ def probe_a_tree_without_a_resolvable_head_is_not_read_as_clean() -> None:
     module = _gate_budget_module()
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)  # deliberately NOT a repository
-        stale, note = module.budget_staleness({"tests/test_same.py": _basis("HEAD")}, root)
+        stale, note, _unreached = module.budget_staleness({"tests/test_same.py": _basis("HEAD")}, root)
         check("a directory with no resolvable HEAD reports NOT RUN, not clean",
               stale == () and note.startswith("NOT RUN"), note[:120])
         check("and it names how many declared entries it left UNEXAMINED",
@@ -1072,6 +1404,131 @@ def probe_the_margin_law_still_raises() -> None:
             raised = str(exc)
         check("a budget that is not margin_x x measured_sec still raises",
               "is not margin_x x measured_sec" in raised, raised[:120] or "nothing was raised")
+
+def probe_a_non_regular_file_at_the_manifest_path_is_refused() -> None:
+    """#588: a directory is PRESENT, so it can never be read as an ABSENT manifest.
+
+    The defect was the presence test. `Path.is_file()` is False for a directory, so a
+    directory took the ABSENT branch and the reader printed "no manifest at <path>" while
+    that exact path held a directory -- and the caps it returned were indistinguishable
+    from a real absence for any caller that only sees caps.
+
+    Both spellings are exercised: a bare directory (`.`) and a directory whose NAME looks
+    like a manifest (`*.json`). The second is the one that reaches the parse in the wild,
+    because nothing about the name says "this is not a file".
+    """
+    module = _gate_budget_module()
+    raised = ""
+    try:
+        module.load_gate_budgets(path=Path("."))
+    except module.GateBudgetManifestError as exc:
+        raised = str(exc)
+    check("a bare directory (`.`) at the manifest path raises rather than reading as absent",
+          bool(raised), raised[:130] or "nothing was raised")
+    check("the message names the path it refused", "." in raised, raised[:130])
+    check("the message says it is not a regular file",
+          "not a regular file" in raised, raised[:130])
+    check("the message does NOT reprint the false-absence phrase it removes",
+          "no manifest at" not in raised, raised[:130])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(tmp) / "gates.json"
+        target.mkdir()
+        raised = ""
+        try:
+            module.load_gate_budgets(path=target)
+        except module.GateBudgetManifestError as exc:
+            raised = str(exc)
+        check("a DIRECTORY named *.json raises identically, not as a fallback",
+              bool(raised) and "not a regular file" in raised and "no manifest at" not in raised,
+              raised[:130] or "nothing was raised")
+        check("and it is identified as a directory, so the reader knows which shape it met",
+              "a directory" in raised, raised[:130])
+
+
+def probe_a_dangling_symlink_at_the_manifest_path_is_refused() -> None:
+    """#588, the subtler half: presence is `lexists()`, never `exists()`.
+
+    `exists()` FOLLOWS symlinks, so a link whose target has vanished reports False and would
+    take the ABSENT branch -- printing "no manifest at <path>" while a link with that exact
+    name sits there. That is the same false-absence claim one level down, and a manifest
+    whose target disappeared is precisely when the caller must be told rather than reassured.
+    """
+    module = _gate_budget_module()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        link = root / "gates.json"
+        link.symlink_to(root / "vanished.json")  # the target is never created
+        check("the fixture really is a DANGLING link — exists() cannot see it, lexists() can",
+              link.is_symlink() and not link.exists() and os.path.lexists(link),
+              f"is_symlink={link.is_symlink()} exists={link.exists()} "
+              f"lexists={os.path.lexists(link)}")
+        raised = ""
+        try:
+            module.load_gate_budgets(path=link)
+        except module.GateBudgetManifestError as exc:
+            raised = str(exc)
+        check("a dangling symlink at the manifest path raises", bool(raised),
+              raised[:130] or "nothing was raised — the absent branch was taken")
+        check("and it says the target does not resolve, rather than claiming absence",
+              "does not resolve" in raised and "no manifest at" not in raised, raised[:130])
+
+
+def probe_the_env_override_is_the_live_vector() -> None:
+    """#588: `gates_manifest_path()` honours an env override, so a directory reaches the
+    reader through the ENVIRONMENT as well as through the `path=` argument.
+
+    This is the vector that matters in production: the direct argument is a probe's route,
+    the override is how a real run gets pointed at a path. The variable is restored in a
+    `finally` so the probe cannot leak into any later one.
+    """
+    module = _gate_budget_module()
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(tmp) / "gates.json"
+        target.mkdir()
+        previous = os.environ.get(module.GATES_MANIFEST_ENV)
+        os.environ[module.GATES_MANIFEST_ENV] = str(target)
+        try:
+            raised = ""
+            try:
+                module.load_gate_budgets()  # no path= at all: the override must be honoured
+            except module.GateBudgetManifestError as exc:
+                raised = str(exc)
+        finally:
+            if previous is None:
+                os.environ.pop(module.GATES_MANIFEST_ENV, None)
+            else:
+                os.environ[module.GATES_MANIFEST_ENV] = previous
+        check("a directory reaching the reader through the ENV override raises too",
+              bool(raised), raised[:130] or "nothing was raised")
+        check("and the refusal names the OVERRIDE path, so the environment was read",
+              str(target) in raised, raised[:130])
+        check("and the variable was restored, so the probe leaks nothing",
+              os.environ.get(module.GATES_MANIFEST_ENV) == previous,
+              f"left as {os.environ.get(module.GATES_MANIFEST_ENV)!r}")
+
+
+def probe_an_absent_manifest_is_still_the_declared_fallback() -> None:
+    """The control, and it must be BYTE-IDENTICAL: NOTHING at the path is a real absence.
+
+    Without this the three refusals above could be satisfied by refusing everything, which
+    would break every bootstrapped factory -- the kit ships `gates.example.json` and no live
+    manifest, so the absent branch is the NORMAL path, not an edge case.
+    """
+    module = _gate_budget_module()
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(tmp) / "nothing-here.json"
+        budgets = module.load_gate_budgets(path=target)
+        check("an absent manifest still returns the declared fallback, never a raise",
+              budgets.default_sec == module.FALLBACK_DEFAULT_SEC and budgets.gates == {},
+              f"default_sec={budgets.default_sec} gates={budgets.gates}")
+        check("and its default_source is BYTE-IDENTICAL to the shipped wording",
+              budgets.default_source == f"no manifest at {target} — declared fallback",
+              budgets.default_source)
+        check("and its stale_note is too, so nothing else moved in the absent branch",
+              budgets.stale_note == f"no manifest at {target} — nothing declared to sweep",
+              budgets.stale_note)
+
 
 def probe_the_live_sweep_states_its_own_account() -> None:
     """On the live manifest: a count that travels with the population it was taken over.
@@ -1481,6 +1938,52 @@ def probe_a_genuine_failure_is_never_retried() -> None:
     )
 
 
+def probe_a_chosen_kill_code_is_unknown_not_failed() -> None:
+    """#552 (ruling `n=4167`): a gate that CHOOSES exit 124 is UNKNOWN in the audit payload.
+
+    `unknown` was set in exactly ONE place -- the `except TimeoutExpired` branch -- so a gate
+    that exited 124 on its own exited NORMALLY, was recorded `passed: False, unknown: False`,
+    and was counted FAILED. After the gate-side split that same run reads NO VERDICT one
+    layer down, which is one run described two ways by two surfaces: the ruling therefore
+    made this reader part of the acceptance, not a follow-up.
+
+    Arm 2 is the discriminator: a genuine failure in the same reader must stay FAILED, so the
+    change cannot pass by calling every non-zero exit unknown.
+    """
+    audit = _audit_module()
+    gate_budget = _gate_budget_module()
+    chosen = audit.run_gate(
+        ["/bin/sh", "-c", f"exit {gate_budget.TIMEOUT_EXIT_CODE}"], REPO, 30.0
+    )
+    check(
+        "a gate that CHOOSES the kill code is UNKNOWN, never a plain failure",
+        chosen["unknown"] is True and chosen["passed"] is False,
+        f"unknown={chosen['unknown']}, passed={chosen['passed']}",
+    )
+    check(
+        "... and it carries the kill code it chose, unchanged",
+        chosen["exit_code"] == gate_budget.TIMEOUT_EXIT_CODE,
+        f"exit_code={chosen['exit_code']}",
+    )
+    check(
+        "... and it COMPLETED, so it is never retried and its wall-clock is a measurement",
+        chosen["attempts"] == 1 and chosen["duration_is_lower_bound"] is False,
+        f"attempts={chosen['attempts']}, "
+        f"lower_bound={chosen['duration_is_lower_bound']}",
+    )
+    verdict = audit.judge_gates([_synthetic_gate(True, False), chosen])
+    check(
+        "... so the payload reads UNKNOWN, not DEGRADED -- the two surfaces now agree",
+        verdict.status == "UNKNOWN" and len(verdict.unknown) == 1,
+        f"status={verdict.status}, unknown={len(verdict.unknown)}",
+    )
+    failed = audit.run_gate(["/bin/sh", "-c", "exit 1"], REPO, 30.0)
+    check(
+        "ARM 2 (discriminator): a genuine failure stays FAILED, never unknown",
+        failed["unknown"] is False and failed["passed"] is False,
+        f"unknown={failed['unknown']}, passed={failed['passed']}",
+    )
+
 def probe_a_real_timeout_lands_in_unknown_end_to_end(timed_out: dict) -> None:
     """PART 2, end to end: a REAL timed-out result, judged by the REAL verdict.
 
@@ -1520,6 +2023,65 @@ def probe_a_real_timeout_lands_in_unknown_end_to_end(timed_out: dict) -> None:
         f"1 of {verdict.total}" in line,
         line[:130],
     )
+
+
+def probe_the_staleness_join_reaches_the_verdict_line(timed_out: dict) -> None:
+    """A kill under a stale basis NAMES that staleness on its own verdict line (#231).
+
+    NON-VACUITY, both operands REAL. The kill is the live `run_gate` timeout the #93 probes
+    already drive -- a genuine budget exhaustion, not a fixture that never ran -- and the
+    basis is a real `budget_staleness` sweep over a throwaway history in which the gate's
+    bytes moved between `measured_at` and HEAD. The second arm removes the join and the
+    same record then renders as a bare UNKNOWN, which IS the blindness the item was filed
+    for: so the joined assertion below is the one that fails when the join is taken away.
+    """
+    audit = _audit_module()
+    module = _gate_budget_module()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        base, head = _two_commit_repo(root)
+        if base is None or head is None:
+            check("the probe repository could be built and committed", False,
+                  f"base={base} head={head} — this leg could not judge")
+            return
+        stale, _note, _unreached = module.budget_staleness({"tests/test_moved.py": _basis(base)}, root)
+        if not stale:
+            check("the synthetic sweep found the moved basis this probe needs", False,
+                  "the sweep reported nothing stale, so the join could not be driven")
+            return
+        killed = dict(timed_out)
+        killed["gate_key"] = "tests/test_moved.py"
+        audit.attach_gate_staleness([killed], stale)
+        line = audit.render_gate_line(killed)
+        check("a KILLED gate under a stale basis names the staleness ON ITS OWN LINE",
+              "[STALE:bytes]" in line and "blob " in line,
+              line[:200])
+        check("the joined line still states the kill it is joined to",
+              "[UNKNOWN]" in line and ">=" in line,
+              line[:120])
+        # THE JOIN REMOVED — the same record with no staleness attached.
+        bare = dict(timed_out)
+        bare["gate_key"] = "tests/test_moved.py"
+        audit.attach_gate_staleness([bare], ())
+        check("removing the join leaves the kill rendering as a bare UNKNOWN",
+              "[STALE:" not in audit.render_gate_line(bare),
+              audit.render_gate_line(bare)[:160])
+        joined = audit.stale_killed_gates([killed])
+        check("the killed/UNKNOWN-under-a-stale-basis population names its members",
+              [g.get("gate_key") for g in joined] == ["tests/test_moved.py"]
+              and audit.stale_killed_gates([bare]) == [],
+              f"joined={[g.get('gate_key') for g in joined]} "
+              f"without_the_join={audit.stale_killed_gates([bare])}")
+        # A PASSING gate under a stale basis is MARKED but is NOT in the killed population:
+        # the mark answers "does the basis describe this test", the population answers
+        # "which KILLS are explained by that". One count, two questions, kept apart.
+        sound = {"cmd": "java -version", "passed": True, "unknown": False,
+                 "duration_sec": 1.0, "gate_key": "tests/test_moved.py"}
+        audit.attach_gate_staleness([sound], stale)
+        check("a PASSING gate under a stale basis is marked yet stays out of the kill count",
+              "[STALE:bytes]" in audit.render_gate_line(sound)
+              and audit.stale_killed_gates([sound]) == [],
+              audit.render_gate_line(sound)[:160])
 
 
 def probe_the_three_states_are_distinct_and_a_failure_outranks_unknown() -> None:
@@ -1784,6 +2346,89 @@ def probe_a_declared_marker_is_read_first_and_the_heuristic_is_the_fallback() ->
         repr(audit.reported_cause(hout)),
     )
 
+def probe_the_stream_join_ranks_what_each_stream_DECLARES() -> None:
+    """#533 — the join ACROSS the two streams keeps #205's precedence.
+
+    The roster above carries `stdout` on every row and not one `stderr` key, which is
+    precisely why the short-circuit went untested: `reported_cause(text)` returns a non-empty
+    string for ANY non-empty text (its last line at minimum), so the old join
+    `reported_cause(stdout) or reported_cause(stderr)` never reached the second operand once
+    stdout had said anything at all.
+
+    The defect is reader-facing and measured, not hypothetical: `tools/hygiene.py --audit
+    --require-committed` writes supersession advisories to stdout and `oc-cause-count: 1` to
+    stderr, so the recorded note named an advisory about a DIFFERENT evidence file and
+    dropped the gate's own declared count.
+
+    All four arms below are asserted because the change must be purely ADDITIVE: the first is
+    the historical behaviour and must not move, the second already worked (a silent stdout
+    fell through), the third is the defect, and the fourth pins the count line at its rank
+    between the marker and prose.
+    """
+    audit = _audit_module()
+    roster = [
+        {"cmd": "prose/prose", "passed": False, "unknown": False, "duration_sec": 1.0,
+         "stdout": "first advisory\nlast stdout line", "stderr": "stderr tail"},
+        {"cmd": "empty/marker", "passed": False, "unknown": False, "duration_sec": 1.0,
+         "stdout": "", "stderr": "oc-cause-count: 4\n- a specimen"},
+        {"cmd": "prose/marker", "passed": False, "unknown": False, "duration_sec": 1.0,
+         "stdout": "PROSE-ONLY evidence/a.md — superseded by evidence/b.md",
+         "stderr": "oc-cause-count: 1"},
+        {"cmd": "prose/count", "passed": False, "unknown": False, "duration_sec": 1.0,
+         "stdout": "an advisory line", "stderr": "3 problem(s) in /repo/x"},
+        {"cmd": "counts/disagree", "passed": False, "unknown": False, "duration_sec": 1.0,
+         "stdout": "oc-cause-count: 2\n- a specimen", "stderr": "oc-cause-count: 5\n- b specimen"},
+        {"cmd": "counts/agree", "passed": False, "unknown": False, "duration_sec": 1.0,
+         "stdout": "oc-cause-count: 3\n- a specimen", "stderr": "oc-cause-count: 3\n- b specimen"},
+    ]
+    audit.attach_gate_causes(roster)
+    check(
+        "prose on BOTH streams still keeps stdout — the additive arm, unchanged",
+        roster[0].get("note") == "last stdout line",
+        repr(roster[0].get("note")),
+    )
+    check(
+        "a SILENT stdout falls through to a declaring stderr — already worked, must not regress",
+        roster[1].get("note", "").startswith("oc-cause-count: 4"),
+        repr(roster[1].get("note")),
+    )
+    check(
+        "a PROSE stdout no longer buries a marker declared on stderr — #533 itself",
+        roster[2].get("note", "").startswith("oc-cause-count: 1"),
+        repr(roster[2].get("note")),
+    )
+    check(
+        "and the advisory that used to win is NOT what the reader is shown",
+        not roster[2].get("note", "").startswith("PROSE-ONLY"),
+        repr(roster[2].get("note")),
+    )
+    check(
+        "the count line outranks prose but not the marker — the rank order, not just the fix",
+        roster[3].get("note", "").startswith("3 problem(s)"),
+        repr(roster[3].get("note")),
+    )
+    check(
+        "BOTH streams declaring DISAGREEING counts names BOTH -- never a silent stdout win",
+        "stdout 2" in roster[4].get("note", "") and "stderr 5" in roster[4].get("note", ""),
+        repr(roster[4].get("note")),
+    )
+    check(
+        "and the disagreement is STATED as one, so the reader sees the two halves conflict",
+        "DISAGREE" in roster[4].get("note", ""),
+        repr(roster[4].get("note")),
+    )
+    check(
+        "counts that AGREE are not a disagreement -- the additive arm, stdout as before",
+        roster[5].get("note", "").startswith("oc-cause-count: 3")
+        and "DISAGREE" not in roster[5].get("note", ""),
+        repr(roster[5].get("note")),
+    )
+    check(
+        "reported_cause itself takes ONE text and is unchanged, so the fix lives in the join",
+        list(inspect.signature(audit.reported_cause).parameters) == ["text", "limit"],
+        repr(list(inspect.signature(audit.reported_cause).parameters)),
+    )
+
 def probe_the_note_is_attached_once_for_every_surface() -> None:
     """The cause is computed ONCE and read by all three surfaces (#158).
 
@@ -1822,6 +2467,1979 @@ def probe_the_note_is_attached_once_for_every_surface() -> None:
         repr(roster[2].get("note")),
     )
 
+
+# ---------------------------------------------------------------------------
+# #226 — THE LOAD A MEASUREMENT WAS TAKEN AT, and the lower bound a kill records.
+#
+# The class this closes. `budget_sec = margin_x x measured_sec` is satisfied exactly and is
+# not protective: measured on this box, `tests/test_ledger.py` ran 33.92s / 29.83s / 95s and
+# was KILLED at 126.32s against a declared basis of 31.36s -- both kills landing within
+# 0.13s of their own cap, so the margin law held while the box ran 2-3 concurrent audits,
+# which is its normal state at night. A cap exceeded at load 13 and the same cap exceeded on
+# an idle box are the SAME NUMBER and DIFFERENT FACTS, and the manifest carried no datum
+# that told them apart. So:
+#
+#   * the manifest gains an OPTIONAL `load_at_measure` beside `measured_sec`, and its
+#     ABSENCE IS PRINTED rather than refused -- 48 entries exist and a load reading exists
+#     for 2, so a required key would force 46 invented values, the very class this module
+#     exists to remove (a number travelling without its predicate);
+#   * a KILL is recorded as a LOWER BOUND, never promoted to a measure of the gate. The cap
+#     is the budget talking: the gate ran AT LEAST that long. Without the marker a future
+#     tool deriving a `measured_sec` from an audit payload would derive the next cap from
+#     its own failure.
+#
+# `margin_x` is NOT raised for this (ruled, n=1602): containing 126.32s from a 31.36s base
+# needs margin_x ~ 16.1, and that is the "too high, it hides a hung one" direction n=823
+# refuses. The base VALUES are the process owner's measurement duty; this is the schema and
+# the refusal to promote a bound.
+# ---------------------------------------------------------------------------
+
+def probe_a_killed_gate_is_never_rendered_as_a_measurement(timed_out: dict) -> None:
+    """A kill carries a LOWER BOUND; a completed run carries a measurement.
+
+    Both arms on the SAME instrument: the killed record is the live `run_gate` timeout the
+    #93 probes already drive, and the completed one is a real sub-second run. The record
+    marker and the RENDERED row are asserted together, because the rendered number is what a
+    reader copies into a manifest next.
+    """
+    audit = _audit_module()
+    check(
+        "a KILLED gate records its duration as a LOWER BOUND",
+        timed_out.get("duration_is_lower_bound") is True,
+        f"duration_is_lower_bound={timed_out.get('duration_is_lower_bound')!r}, "
+        f"duration_sec={timed_out['duration_sec']}",
+    )
+    done = audit.run_gate(["/bin/true"], REPO, 60.0)
+    check(
+        "a COMPLETED gate records a measurement, never a bound",
+        done.get("duration_is_lower_bound") is False,
+        f"duration_is_lower_bound={done.get('duration_is_lower_bound')!r}, "
+        f"duration_sec={done['duration_sec']}",
+    )
+    md = audit.format_report_markdown(
+        "2026-09-29", "2026-09-29T00:00:00Z", {}, {}, {}, [timed_out, done]
+    )
+    rows = [ln for ln in md.splitlines() if "| `" in ln and "s` |" in ln]
+    killed_rows = [ln for ln in rows if ">=" in ln]
+    check(
+        "the committed report renders a kill as `>=N`, never as a bare measurement",
+        len(killed_rows) == 1 and ">=%s" % timed_out["duration_sec"] in killed_rows[0],
+        killed_rows[0][:110] if killed_rows else "no `>=` row rendered",
+    )
+    check(
+        "and the completed gate's row carries NO bound marker",
+        all((">=" not in ln) for ln in rows if "| `" in ln and len(ln) > 60 and ln not in killed_rows)
+        or len(rows) == 1,
+        str(len(rows)) + " gate row(s) rendered",
+    )
+
+def probe_the_load_key_is_optional_and_its_absence_is_printed() -> None:
+    """A manifest that states no load still LOADS, and says so in the same breath.
+
+    This is the arm that keeps the field optional: the kit ships `gates.example.json` with a
+    bare default on purpose, and a leg that refused there would red every bootstrapped
+    factory. What it must NOT do is read the absence as a clean sheet -- so the note names
+    the population it examined and the harm the gap causes.
+    """
+    module = _gate_budget_module()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        path = _manifest(
+            root,
+            {"tests/test_same.py": {"budget_sec": 4.0, "measured_sec": 1.0,
+                                    "margin_x": 4.0, "measured_at": "HEAD"}},
+        )
+        raised = ""
+        try:
+            budgets = module.load_gate_budgets(path=path, repo_root=root)
+        except module.GateBudgetManifestError as exc:
+            raised = str(exc)
+            budgets = None
+        check(
+            "a manifest with no `load_at_measure` still loads — the field is OPTIONAL",
+            budgets is not None,
+            raised[:130] or "loaded",
+        )
+        if budgets is None:
+            return
+        check(
+            "and the budget it declares is read unchanged",
+            budgets.gates == {"tests/test_same.py": 4.0},
+            str(budgets.gates),
+        )
+        check(
+            "its note states the POPULATION that carries no load",
+            budgets.load_note.startswith(f"{module.LOAD_KEY}: 0 of 2 declared bases carry it"),
+            budgets.load_note[:130],
+        )
+        check(
+            "and names the harm, so the gap is readable rather than silent",
+            "busy box" in budgets.load_note,
+            budgets.load_note[:160],
+        )
+
+def probe_a_declared_load_is_counted_and_named() -> None:
+    """Where a load IS declared, it is carried forward and the account says how many."""
+    module = _gate_budget_module()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        path = _manifest(
+            root,
+            {"tests/test_same.py": {"budget_sec": 4.0, "measured_sec": 1.0, "margin_x": 4.0,
+                                    "measured_at": "HEAD", "load_at_measure": 0.31},
+             "tests/test_other.py": {"budget_sec": 8.0, "measured_sec": 2.0, "margin_x": 4.0,
+                                     "measured_at": "HEAD"}},
+        )
+        budgets = module.load_gate_budgets(path=path, repo_root=root)
+        check(
+            "the state the load was measured at is carried, by key",
+            budgets.loads == {"tests/test_same.py": 0.31},
+            str(budgets.loads),
+        )
+        check(
+            "the account counts the declarers against the population, entries AND `default`",
+            budgets.load_note.startswith(
+                f"{module.LOAD_KEY}: 1 of 3 declared bases carry it (none on `default`, "
+                f"1 of 2 declared entries)"
+            ),
+            budgets.load_note[:150],
+        )
+        check(
+            "and the note still names the population that declares NONE",
+            "the other 2 state none" in budgets.load_note,
+            budgets.load_note[:170],
+        )
+
+def probe_a_non_numeric_load_is_refused() -> None:
+    """A load that is not a number states nothing a reader can compare against a kill."""
+    module = _gate_budget_module()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        path = _manifest(
+            root,
+            {"tests/test_same.py": {"budget_sec": 4.0, "measured_sec": 1.0, "margin_x": 4.0,
+                                    "measured_at": "HEAD", "load_at_measure": "busy"}},
+        )
+        raised = ""
+        try:
+            module.load_gate_budgets(path=path, repo_root=root)
+        except module.GateBudgetManifestError as exc:
+            raised = str(exc)
+        check(
+            "a non-numeric `load_at_measure` on an entry is refused, naming the key",
+            module.LOAD_KEY in raised and "positive number" in raised,
+            raised[:130] or "nothing was raised",
+        )
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        path = _manifest(root, {}, default={"budget_sec": 120.0, "load_at_measure": -1.0})
+        raised = ""
+        try:
+            module.load_gate_budgets(path=path, repo_root=root)
+        except module.GateBudgetManifestError as exc:
+            raised = str(exc)
+        check(
+            "and a non-positive one on `default` is refused too",
+            module.LOAD_KEY in raised,
+            raised[:130] or "nothing was raised",
+        )
+
+def probe_the_live_manifest_states_its_load_population() -> None:
+    """On the live manifest: the account is PRINTED, and it is the live population.
+
+    Asserted as an ACCOUNT, never a verdict -- how many entries carry a load is a
+    measurement that moves as the process owner re-measures, so a probe demanding a number
+    would red on correct data. What must hold is that the account exists and states the
+    population it examined.
+    """
+    module = _gate_budget_module()
+    raised = ""
+    try:
+        budgets = module.load_gate_budgets()
+    except module.GateBudgetManifestError as exc:
+        raised = str(exc)
+        budgets = None
+    check(
+        "the live manifest LOADS — a load reading is never a precondition",
+        budgets is not None,
+        raised[:130] or "loaded",
+    )
+    if budgets is None:
+        return
+    if not budgets.gates:
+        print("  live manifest — none declared (the kit's bare default is in use)")
+        return
+    check(
+        "the live manifest prints its load population",
+        budgets.load_note.startswith(module.LOAD_KEY),
+        budgets.load_note[:130],
+    )
+    check(
+        "and every key it names as declaring a load carries one",
+        all(budgets.loads[k] > 0 for k in budgets.load_declared),
+        str({k: budgets.loads[k] for k in budgets.load_declared})[:130],
+    )
+    print(f"  live manifest — {len(budgets.load_declared)} of {len(budgets.gates)} declared "
+          f"entries carry a load reading")
+
+# THE RE-DERIVATION LEG (issue #269, ledger n=1924 / dispatch n=1928). The staleness sweep
+# above REPORTS which declared bases no longer describe what runs; the leg is the standing
+# duty that CLEARS them, declared in `docs/measurement-procedure.md` docs/measurement-procedure.md §5.2 and invoked inside
+# the daily measurement round. These probes cover the LEG — the command the round runs —
+# because the sweep's own predicate is already probed above and a command's properties
+# (does it exit non-zero on a vacuous read, does it print the population it examined, does
+# it refuse an apply it cannot support) are not properties of the function it calls.
+#
+# THE PROBE IS TWO-SIDED, and that is the load-bearing half: a leg that reported EVERY
+# declared base as stale would satisfy a one-sided "it found the stale one" check and be
+# useless. So one synthetic file's bytes move between the two commits while another's hold
+# at the same declared revision, and the probes assert the moved one appears and the held
+# one does not.
+
+def _leg_proc(*args: str) -> subprocess.CompletedProcess:
+    """The leg, run as the round runs it — the COMMAND, never an in-process call."""
+    return subprocess.run(
+        [sys.executable, str(REPO / "tools" / "gate_budget_rederive.py"), *args],
+        capture_output=True, text=True, timeout=300,
+    )
+
+# #558 (ruling n=4224) — A BASIS SAMPLE MUST BE COMPLETED **AND PASSING**.
+#
+# `_audit_samples` admitted a sample on ONE test: `unknown` falsy. There was no test on
+# `passed`, so a gate that refused structurally -- the `.audit.lock` held, a missing
+# prerequisite, an import error -- completed in a few seconds with `passed: False,
+# unknown: False` and became the BASIS when it was the only sample the report held.
+# `margin_for(4.11) x 4.11 = 17.19 s` against a declared 1008.75 s is a 58.68x collapse,
+# and `tests/test_shipped_audit_runs.py:541-543` runs the shipped audit with
+# `timeout=wall_sec` read from that same entry -- so the collapsed wall would kill the
+# gate's own child every round, permanently, with the derivation law's blessing behind it.
+#
+# THE SECOND ARM IS MANDATORY, and it is the arm that makes this a gate rather than a
+# slogan: a check that only proves the refusal is EXCLUDED cannot tell the fix from a tool
+# that derives nothing ever. So the same gate, given one PASSING sample, must derive
+# normally from it -- and the derived wall must be the sample's, not the refusal's.
+
+def probe_a_refused_sample_is_not_a_basis_and_a_passing_one_still_derives() -> None:
+    """Two arms over one synthetic history: refusal -> NOT DERIVABLE, pass -> derives."""
+    leg = REPO / "tools" / "gate_budget_rederive.py"
+    if not leg.is_file():
+        print("  SKIP  no tools/gate_budget_rederive.py in this tree — the re-derivation leg "
+              "is this factory's standing duty, not yet part of the shipped kit")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        base, head = _two_commit_repo(root)
+        if base is None or head is None:
+            check("the #558 probe repository could be built and committed", False,
+                  f"base={base} head={head} — this leg could not judge")
+            return
+        # The basis is taken at `base` while HEAD has moved on, so the entry is STALE and
+        # therefore IN the containment population -- the only place a derivation happens.
+        manifest = _manifest(root, {"tests/test_moved.py": _basis(base)})
+
+        def report(*, passed: bool, unknown: bool, duration: float) -> Path:
+            path = root / f"audit-{'pass' if passed else 'refused'}.json"
+            path.write_text(json.dumps({"gates": [{
+                "gate_key": "tests/test_moved.py", "cmd": "synthetic",
+                "passed": passed, "unknown": unknown, "duration_sec": duration,
+                "exit_code": 0 if passed else 1,
+            }]}), encoding="utf-8")
+            return path
+
+        # ARM 1 — the refusal. `passed: False, unknown: False` is the structural-refusal
+        # shape: it completed, so it is not UNKNOWN, and it must still not be a sample.
+        refused = report(passed=False, unknown=False, duration=4.11)
+        done = _leg_proc("--manifest", str(manifest), "--repo-root", str(root),
+                         "--audit-report", str(refused))
+        check("a refused sample leaves the leg exiting 0 (NOT DERIVABLE is a verdict)",
+              done.returncode == 0, f"rc={done.returncode}: {done.stdout[-300:]}")
+        check("the refused gate is NAMED not-derivable, not silently skipped",
+              "[NOT DERIVABLE] tests/test_moved.py" in done.stdout, done.stdout[:600])
+        # The population count is what a reader trusts, so the arm asserts the COUNT: a
+        # refusal that reached `samples` would read "1 passing sample(s)", and the number
+        # would then become the wall through `margin_for(4.11) x 4.11`.
+        check("the refused run is counted as ZERO samples, and the failure is NAMED in the count",
+              "0 passing sample(s)" in done.stdout
+              and "1 gate(s) completed and FAILED" in done.stdout, done.stdout[:600])
+
+        # ... and the same refusal through `--apply` must be HELD, never written.
+        applied = _leg_proc("--manifest", str(manifest), "--repo-root", str(root),
+                            "--audit-report", str(refused), "--apply")
+        check("--apply over a refused-only sample derives NOTHING",
+              "[HELD] tests/test_moved.py" in applied.stdout, applied.stdout[:600])
+        written = json.loads(manifest.read_text(encoding="utf-8"))["gates"]["tests/test_moved.py"]
+        check("the manifest is UNCHANGED by a refused-only apply — the 58.68x collapse is blocked",
+              written["budget_sec"] == 4.0 and written["measured_sec"] == 1.0,
+              json.dumps(written))
+
+        # ARM 2 — THE CONTROL THAT MAKES IT A GATE: one PASSING sample still derives.
+        passing = report(passed=True, unknown=False, duration=30.0)
+        derived = _leg_proc("--manifest", str(manifest), "--repo-root", str(root),
+                            "--audit-report", str(passing), "--apply")
+        check("a PASSING sample still derives — the fix is not a tool that derives nothing",
+              "APPLIED 1" in derived.stdout, derived.stdout[:600])
+        written = json.loads(manifest.read_text(encoding="utf-8"))["gates"]["tests/test_moved.py"]
+        check("the derived wall comes from the PASSING sample, not the refusal",
+              written["measured_sec"] == 30.0 and written["budget_sec"] > 30.0,
+              json.dumps(written))
+        check("the derivation records the revision it was measured at",
+              written["measured_at"] == head, json.dumps(written))
+
+        # ARM 3 — THE REVISION IS THE SAMPLE'S, NOT THE WRITE-TIME ONE. A report that
+        # declares the tree it ran against must have that revision recorded, because a
+        # survey round writes its artifact, commits and rebases BEFORE it applies: stamping
+        # write-time HEAD would name a tree these samples never ran against, and the entry
+        # would read NOT EXAMINED in any fresh clone. Same gate, same repo, only the
+        # declaration differs — so the arm cannot pass on a coincidence of the fixture.
+        # A FRESH manifest, because ARM 2's apply left the entry consistent with HEAD and
+        # an empty population derives nothing: the arm needs a stale basis to have work.
+        manifest_b = _manifest(root, {"tests/test_moved.py": _basis(base)},
+                               name="gates-b.json")
+        declared = root / "audit-declared-tree.json"
+        declared.write_text(json.dumps({
+            "tree": {"head_sha": base, "modified_count": 0},
+            "gates": [{
+                "gate_key": "tests/test_moved.py", "cmd": "synthetic",
+                "passed": True, "unknown": False, "duration_sec": 40.0, "exit_code": 0,
+            }],
+        }), encoding="utf-8")
+        from_sample = _leg_proc("--manifest", str(manifest_b), "--repo-root", str(root),
+                                "--audit-report", str(declared), "--apply")
+        written = json.loads(manifest_b.read_text(encoding="utf-8"))["gates"]["tests/test_moved.py"]
+        check("measured_at is the report's own tree revision, never the write-time HEAD",
+              written["measured_at"] == base and written["measured_at"] != head,
+              f"measured_at={written['measured_at']} base={base} head={head}")
+        check("the sample's own revision still derives from that sample",
+              written["measured_sec"] == 40.0 and "APPLIED 1" in from_sample.stdout,
+              from_sample.stdout[:400])
+
+        # THE TRIGGER IS UNTOUCHED (#307): an UNKNOWN gate is still not a sample, and is
+        # still the exhausted-budget trigger. A fix that collapsed the two would regress it.
+        unknown = report(passed=False, unknown=True, duration=1008.75)
+        kept = _leg_proc("--manifest", str(manifest), "--repo-root", str(root),
+                         "--audit-report", str(unknown))
+        check("an UNKNOWN gate still reads EXHAUSTED and never becomes a sample",
+              "[EXHAUSTED] tests/test_moved.py" in kept.stdout
+              and "[NOT DERIVABLE] tests/test_moved.py" not in kept.stdout,
+              kept.stdout[:600])
+
+# #593 — A GROWTH MARKER MUST DIE WITH THE WALL IT DESCRIBED.
+#
+# `_growth_source` sizes the streak from marker PRESENCE alone: `consecutive = 2 if (marker
+# is not None and not _same_round(marker, audit.round_id)) else 1`. So a marker that survives
+# a re-derivation makes the NEXT round read as a SECOND consecutive breach and re-derive on
+# ONE sample — the report-first rule (#564 clause 2) defeated by a record of a breach that has
+# already been repaired.
+#
+# `apply_rederivation`'s growth branch has always popped the marker under a comment stating
+# that invariant. The ORDINARY branch did not, and a STALE entry only ever takes the ordinary
+# branch: `_growth_source` excludes stale keys outright (`if key in stale_keys: continue`), so
+# a stale entry can never enter `reset` either — `record_growth_state`'s only clearer. Net: a
+# stale entry's marker was cleared by NO run, with or without `--apply`.
+#
+# THE ARMS. A is the negative control: a run that moves no wall must clear nothing, because
+# the marker still describes a LIVE breach there. B is the fix: the wall moves, so the marker
+# goes — and the STALE arm SAYS SO, since a silent exclusion is the same defect mirrored. C is
+# the MECHANISM: after the clear, one growth sample must be REPORTED, not applied. D keeps C
+# from being vacuous: a genuine SECOND round still re-derives, so the fix does not disable the
+# trend clause it sits beside.
+
+def probe_a_stale_entries_growth_marker_dies_with_its_wall() -> None:
+    """Four arms over one synthetic history: keep, clear+report, no single-sample arm, trend."""
+    leg = REPO / "tools" / "gate_budget_rederive.py"
+    if not leg.is_file():
+        print("  SKIP  no tools/gate_budget_rederive.py in this tree — the re-derivation leg "
+              "is this factory's standing duty, not yet part of the shipped kit")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        base, head = _two_commit_repo(root)
+        if base is None or head is None:
+            check("the #593 probe repository could be built and committed", False,
+                  f"base={base} head={head} — this leg could not judge")
+            return
+        # A marker of the shape `record_growth_state` writes, recorded against the OLD wall.
+        entry = dict(_basis(base))
+        entry["growth_breach"] = {
+            "sample_sec": 9.0, "sample_revision": base, "basis_sec": 1.0,
+            "basis_revision": base, "declared_sec": 4.0, "derived_sec": 36.0,
+            "growth_x": 9.0, "derived_over_declared": 9.0,
+            "round_id": f"2026-10-29T00:00:00Z:{base}", "reported_at": "2026-10-29T00:00:00Z",
+        }
+        manifest = _manifest(root, {"tests/test_moved.py": entry})
+
+        def report(name: str, duration: float, date: str) -> Path:
+            path = root / name
+            path.write_text(json.dumps({
+                "date": date,
+                "tree": {"head_sha": head, "modified_count": 0},
+                "gates": [{
+                    "gate_key": "tests/test_moved.py", "cmd": "synthetic",
+                    "passed": True, "unknown": False, "duration_sec": duration, "exit_code": 0,
+                }],
+            }), encoding="utf-8")
+            return path
+
+        def state() -> dict:
+            return json.loads(
+                manifest.read_text(encoding="utf-8")
+            )["gates"]["tests/test_moved.py"]
+
+        passing = report("audit-pass.json", 30.0, "2026-10-30T00:00:00Z")
+
+        # ARM A — A RUN THAT MOVES NO WALL CLEARS NOTHING. The fixture's own control: the
+        # entry must be STALE, or none of the arms below exercise the ordinary branch at all.
+        dry = _leg_proc("--manifest", str(manifest), "--repo-root", str(root),
+                        "--audit-report", str(passing))
+        check("the #593 fixture is STALE — the arm exercises the ordinary branch",
+              "[STALE] tests/test_moved.py" in dry.stdout, dry.stdout[:600])
+        check("a report-only run leaves the stale entry's growth marker INTACT — it moves no wall",
+              "growth_breach" in state(), json.dumps(state())[:200])
+        check("and it does not CLAIM a clear it did not perform",
+              "CLEARED" not in dry.stdout, dry.stdout[:600])
+
+        # ARM B — THE FIX.
+        applied = _leg_proc("--manifest", str(manifest), "--repo-root", str(root),
+                            "--audit-report", str(passing), "--apply")
+        check("--apply re-derives the stale entry", "APPLIED 1" in applied.stdout,
+              applied.stdout[:600])
+        check("the re-derivation REMOVES the growth marker it invalidated",
+              "growth_breach" not in state(), json.dumps(state())[:200])
+        check("and the STALE arm REPORTS the clear rather than dropping it silently",
+              "[STALE] tests/test_moved.py" in applied.stdout and "CLEARED" in applied.stdout,
+              applied.stdout[:700])
+        cleared_wall = state()["budget_sec"]
+
+        # ARM C — THE MECHANISM. One growth sample in a NEW round: with the marker gone the
+        # streak is 1, so the wall must NOT move. On the parent commit the surviving marker
+        # made this a SECOND breach and re-derived from this single sample.
+        growth_one = report("audit-growth-1.json", 40.0, "2026-10-31T00:00:00Z")
+        first = _leg_proc("--manifest", str(manifest), "--repo-root", str(root),
+                          "--audit-report", str(growth_one), "--apply")
+        check("ONE growth sample after the clear moves NO wall — the streak restarts at 1",
+              "APPLIED" not in first.stdout
+              and "[REPORTED] tests/test_moved.py" in first.stdout,
+              first.stdout[:700])
+        check("and the wall is exactly where the re-derivation left it",
+              state()["budget_sec"] == cleared_wall, json.dumps(state())[:200])
+
+        # ARM D — THE CONTROL that keeps ARM C from being vacuous: a genuine SECOND round
+        # still re-derives. Without it, "never applies" would pass as a fix.
+        growth_two = report("audit-growth-2.json", 40.0, "2026-11-01T00:00:00Z")
+        second = _leg_proc("--manifest", str(manifest), "--repo-root", str(root),
+                           "--audit-report", str(growth_two), "--apply")
+        check("a SECOND consecutive round still re-derives — the trend clause survives the fix",
+              "APPLIED 1" in second.stdout, second.stdout[:700])
+        check("and that wall is the second round's own derivation",
+              state()["measured_sec"] == 40.0 and state()["budget_sec"] > cleared_wall,
+              json.dumps(state())[:200])
+
+def probe_the_rederivation_leg_prints_and_bites() -> None:
+    """Two-sided over one synthetic history: the moved base is reported, the held one is not."""
+    leg = REPO / "tools" / "gate_budget_rederive.py"
+    if not leg.is_file():
+        # STATED SKIP, never a RED. The leg is this factory's standing duty under
+        # `docs/measurement-procedure.md` docs/measurement-procedure.md §5.2, and that document does NOT ship: a factory
+        # bootstrapped from the template carries the staleness SWEEP (`tools/gate_budget.py`
+        # ships, `tools/audit.py` imports it) without the leg that CLEARS the class. Whether
+        # the kit should ship the leg — and with it a clause in the shipped law — is an
+        # adoption question with more than one viable shape, so it is PARKED, not decided
+        # here. A factory that has not adopted the leg is BEHIND, not in violation, and a
+        # gate that reds on it would be a tax on adoption. Same shape and same reason as the
+        # missing-manifest skip in `probe_the_live_rederivation_leg_is_non_vacuous` below.
+        print("  SKIP  no tools/gate_budget_rederive.py in this tree — the re-derivation leg "
+              "is this factory's standing duty, not yet part of the shipped kit")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        base, head = _two_commit_repo(root)
+        if base is None or head is None:
+            check("the re-derivation probe repository could be built and committed", False,
+                  f"base={base} head={head} — this leg could not judge")
+            return
+        manifest = _manifest(root, {
+            "tests/test_moved.py": _basis(base),
+            "tests/test_same.py": _basis(base),
+        })
+        done = _leg_proc("--manifest", str(manifest), "--repo-root", str(root))
+        check("the leg examines the synthetic population and exits 0", done.returncode == 0,
+              f"rc={done.returncode}: {done.stdout[-300:]}")
+        check("a base whose BYTES moved is REPORTED — the leg BITES",
+              "[STALE] tests/test_moved.py" in done.stdout, done.stdout[:400])
+        check("a base unchanged at the same revision is NOT reported — the control",
+              "[STALE] tests/test_same.py" not in done.stdout, done.stdout[:400])
+        check("the printed population names exactly the one entry that moved",
+              "1 entry in the containment set" in done.stdout, done.stdout[:400])
+        as_json = _leg_proc("--manifest", str(manifest), "--repo-root", str(root), "--json")
+        try:
+            payload = json.loads(as_json.stdout)
+        except ValueError:
+            payload = {}
+        check("the JSON form names the same population",
+              payload.get("population") == ["tests/test_moved.py"],
+              str(payload.get("population")))
+
+        # #419: ONE definition of "not examined", read from the sweep's own answer. An entry
+        # whose `measured_at` resolves to nothing here is UNREACHED — the note names it, and
+        # the machine-readable field must list that same entry rather than read clean. The
+        # two-sided control is the reached entry beside it, which must NOT appear.
+        unreachable = _manifest(root, {
+            "tests/test_moved.py": _basis(base),
+            "tests/test_unreachable.py": _basis("0" * 40),
+        }, name="gates-unreachable.json")
+        un_json = _leg_proc("--manifest", str(unreachable), "--repo-root", str(root), "--json")
+        try:
+            un_payload = json.loads(un_json.stdout)
+        except ValueError:
+            un_payload = {}
+        check("#419: an unreachable basis is named in the note",
+              "NOT EXAMINED" in (un_payload.get("note") or ""),
+              str(un_payload.get("note"))[:200])
+        check("#419: and the FIELD carries the same entry, not an empty list",
+              un_payload.get("not_examined") == ["tests/test_unreachable.py"],
+              f"not_examined={un_payload.get('not_examined')!r}")
+        check("#419: the examined count excludes it, so field and note agree",
+              un_payload.get("examined") == 1 and un_payload.get("declared") == 2,
+              f"examined={un_payload.get('examined')!r} declared={un_payload.get('declared')!r}")
+
+        # NON-VACUITY: a manifest declaring no basis must reach NO verdict, never a green one.
+        empty = _manifest(root, {}, name="gates-empty.json")
+        vacuous = _leg_proc("--manifest", str(empty), "--repo-root", str(root))
+        check("a manifest declaring NO basis exits non-zero", vacuous.returncode != 0,
+              f"rc={vacuous.returncode}")
+        check("and says VACUOUS rather than reporting a clean sweep",
+              "VACUOUS" in vacuous.stdout, vacuous.stdout[:300])
+
+        # THE REFUSAL IS BYTE-CHECKED: `--apply` with no sample source must not touch the file.
+        before = manifest.read_text(encoding="utf-8")
+        refused = _leg_proc("--manifest", str(manifest), "--repo-root", str(root), "--apply")
+        check("--apply without an audit report is REFUSED", refused.returncode != 0,
+              f"rc={refused.returncode}")
+        check("and the refusal leaves the manifest byte-identical",
+              manifest.read_text(encoding="utf-8") == before, "the refusal WROTE")
+
+def probe_the_live_rederivation_leg_is_non_vacuous() -> None:
+    """The leg over THIS tree: a non-zero population, printed with its count."""
+    manifest = REPO / "registry" / "gates.json"
+    if not manifest.is_file():
+        # STATED SKIP — the same shape `tests/test_gate_invocation_mode.py` uses for this
+        # file: a bootstrapped factory ships `gates.example.json` and no live manifest, so
+        # there is no declared basis to re-derive and a RED here would be a tax on adoption.
+        print("  SKIP  no registry/gates.json in this tree — factory data, nothing to re-derive")
+        return
+    done = _leg_proc("--manifest", str(manifest))
+    declared = json.loads(manifest.read_text(encoding="utf-8")).get("gates") or {}
+    check("the leg exits 0 over the live manifest", done.returncode == 0,
+          f"rc={done.returncode}: {done.stderr[-300:]}")
+    check("the run PRINTS the population it examined",
+          f"{len(declared)} declared entries" in done.stdout, done.stdout[:300])
+    check("the run prints the containment set with its count",
+          "population:" in done.stdout and "in the containment set" in done.stdout,
+          done.stdout[:300])
+
+# --- #442: ONE population, ONE rendering ---------------------------------------------------
+# The leg rendered the NOT EXAMINED population THREE times in one output: a TIMESTAMP-form
+# clause carried in from `budgets.stale_note`, a KEY-form clause the leg appended beside it,
+# and a KEY-form body line in `render()`. The two clauses named the same keys in the same
+# order, and the carried clause named only the unresolvable REVISIONS -- a SUBSET of the
+# field's population. So the collapse had to WIDEN the carried clause to the whole `unreached`
+# set (else #419's field/note agreement would break) and DROP the other two.
+#
+# THE PROBE IS A COUNT, and it is TWO-SIDED: the unreachable entry is named EXACTLY ONCE in
+# the text run, the reached control is named not at all, and the JSON field still carries the
+# entry. The MUTATION CONTROL re-adds the dropped clause to a COPY of the leg beside it and
+# shows the count go to 2 -- without it, a probe asserting "== 1" has only ever seen the good
+# build and has not been shown to bite.
+
+def probe_the_not_examined_population_is_rendered_once() -> None:
+    """#442: the not-examined set is named once, in one form, by the emitting path."""
+    leg = REPO / "tools" / "gate_budget_rederive.py"
+    if not leg.is_file():
+        print("  SKIP  no tools/gate_budget_rederive.py in this tree — the re-derivation leg "
+              "is this factory's standing duty, not yet part of the shipped kit")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        base, head = _two_commit_repo(root)
+        if base is None or head is None:
+            check("the #442 probe repository could be built and committed", False,
+                  f"base={base} head={head} — this leg could not judge")
+            return
+        manifest = _manifest(root, {
+            "tests/test_same.py": _basis(base),              # reached — the two-sided control
+            "tests/test_unreachable.py": _basis("0" * 40),   # unreached — the population
+        })
+        text = _leg_proc("--manifest", str(manifest), "--repo-root", str(root))
+        check("#442: the text run exits 0", text.returncode == 0,
+              f"rc={text.returncode}: {text.stdout[-300:]}")
+        check("#442: the unreachable entry is NAMED in the note",
+              "NOT EXAMINED" in text.stdout and "tests/test_unreachable.py" in text.stdout,
+              text.stdout[:400])
+        check("#442: and the population is RENDERED EXACTLY ONCE",
+              text.stdout.count("NOT EXAMINED") == 1,
+              f"count={text.stdout.count('NOT EXAMINED')}:\n{text.stdout[:600]}")
+        check("#442: the reached control is NOT named — the two-sided arm",
+              "tests/test_same.py" not in text.stdout, text.stdout[:400])
+
+        as_json = _leg_proc("--manifest", str(manifest), "--repo-root", str(root), "--json")
+        try:
+            payload = json.loads(as_json.stdout)
+        except ValueError:
+            payload = {}
+        check("#442: the FIELD still carries the entry for machine readers",
+              payload.get("not_examined") == ["tests/test_unreachable.py"],
+              f"not_examined={payload.get('not_examined')!r}")
+        check("#442: and the note inside the JSON payload names it too",
+              "NOT EXAMINED" in (payload.get("note") or ""),
+              str(payload.get("note"))[:200])
+
+        # THE NEGATIVE ARM: a fully-reached population names NOTHING as not examined, so a
+        # clause that fired unconditionally would go RED here. Its own file, because
+        # `_manifest` always writes `root/gates.json` — a second call would CLOBBER the
+        # two-entry manifest the mutation control below still needs.
+        clean = root / "gates-clean.json"
+        clean.write_text(
+            json.dumps({"default": {"budget_sec": 120.0},
+                        "gates": {"tests/test_same.py": _basis(base)}}),
+            encoding="utf-8",
+        )
+        clean_run = _leg_proc("--manifest", str(clean), "--repo-root", str(root))
+        check("#442: a fully-reached population prints NO not-examined clause",
+              "NOT EXAMINED" not in clean_run.stdout, clean_run.stdout[:400])
+
+        # THE MUTATION CONTROL: re-add the clause the collapse removed, to a COPY of the leg
+        # beside it (its `REPO_ROOT`-relative imports still resolve), and show the count go to
+        # 2. Unlinked in `finally` so a run leaves no residue.
+        mutant = REPO / "tools" / "_mutant_gate_budget_rederive.py"
+        src = leg.read_text(encoding="utf-8")
+        anchor = "    note = budgets.stale_note\n"
+        injection = (
+            anchor
+            + "    if not_examined:\n"
+            + "        note += (' | NOT EXAMINED — ' + ', '.join(not_examined))\n"
+        )
+        if anchor not in src:
+            check("#442: the mutation anchor is present in the leg", False,
+                  "the clause anchor moved — the mutation control could not judge")
+            return
+        try:
+            mutant.write_text(src.replace(anchor, injection, 1), encoding="utf-8")
+            mrun = subprocess.run(
+                [sys.executable, str(mutant), "--manifest", str(manifest),
+                 "--repo-root", str(root)],
+                capture_output=True, text=True, timeout=300,
+            )
+            check("#442 MUTATION: a re-added second clause makes the count 2 — the probe BITES",
+                  mrun.stdout.count("NOT EXAMINED") == 2,
+                  f"count={mrun.stdout.count('NOT EXAMINED')} rc={mrun.returncode}\n"
+                  f"stdout={mrun.stdout[:400]}\nstderr={mrun.stderr[-600:]}")
+        finally:
+            mutant.unlink(missing_ok=True)
+
+# --- #307: the exhausted-budget trigger must be REACHABLE ----------------------------------
+# At #307 the leg declared THREE containment triggers: leg A (the gate's file moved), leg B
+# (its registered runner form moved), and a measured sample that EXHAUSTED the declared budget
+# -- the audit reporting the gate `unknown`. (#564 has since added GROWTH as a fourth, below;
+# the count in this paragraph is the state #307 was written against.) The third trigger was
+# DEAD CODE (#307): a
+# budget-exhausted gate is `unknown` by construction, and `_audit_samples` dropped every
+# unknown gate before `containment_population` computed the trigger from the surviving
+# samples. The population was empty for every input, forever, and the file's own
+# `EXHAUSTED_EXIT_CODE` constant was read by nothing.
+#
+# The two questions are genuinely different and are kept apart: an unknown gate's
+# `duration_sec` is a LOWER BOUND on a run killed at the cap, so it may never seed a
+# re-derivation basis -- but it IS the exhausted trigger, and dropping it is what made the
+# trigger unreachable. The probe is TWO-SIDED: the exhausted gate reaches the population and
+# is NAMED, and a COMPLETED sample inside its cap is not reported as exhausted.
+
+# #564 (ruling n=4308) — THE THIRD SOURCE IS GROWTH, AND IT IS REPORT-FIRST.
+#
+# `stale` answers "does the declared basis still describe the command?", and `exhausted`
+# answers "did the audit kill it at its cap?". Neither can see the live defect this source
+# exists for: the basis still describes the command exactly, and the gate still finishes
+# inside its cap -- but the box, the tree or the work has grown, so the wall is now too tight
+# and the gate will be killed one round later. The measured instance is
+# `tests/test_shipped_audit_runs.py`: declared 1008.75 s over a 252.0 s basis, sampled at
+# 823.73 s. Its own derivation law says 3295.67 s, so the wall it carries is 3.27x too tight
+# and the gate is one loaded round away from a kill.
+#
+# THE POLICY IS REPORT-FIRST, RE-DERIVE ON TREND, and the probe has to be able to fail on
+# both halves or it proves neither. ONE slow round is as likely a loaded box as a grown gate,
+# so a first breach REPORTS the figures and moves NO wall; the second CONSECUTIVE breach
+# re-derives. "Consecutive" is a fact about two rounds, so it is carried in the manifest entry
+# (`growth_breach`) with the ROUND'S OWN IDENTITY -- its date and the tree it ran against --
+# never a timestamp: a re-run of the same report must not read as its own successor, or one
+# breach would derive a wall.
+#
+# THE KILL ARM IS THE ONE THAT KEEPS THE TREND FROM DEADLOCKING. A gate that breaches and is
+# then killed at its wall produces no completed passing sample, so a source that only reads
+# passing samples would report "nothing to see" on the very round the trend needs -- and the
+# wall would never move. So an OUTSTANDING breach plus a round in which the entry was
+# MEASURED but produced no such sample counts as the second breach, and it is sized from the
+# sample the reporting round RECORDED (`n=3984`: never the duration of the failure itself,
+# which is a lower bound on a kill and a refusal speed on a structural failure).
+
+def probe_a_growing_gate_is_reported_first_and_derived_on_the_second_breach() -> None:
+    """#564: growth is a THIRD source; one breach reports, two consecutive derive."""
+    leg = REPO / "tools" / "gate_budget_rederive.py"
+    if not leg.is_file():
+        print("  SKIP  no tools/gate_budget_rederive.py in this tree — the re-derivation leg "
+              "is this factory's standing duty, not yet part of the shipped kit")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        base, head = _two_commit_repo(root)
+        if base is None or head is None:
+            check("the #564 probe repository could be built and committed", False,
+                  f"base={base} head={head} — this leg could not judge")
+            return
+
+        # THE BASIS IS AT HEAD, so the entry is NOT stale: staleness would own it and growth
+        # would never be consulted. That is the cell this probe needs and the reason it
+        # cannot reuse the #558 fixture, whose basis is deliberately one commit behind.
+        def manifest_at_head() -> Path:
+            return _manifest(root, {"tests/test_moved.py": _basis(head)})
+
+        def entry_of(path: Path) -> dict:
+            return json.loads(path.read_text(encoding="utf-8"))["gates"]["tests/test_moved.py"]
+
+        def report(date: str, *, duration: float, passed: bool = True,
+                   unknown: bool = False) -> Path:
+            path = root / f"audit-{date}-{duration}-{'u' if unknown else ('p' if passed else 'f')}.json"
+            path.write_text(json.dumps({
+                "date": date,
+                "tree": {"head_sha": head, "modified_count": 0},
+                "gates": [{
+                    "gate_key": "tests/test_moved.py", "cmd": "synthetic",
+                    "passed": passed, "unknown": unknown,
+                    "duration_sec": duration, "exit_code": 0 if passed else 1,
+                }],
+            }), encoding="utf-8")
+            return path
+
+        def run(manifest: Path, *extra: str) -> subprocess.CompletedProcess:
+            return _leg_proc("--manifest", str(manifest), "--repo-root", str(root), *extra)
+
+        # ARM (c) — THE MANDATORY ONE: a FIRST breach is REPORTED, and the wall does not move.
+        # It runs WITH `--apply`, and that is the whole point: the policy lives in the
+        # derivation path, so a first-breach round that never reaches it proves nothing. This
+        # arm fails if the leg derives on one breach — `budget_sec` would leave 4.0 for 120.75.
+        first_manifest = manifest_at_head()
+        first_report = report("2026-10-26", duration=30.0)
+        first = run(first_manifest, "--audit-report", str(first_report), "--apply")
+        check("a grown gate is REPORTED by name on its FIRST breach",
+              "[REPORTED] tests/test_moved.py" in first.stdout, first.stdout[:800])
+        check("a first breach derives NOTHING even under --apply",
+              "APPLIED 1" not in first.stdout and "[RE-DERIVED]" not in first.stdout
+              and "REPORTED ONLY 1" in first.stdout, first.stdout[:800])
+        check("a first breach leaves the declared wall UNCHANGED",
+              "UNCHANGED at 4.0 s" in first.stdout and "120.75" in first.stdout,
+              first.stdout[:800])
+        written = entry_of(first_manifest)
+        check("the manifest's wall and basis are byte-unchanged on a first breach",
+              written["budget_sec"] == 4.0 and written["measured_sec"] == 1.0,
+              json.dumps(written))
+        # THE RECORD IS THE MECHANISM: without it the next round cannot tell a trend from a
+        # one-off, and the policy silently degrades to report-only-forever.
+        marker = written.get("growth_breach")
+        check("the breach is RECORDED in the entry, carrying the ROUND's own identity",
+              isinstance(marker, dict)
+              and marker.get("round_id") == f"2026-10-26:{head}"
+              and marker.get("sample_sec") == 30.0
+              and marker.get("derived_sec") == 120.75,
+              json.dumps(marker))
+        check("the report says the record was made, not merely that a breach was seen",
+              "recorded in the manifest" in first.stdout, first.stdout[:800])
+
+        # ... and a RE-RUN OF THE SAME REPORT is the SAME round. If it counted as its own
+        # successor, one breach would re-derive a wall and report-first would be a fiction.
+        rerun = run(first_manifest, "--audit-report", str(first_report), "--apply")
+        check("a re-run of the SAME report does not count as its own successor",
+              "[REPORTED] tests/test_moved.py" in rerun.stdout
+              and "[RE-DERIVED]" not in rerun.stdout and "APPLIED 1" not in rerun.stdout,
+              rerun.stdout[:800])
+        check("... and leaves the recorded marker byte-identical (no churn on a re-run)",
+              entry_of(first_manifest).get("growth_breach") == marker,
+              json.dumps(entry_of(first_manifest).get("growth_breach")))
+
+        # ARM (a) — THE SECOND CONSECUTIVE BREACH RE-DERIVES, and the wall becomes the one
+        # the manifest's own margin law computes from the fresh sample.
+        second = run(first_manifest, "--audit-report", str(report("2026-10-27", duration=30.0)),
+                     "--apply")
+        check("a SECOND consecutive breach RE-DERIVES the wall",
+              "[RE-DERIVED] tests/test_moved.py" in second.stdout and "APPLIED 1" in second.stdout,
+              second.stdout[:800])
+        written = entry_of(first_manifest)
+        check("the re-derived wall is margin_for(30.0) x 30.0 = 120.75 s",
+              written["budget_sec"] == 120.75 and written["measured_sec"] == 30.0,
+              json.dumps(written))
+        check("the streak is CONSUMED by the derivation it produced",
+              "growth_breach" not in written, json.dumps(written))
+
+        # ARM (b) — A ROUND INSIDE THE WALL IS NOT A BREACH, and writes nothing. Without this
+        # arm a leg that reported every entry as growing would pass the two above.
+        quiet_manifest = manifest_at_head()
+        quiet = run(quiet_manifest, "--audit-report", str(report("2026-10-26", duration=0.5)))
+        check("a round INSIDE the declared wall is not a growth breach",
+              "[GROWTH]" not in quiet.stdout and "0 by growth" in quiet.stdout,
+              quiet.stdout[:800])
+        check("... and writes no marker at all",
+              "growth_breach" not in entry_of(quiet_manifest),
+              json.dumps(entry_of(quiet_manifest)))
+
+        # THE KILL ARM — an outstanding breach, then a round in which the gate was MEASURED
+        # and KILLED at its cap. The derivation must be sized from the CARRIED sample (30.0),
+        # never from the killed run's 999.0 s lower bound: 120.75 vs 3996.75 is the whole
+        # difference, so this arm cannot pass by coincidence.
+        kill_manifest = manifest_at_head()
+        run(kill_manifest, "--audit-report", str(report("2026-10-26", duration=30.0)))
+        killed = run(kill_manifest,
+                     "--audit-report", str(report("2026-10-27", duration=999.0,
+                                                  passed=False, unknown=True)),
+                     "--apply")
+        check("a breach that produced NO completed passing sample still advances the trend",
+              "[RE-DERIVED] tests/test_moved.py" in killed.stdout
+              and "CARRIED" in killed.stdout, killed.stdout[:900])
+        written = entry_of(kill_manifest)
+        check("the derivation is sized from the CARRIED sample, never the kill's lower bound",
+              written["budget_sec"] == 120.75 and written["measured_sec"] == 30.0,
+              json.dumps(written))
+        check("... and the wall is NOT the 999.0 s kill re-derived (3996.75)",
+              written["budget_sec"] != 3996.75, json.dumps(written))
+
+        # THE RESET ARM — a round back inside the wall CLEARS the streak, so a one-off breach
+        # cannot be banked and spent on a later, unrelated slow round.
+        reset_manifest = manifest_at_head()
+        run(reset_manifest, "--audit-report", str(report("2026-10-26", duration=30.0)))
+        back = run(reset_manifest, "--audit-report", str(report("2026-10-27", duration=0.5)),
+                   "--apply")
+        check("a round back INSIDE the wall CLEARS the breach streak",
+              "[RESET] tests/test_moved.py" in back.stdout, back.stdout[:800])
+        written = entry_of(reset_manifest)
+        check("... and the wall never moved, because no second breach was reached",
+              written["budget_sec"] == 4.0 and "growth_breach" not in written,
+              json.dumps(written))
+
+        # THE PARTITION ARM — the printed breakdown must SUM to the population it renders.
+        # Stale wins, then growth, then exhausted: the live instance's gate can satisfy two
+        # triggers at once, and a partition that double-counted would render a total its own
+        # parts contradict. One entry per source, and `tests/test_moved.py` is reported UNKNOWN
+        # here as well — growth must claim it, and the exhausted leg must not count it twice.
+        mixed = _manifest(root, {
+            "tests/test_moved.py": _basis(head),
+            "tests/test_runner_moved.py": _basis(base),
+            "tests/test_same.py": _basis(head),
+        })
+        mixed_report = root / "audit-mixed.json"
+        mixed_report.write_text(json.dumps({
+            "date": "2026-10-29",
+            "tree": {"head_sha": head, "modified_count": 0},
+            "gates": [
+                {"gate_key": "tests/test_moved.py", "cmd": "synthetic", "passed": True,
+                 "unknown": False, "duration_sec": 30.0, "exit_code": 0},
+                {"gate_key": "tests/test_runner_moved.py", "cmd": "synthetic", "passed": True,
+                 "unknown": False, "duration_sec": 1.0, "exit_code": 0},
+                {"gate_key": "tests/test_same.py", "cmd": "synthetic", "passed": False,
+                 "unknown": True, "duration_sec": 5.0, "exit_code": 124},
+            ],
+        }), encoding="utf-8")
+        mixed_json = json.loads(run(mixed, "--audit-report", str(mixed_report), "--json").stdout)
+        check("the three sources are DISJOINT, so the printed breakdown sums to the population",
+              len(mixed_json["population"]) == len(mixed_json["stale"])
+              + len(mixed_json["exhausted"]) + len(mixed_json["growth"]),
+              json.dumps({k: mixed_json[k] for k in
+                          ("population", "stale", "exhausted", "growth")}))
+        check("... and each source actually claims its own entry (the partition is not empty)",
+              len(mixed_json["stale"]) == 1 and len(mixed_json["growth"]) == 1
+              and len(mixed_json["exhausted"]) == 1 and len(mixed_json["population"]) == 3,
+              json.dumps({k: mixed_json[k] for k in
+                          ("population", "stale", "exhausted", "growth")}))
+        # PRECEDENCE, MEASURED ON THE ONE ENTRY BOTH TRIGGERS CAN HOLD AT ONCE. Round two
+        # kills `tests/test_moved.py` at its cap while its breach is still outstanding: the
+        # exhausted trigger and the growth source both apply, growth claims the entry, the
+        # record still SAYS it was also UNKNOWN, and the count does not double.
+        killed_mixed = root / "audit-mixed-killed.json"
+        killed_mixed.write_text(json.dumps({
+            "date": "2026-10-30",
+            "tree": {"head_sha": head, "modified_count": 0},
+            "gates": [
+                {"gate_key": "tests/test_moved.py", "cmd": "synthetic", "passed": False,
+                 "unknown": True, "duration_sec": 999.0, "exit_code": 124},
+                {"gate_key": "tests/test_runner_moved.py", "cmd": "synthetic", "passed": True,
+                 "unknown": False, "duration_sec": 1.0, "exit_code": 0},
+                {"gate_key": "tests/test_same.py", "cmd": "synthetic", "passed": False,
+                 "unknown": True, "duration_sec": 5.0, "exit_code": 124},
+            ],
+        }), encoding="utf-8")
+        mixed2 = json.loads(run(mixed, "--audit-report", str(killed_mixed), "--json").stdout)
+        check("an entry that is BOTH growing and reported UNKNOWN is claimed by GROWTH once",
+              [g["key"] for g in mixed2["growth"]] == ["tests/test_moved.py"]
+              and "tests/test_moved.py" not in mixed2["exhausted"]
+              and mixed2["growth"][0]["also_unknown"] is True,
+              json.dumps({"growth": mixed2["growth"], "exhausted": mixed2["exhausted"]}))
+        check("... and the partition still SUMS with one entry claimed twice over",
+              len(mixed2["population"]) == len(mixed2["stale"]) + len(mixed2["exhausted"])
+              + len(mixed2["growth"]) == 3,
+              json.dumps({k: mixed2[k] for k in
+                          ("population", "stale", "exhausted", "growth")}))
+
+# #578 (ruling n=4459) — THE BREAKDOWN IS A CHECKED PARTITION, NOT A CLAIM IN PROSE.
+#
+# The leg rendered `population: 16 entries in the containment set (5 by a moved basis, 1 by an
+# exhausted budget, 11 by growth)` -- 5 + 1 + 11 = 17 against a total of 16, with
+# `tests/test_ledger_no_shrink.py` printed TWICE, once under [STALE] and again under
+# [EXHAUSTED] (/tmp/rederive_1028.out:6 and :9).
+#
+# THE MECHANISM. `pop.keys` is a SET UNION, so it deduplicates; the breakdown sums three tuple
+# LENGTHS, which does not. `_growth_source` excludes stale keys internally, so growth IS
+# disjoint from stale. But `exhausted` was narrowed against `growth_keys` ONLY, so a key that
+# was BOTH stale and reported UNKNOWN -- a gate whose blob moved AND whose last run died at its
+# wall -- survived in two partitions and was counted twice while the union counted it once.
+#
+# WHY THE GUARD, NOT JUST THE SUBTRACTION. Fixing the subtraction leaves the class intact: the
+# next source added to that union re-opens it silently. `partition_problems()` is what makes
+# the partition a property of the instrument. And the comment that used to sit above the
+# offending line ASSERTED the property that was false -- which is why a defect this visible
+# survived review: a reader who checks the code instead of the output was told it was fine.
+# A comment cannot fail, and that one did not.
+#
+# THE PROBE IS TWO-ARMED, and the second arm is the one that matters: the live cell
+# (stale INTERSECT exhausted) renders a breakdown that SUMS, and a leg with the narrowing
+# REVERTED must REFUSE to render rather than print a breakdown its own parts contradict. The
+# pre-#578 fixture could not catch this because it never built that cell: it had stale-only,
+# exhausted-only, and growth-INTERSECT-exhausted entries, and the overlap that actually
+# occurred was the one shape it omitted.
+
+def probe_the_containment_breakdown_sums_or_refuses() -> None:
+    """#578: the printed breakdown sums to the population it renders, or the run refuses."""
+    leg = REPO / "tools" / "gate_budget_rederive.py"
+    if not leg.is_file():
+        print("  SKIP  no tools/gate_budget_rederive.py in this tree — the re-derivation leg "
+              "is this factory's standing duty, not yet part of the shipped kit")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        base, head = _two_commit_repo(root)
+        if base is None or head is None:
+            check("#578: the probe repository could be built and committed", False,
+                  f"base={base} head={head} — this leg could not judge")
+            return
+        # THE LIVE CELL, built deliberately: `tests/test_moved.py` has a basis taken at `base`
+        # while its bytes moved to `head` (so it is STALE) AND the audit reports it UNKNOWN
+        # (so it is EXHAUSTED). `tests/test_same.py` is the two-sided control: reached, clean,
+        # and claimed by no source, so a breakdown that counted a phantom would show here.
+        manifest = _manifest(root, {
+            "tests/test_moved.py": _basis(base),
+            "tests/test_same.py": _basis(head),
+        })
+        overlap_report = root / "audit-overlap.json"
+        overlap_report.write_text(json.dumps({
+            "date": "2026-10-28",
+            "tree": {"head_sha": head, "modified_count": 0},
+            "gates": [
+                {"gate_key": "tests/test_moved.py", "cmd": "synthetic", "passed": False,
+                 "unknown": True, "duration_sec": 999.0, "exit_code": 124},
+                {"gate_key": "tests/test_same.py", "cmd": "synthetic", "passed": True,
+                 "unknown": False, "duration_sec": 0.5, "exit_code": 0},
+            ],
+        }), encoding="utf-8")
+
+        text = _leg_proc("--manifest", str(manifest), "--repo-root", str(root),
+                         "--audit-report", str(overlap_report))
+        check("#578: the run over a stale-AND-exhausted entry exits 0",
+              text.returncode == 0, f"rc={text.returncode}: {text.stdout[-400:]}")
+        check("#578: the entry that is both stale and exhausted is claimed by STALE",
+              "[STALE] tests/test_moved.py" in text.stdout, text.stdout[:700])
+        check("#578: ... and it is NOT also printed under [EXHAUSTED] — one partition, one owner",
+              "[EXHAUSTED] tests/test_moved.py" not in text.stdout, text.stdout[:700])
+
+        as_json = json.loads(_leg_proc(
+            "--manifest", str(manifest), "--repo-root", str(root),
+            "--audit-report", str(overlap_report), "--json",
+        ).stdout)
+        parts = len(as_json["stale"]) + len(as_json["growth"]) + len(as_json["exhausted"])
+        check("#578: the breakdown SUMS to the population it renders",
+              parts == len(as_json["population"]),
+              json.dumps({k: as_json[k] for k in
+                          ("population", "stale", "exhausted", "growth")}))
+        check("#578: ... and the population is the one entry, not two",
+              len(as_json["population"]) == 1 and len(as_json["stale"]) == 1
+              and as_json["exhausted"] == [],
+              json.dumps({k: as_json[k] for k in
+                          ("population", "stale", "exhausted", "growth")}))
+
+        # THE MUTATION CONTROL: revert the narrowing to `growth` only — the pre-#578 line — on
+        # a COPY of the leg beside it, and show the run REFUSE instead of rendering 2 against
+        # 1. Unlinked in `finally` so a run leaves no residue.
+        mutant = REPO / "tools" / "_mutant_gate_budget_rederive.py"
+        src = leg.read_text(encoding="utf-8")
+        anchor = (
+            "        stale_keys = {s.key for s in stale}\n"
+            "        exhausted = tuple(\n"
+            "            key for key in exhausted if key not in growth_keys and key not in stale_keys\n"
+            "        )\n"
+        )
+        reverted = "        exhausted = tuple(key for key in exhausted if key not in growth_keys)\n"
+        if anchor not in src:
+            check("#578: the mutation anchor is present in the leg", False,
+                  "the narrowing moved — the mutation control could not judge")
+            return
+        try:
+            mutant.write_text(src.replace(anchor, reverted, 1), encoding="utf-8")
+            mrun = subprocess.run(
+                [sys.executable, str(mutant), "--manifest", str(manifest),
+                 "--repo-root", str(root), "--audit-report", str(overlap_report)],
+                capture_output=True, text=True, timeout=300,
+            )
+            check("#578 MUTATION: with the narrowing reverted the run REFUSES — the guard BITES",
+                  mrun.returncode == 3 and "does not sum" in mrun.stdout,
+                  f"rc={mrun.returncode}\nstdout={mrun.stdout[:500]}\n"
+                  f"stderr={mrun.stderr[-500:]}")
+            check("#578 MUTATION: ... and the refusal NAMES the entry claimed twice over",
+                  "tests/test_moved.py is claimed by 2 partitions" in mrun.stdout,
+                  mrun.stdout[:600])
+            check("#578 MUTATION: ... and NO breakdown is printed beside the refusal",
+                  "in the containment set (" not in mrun.stdout, mrun.stdout[:600])
+        finally:
+            mutant.unlink(missing_ok=True)
+
+def probe_a_budget_exhausted_gate_reaches_the_trigger() -> None:
+    """#307: an `unknown` gate reaches the third trigger instead of being dropped first."""
+    leg = REPO / "tools" / "gate_budget_rederive.py"
+    if not leg.is_file():
+        print("  SKIP  no tools/gate_budget_rederive.py in this tree — the re-derivation leg "
+              "is this factory's standing duty, not yet part of the shipped kit")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        base, head = _two_commit_repo(root)
+        if base is None or head is None:
+            check("the exhausted-trigger probe repository could be built", False,
+                  f"base={base} head={head} — this leg could not judge")
+            return
+        manifest = _manifest(root, {
+            # Bytes held AND registration held: this entry reaches the population ONLY if the
+            # exhausted trigger reaches it, so it isolates that one leg. It must be based at
+            # `head` to do that: a basis at `base` would ALSO be stale, and since #578 stale
+            # outranks exhausted, the entry would be claimed by the stale partition and the
+            # exhausted leg would go unexercised while this probe still read green.
+            "tests/test_same.py": _basis(head),
+            # The control, whose sample COMPLETED inside its cap.
+            "tests/test_moved.py": _basis(head),
+        })
+        report = root / "audit-report.json"
+        report.write_text(json.dumps({"gates": [
+            # The audit's kill shape: UNKNOWN, its duration a LOWER BOUND at the cap, the
+            # distinct exit code `tools/audit.py` sets on the 124 path (#93, #226).
+            {"gate_key": "tests/test_same.py", "duration_sec": 4.0, "unknown": True,
+             "duration_is_lower_bound": True, "exit_code": 124, "passed": False},
+            # The control: a completed sample, well inside its declared 4.0s cap.
+            {"gate_key": "tests/test_moved.py", "duration_sec": 0.5, "unknown": False,
+             "duration_is_lower_bound": False, "exit_code": 0, "passed": True},
+        ]}), encoding="utf-8")
+        as_json = _leg_proc("--manifest", str(manifest), "--repo-root", str(root),
+                            "--audit-report", str(report), "--json")
+        try:
+            payload = json.loads(as_json.stdout)
+        except ValueError:
+            payload = {}
+        check("a budget-exhausted gate REACHES the trigger and is named (#307)",
+              payload.get("exhausted") == ["tests/test_same.py"],
+              f"exhausted={payload.get('exhausted')!r} (want ['tests/test_same.py'])")
+        check("a COMPLETED sample inside its cap is NOT reported as exhausted — the control",
+              "tests/test_moved.py" not in (payload.get("exhausted") or []),
+              str(payload.get("exhausted")))
+        text = _leg_proc("--manifest", str(manifest), "--repo-root", str(root),
+                         "--audit-report", str(report))
+        check("the text run prints the exhausted entry as EXHAUSTED",
+              "[EXHAUSTED] tests/test_same.py" in text.stdout, text.stdout[-300:])
+        check("and the population line COUNTS it by that leg",
+              "1 by an exhausted budget" in text.stdout, text.stdout[-300:])
+
+# --- #240: a gate's own cap must sit UNDER its audit budget -------------------------------
+# A gate's OWN internal timeout and the audit's budget for it are two constants in two files,
+# and the ordering is load-bearing: the audit's budget must exceed the gate's internal cap, or
+# the audit kills the gate before the gate can report its own timeout, and the run reads
+# UNKNOWN rather than a verdict (#240, ruled n=1695). The relation was hand-measured once
+# (#230: 2543 < 2543.55, slack 0.55 s) and given no mechanism -- 0.55 s on 2543 s, so either
+# constant moving by half a second inverts it and nothing notices.
+#
+# WHAT COUNTS AS A GATE'S OWN CAP. A module-level constant whose NAME ends in `_TIMEOUT_SEC`
+# -- the suffix that names a timeout in seconds, the shape `tests/test_questions.py` uses for
+# `SELFTEST_TIMEOUT_SEC`. It is deliberately NOT a substring match on "TIMEOUT": a constant
+# like `PROBE_TIMEOUT_BUDGET_SEC` names the audit's OWN budget inside a synthetic probe, not a
+# gate's internal cap, and admitting it would compare a value to itself. A gate that declares
+# no such constant is NOT in the population and is not silently passing: it is NAMED as having
+# no declared cap.
+CAP_NAME_RE = re.compile(r"^([A-Z][A-Z0-9_]*_TIMEOUT_SEC)\s*=\s*(\d+)\s*$", re.M)
+
+def _gate_own_caps(path: Path) -> dict[str, int]:
+    """The module-level `*_TIMEOUT_SEC` caps a gate file declares, name -> int seconds."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    return {name: int(value) for name, value in CAP_NAME_RE.findall(text)}
+
+def cap_budget_problems(declared: dict, repo: Path) -> tuple[list[str], list[str], list[str]]:
+    """Compare every declared entry whose gate declares a cap against that gate's budget.
+
+    Returns (problems, compared, no_cap):
+      - problems: declared entries whose `budget_sec` does NOT exceed the gate's own cap;
+      - compared: the pairs actually compared, `gate: NAME=cap < budget_sec=budget`;
+      - no_cap:   declared gates that declare NO cap -- NOT in the population, never a
+                  silent pass.
+    """
+    problems: list[str] = []
+    compared: list[str] = []
+    no_cap: list[str] = []
+    for gate in sorted(declared):
+        entry = declared[gate] or {}
+        caps = _gate_own_caps(repo / gate)
+        if not caps:
+            no_cap.append(gate)
+            continue
+        budget = entry.get("budget_sec")
+        for name, cap in sorted(caps.items()):
+            if not isinstance(budget, (int, float)):
+                problems.append(f"{gate}: budget_sec is {budget!r}, cannot bound {name}={cap}")
+            elif budget <= cap:
+                problems.append(
+                    f"{gate}: budget_sec {budget} <= its own cap {name}={cap} -- the audit "
+                    f"kills the gate before it can report its own timeout (#240)")
+            else:
+                compared.append(f"{gate}: {name}={cap} < budget_sec={budget}")
+    return problems, compared, no_cap
+
+def _write_capped_gate(root: Path, rel: str, cap: int,
+                       cap_name: str = "SYNTHETIC_TIMEOUT_SEC") -> str:
+    """A throwaway gate declaring one module-level cap; returns its repo-relative path."""
+    gate = root / rel
+    gate.parent.mkdir(parents=True, exist_ok=True)
+    gate.write_text(
+        '#!/usr/bin/env python3\n"""Gate: a synthetic gate.\n\nBody.\n"""\n'
+        f"{cap_name} = {cap}\n",
+        encoding="utf-8",
+    )
+    return rel
+
+def probe_a_budget_below_its_gates_own_cap_is_named() -> None:
+    """THE BITE. An inverted pair is NAMED -- the gate whose audit budget does not clear its
+    own cap. Proven by the INVERSION, not by an exit 0 (#112 two-part clause)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        rel = _write_capped_gate(root, "tests/test_synthetic_cap.py", cap=100)
+        problems, compared, _ = cap_budget_problems({rel: {"budget_sec": 50.0}}, root)
+        check("a budget BELOW its gate's own cap is a PROBLEM",
+              len(problems) == 1 and "<= its own cap" in problems[0], str(problems))
+        check("and the inverted pair is NOT counted among the compared",
+              compared == [], str(compared))
+
+def probe_a_budget_above_its_gates_own_cap_is_clean() -> None:
+    """The CONTROL: the same pair, uninverted, is clean -- so the bite above is the inversion,
+    not the mere presence of a cap."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        rel = _write_capped_gate(root, "tests/test_synthetic_cap.py", cap=100)
+        problems, compared, _ = cap_budget_problems({rel: {"budget_sec": 150.0}}, root)
+        check("a budget ABOVE its gate's own cap is clean", problems == [], str(problems))
+        check("and the pair is PRINTED among the compared", len(compared) == 1, str(compared))
+
+def probe_a_gate_with_no_declared_cap_is_not_in_the_population() -> None:
+    """A declared gate that declares no cap is NAMED, never silently passing."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        rel = "tests/test_nocap.py"
+        gate = root / rel
+        gate.parent.mkdir(parents=True, exist_ok=True)
+        gate.write_text('#!/usr/bin/env python3\n"""Gate: no cap.\n\nBody.\n"""\n', encoding="utf-8")
+        problems, compared, no_cap = cap_budget_problems({rel: {"budget_sec": 5.0}}, root)
+        check("a gate with no declared cap is NAMED, not silently passing",
+              no_cap == [rel] and problems == [] and compared == [],
+              f"no_cap={no_cap} problems={problems} compared={compared}")
+
+def probe_the_probe_budget_constant_is_not_misread_as_a_gate_cap() -> None:
+    """`PROBE_TIMEOUT_BUDGET_SEC` names the audit's own budget, not a gate's cap -- the
+    `_TIMEOUT_SEC` suffix rule excludes it, so this file is not in its own population."""
+    caps = _gate_own_caps(REPO / "tests" / "test_gate_registration.py")
+    check("the probe's own _BUDGET_SEC constant is not read as a gate cap",
+          caps == {}, str(caps))
+
+def probe_the_live_cap_budget_ordering_holds() -> None:
+    """The live tree: every declared gate that declares a cap has a budget ABOVE it.
+
+    PRINTS the population, the compared pairs and the gates with no declared cap -- so "no
+    inverted pair" and "a leg that examined nothing" never render the same (the population is
+    currently ONE gate, so a silent zero is live).
+    """
+    manifest = REPO / "registry" / "gates.json"
+    if not manifest.is_file():
+        print("  SKIP  no registry/gates.json in this tree -- factory data, nothing to compare")
+        return
+    declared = json.loads(manifest.read_text(encoding="utf-8")).get("gates") or {}
+    problems, compared, no_cap = cap_budget_problems(declared, REPO)
+    print(f"  live cap/budget ordering -- {len(compared)} pair(s) compared, "
+          f"{len(no_cap)} declared gate(s) with no declared cap, {len(problems)} inverted")
+    for line in compared:
+        print(f"    {line}")
+    if no_cap:
+        print("    no declared cap (NOT in the population, not silently passing): "
+              + ", ".join(sorted(no_cap)))
+    check("no declared gate's audit budget sits at or below its own cap",
+          problems == [], "; ".join(problems)[:300])
+    check("the live leg examined a non-empty population -- a silent zero is a defect",
+          len(compared) >= 1, f"compared={len(compared)}")
+
+# --- synthetic probes — direction 6: every invoked gate DECLARES its exit (#295) ---
+#
+# The acceptance leg is the FIRST probe below: a gate the audit invokes and the manifest
+# does not declare is REFUSED BY NAME. The remaining probes each move ONE field of a
+# declaration that is otherwise clean, so a green run says the leg read the field rather
+# than the shape of the fixture.
+
+def _exit_tree(root: Path, *, invoked: dict[str, str], tables: dict[str, str] | None = None) -> Path:
+    """A throwaway tree: `invoked` gates (repo-relative path -> body) plus optional tables.
+
+    The audit is built FROM the dict, one append per key, so the population the direction
+    reads is the one the call sites actually carry -- never a glob over the tree.
+    """
+    for rel, body in invoked.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+    for rel, body in (tables or {}).items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+    audit = root / "audit.py"
+    audit.write_text(
+        "".join(f'gates_to_run.append([sys.executable, "{rel}"])\n' for rel in invoked),
+        encoding="utf-8",
+    )
+    return audit
+
+def probe_a_gate_with_no_declared_exit_is_REFUSED_by_name() -> None:
+    """THE ACCEPTANCE LEG (#295). A gate the audit invokes and nothing declares is REFUSED.
+
+    This is the leg that would have made eight exemption tables unnecessary: each of them
+    was added when a gate was DISCOVERED to have no lawful exit, one gate at a time, each
+    costing a RED origin/main plus a full cycle. Proven by the ABSENCE of the declaration,
+    never by an exit code.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        audit = _exit_tree(root, invoked={"tests/test_synthetic.py": CANONICAL_GATE})
+        invoked = invoked_gates(audit)
+        problems, report = exit_declaration_problems(invoked, {}, root)
+        check("direction 6 — an UNDECLARED invoked gate is REFUSED by name",
+              any("tests/test_synthetic.py" in p and "declares NO exit" in p for p in problems),
+              str(problems)[:110] or "no problem reported")
+        check("direction 6 — and the report counts it as missing",
+              report["missing"] == ["tests/test_synthetic.py"] and report["invoked"] == 1,
+              str(report)[:110])
+
+def probe_a_complete_declaration_is_clean() -> None:
+    """The CONTROL: the same tree with the declaration supplied is clean -- so the refusal
+    above is the ABSENCE, not the fixture's shape."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        audit = _exit_tree(root, invoked={"tests/test_synthetic.py": CANONICAL_GATE})
+        problems, report = exit_declaration_problems(
+            invoked_gates(audit), {"tests/test_synthetic.py": {"class": "always-satisfiable"}}, root
+        )
+        check("direction 6 — the SAME tree, declared, is CLEAN",
+              problems == [] and report["declared"] == 1 and report["missing"] == [],
+              str(problems)[:110] or "clean")
+
+def probe_a_declaration_for_a_gate_that_does_not_run_is_STALE() -> None:
+    """Drift, the outward direction: a key no longer invoked is an ERROR, not a leftover --
+    it is a declaration for a gate that does not run."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        audit = _exit_tree(root, invoked={"tests/test_synthetic.py": CANONICAL_GATE})
+        exits = {"tests/test_synthetic.py": {"class": "always-satisfiable"},
+                 "tests/test_ghost.py": {"class": "always-satisfiable"}}
+        problems, report = exit_declaration_problems(invoked_gates(audit), exits, root)
+        check("direction 6 — a declaration for a gate that does NOT run is STALE",
+              report["stale"] == ["tests/test_ghost.py"]
+              and any("NOT invoked" in p for p in problems),
+              str(problems)[:110])
+
+def probe_a_class_outside_the_vocabulary_is_refused() -> None:
+    """The vocabulary is CLOSED: a class outside it is an ERROR, never a new word. A
+    vocabulary that grows one ad-hoc token at a time is the silent-absence defect one
+    level up."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        audit = _exit_tree(root, invoked={"tests/test_synthetic.py": CANONICAL_GATE})
+        problems, _ = exit_declaration_problems(
+            invoked_gates(audit), {"tests/test_synthetic.py": {"class": "vibes"}}, root
+        )
+        check("direction 6 — a class outside the vocabulary is REFUSED",
+              any("outside the vocabulary" in p for p in problems),
+              str(problems)[:110] or "no problem reported")
+
+def probe_an_exemption_table_that_does_not_resolve_is_refused() -> None:
+    """Resolution: a declared table must be in THIS tree. A real surface and a typo must
+    stay distinguishable."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        audit = _exit_tree(root, invoked={"tests/test_synthetic.py": CANONICAL_GATE})
+        exits = {"tests/test_synthetic.py": {"class": "exemption-table",
+                                            "table": "docs/typo-exemptions.json"}}
+        problems, report = exit_declaration_problems(invoked_gates(audit), exits, root)
+        check("direction 6 — a table that does NOT resolve is REFUSED",
+              any("does not resolve" in p for p in problems)
+              and report["unresolved"] == [
+                  "tests/test_synthetic.py: table docs/typo-exemptions.json does not resolve in this tree"],
+              str(problems)[:110])
+
+def probe_a_table_shipping_only_its_example_skeleton_RESOLVES() -> None:
+    """The FORWARD-ONLY case (#112): a gate whose exemption file legitimately holds zero
+    entries ships the `.example.json` skeleton, and absence means "no exemptions", not
+    "no surface". The marker carries no trailing dot -- a name joined as
+    `stem + ".example." + ".json"` reads `x.example..json` and never resolves, which is
+    exactly what this direction's first live run reported on a tree whose skeleton was
+    sitting there."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        naming_gate = (CANONICAL_GATE
+                       + 'EXEMPTIONS = "docs/synthetic-exemptions.json"\n')
+        audit = _exit_tree(
+            root,
+            invoked={"tests/test_synthetic.py": naming_gate},
+            tables={"docs/synthetic-exemptions.example.json": "{}\n"},
+        )
+        exits = {"tests/test_synthetic.py": {"class": "exemption-table",
+                                            "table": "docs/synthetic-exemptions.json"}}
+        problems, report = exit_declaration_problems(invoked_gates(audit), exits, root)
+        check("direction 6 — a table present only as its `.example.json` skeleton RESOLVES",
+              problems == [] and report["unresolved"] == [],
+              str(problems)[:110] or "clean")
+
+def probe_a_declared_table_the_gate_never_names_is_DRIFT() -> None:
+    """Drift, the inward direction: the declaration and the gate cannot disagree about
+    which table it reads. A gate whose source names a DIFFERENT table than the one
+    declared has an exit nobody wired."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        gate = '#!/usr/bin/env python3\n"""Gate: a synthetic gate.\n\nBody.\n"""\nEXEMPTIONS = "docs/other-exemptions.json"\n'
+        audit = _exit_tree(
+            root, invoked={"tests/test_synthetic.py": gate},
+            tables={"docs/synthetic-exemptions.json": "{}",
+                    "docs/other-exemptions.json": "{}"},
+        )
+        exits = {"tests/test_synthetic.py": {"class": "exemption-table",
+                                            "table": "docs/synthetic-exemptions.json"}}
+        problems, report = exit_declaration_problems(invoked_gates(audit), exits, root)
+        check("direction 6 — a declared table the gate's OWN SOURCE never names is DRIFT",
+              report["drift"] == [
+                  "tests/test_synthetic.py does not name synthetic-exemptions.json in its own source"]
+              and any("disagree about which table" in p for p in problems),
+              str(problems)[:110])
+        naming_problems, naming_report = exit_declaration_problems(
+            invoked_gates(audit),
+            {"tests/test_synthetic.py": {"class": "exemption-table",
+                                         "table": "docs/other-exemptions.json"}},
+            root,
+        )
+        check("direction 6 — and the gate NAMING its declared table is not DRIFT",
+              naming_report["drift"] == []
+              and not any("disagree about which table" in q for q in naming_problems),
+              str(naming_report["drift"])[:110] or "no drift")
+
+def probe_an_exemption_table_no_declaration_names_is_reported() -> None:
+    """The INVERSE leg, and the direction that found this tree's own instance:
+    `docs/ruling-board-exemptions.json` is read by the patrol runner's board-ruling leg,
+    and the patrol runner is not itself an invoked gate, so a declaration keyed only on
+    invoked gates could not name it. Reporting the orphan keeps that fact visible instead
+    of implied away."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        audit = _exit_tree(
+            root, invoked={"tests/test_synthetic.py": CANONICAL_GATE},
+            tables={"docs/orphan-exemptions.json": "{}"},
+        )
+        problems, report = exit_declaration_problems(
+            invoked_gates(audit),
+            {"tests/test_synthetic.py": {"class": "always-satisfiable"}}, root,
+        )
+        check("direction 6 — an exemption table NO declaration names is REPORTED",
+              report["orphan_tables"] == ["docs/orphan-exemptions.json"]
+              and any("NO declaration names" in p for p in problems),
+              str(problems)[:110])
+        check("direction 6 — and a `.example.json` SKELETON is never counted as an orphan",
+              report["orphan_tables"] == ["docs/orphan-exemptions.json"],
+              str(report["orphan_tables"]))
+
+def probe_an_exit_owed_entry_must_name_the_board_item() -> None:
+    """`exit-owed` is the class a gate with NO exit belongs to, and it must name the filed
+    debt -- a debt with no item is an unfiled defect wearing a declaration."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        audit = _exit_tree(root, invoked={"tests/test_synthetic.py": CANONICAL_GATE})
+        for bad in ({"class": "exit-owed"}, {"class": "exit-owed", "board": 0},
+                    {"class": "exit-owed", "board": "317"}):
+            problems, _ = exit_declaration_problems(
+                invoked_gates(audit), {"tests/test_synthetic.py": bad}, root
+            )
+            check(f"direction 6 — `exit-owed` {bad!r} is REFUSED for naming no board item",
+                  any("board item that carries it" in p for p in problems),
+                  str(problems)[:90] or "no problem reported")
+        problems, _ = exit_declaration_problems(
+            invoked_gates(audit), {"tests/test_synthetic.py": {"class": "exit-owed", "board": 317}}, root
+        )
+        check("direction 6 — and the same entry WITH its board item is CLEAN",
+              problems == [], str(problems)[:90] or "clean")
+
+def probe_the_exit_population_is_the_call_sites_not_a_glob() -> None:
+    """The population is the audit's own call sites, never a file glob: a gate file that
+    exists but is never invoked is direction 1's finding, and a glob-keyed population
+    would demand an exit for a gate that does not run -- inflating the count and hiding
+    the real one behind files that are not gates."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        audit = _exit_tree(root, invoked={"tests/test_synthetic.py": CANONICAL_GATE})
+        (root / "tests" / "test_never_invoked.py").write_text(CANONICAL_GATE, encoding="utf-8")
+        check("direction 6 — a gate file that is NOT invoked is outside the population",
+              invoked_gates(audit) == ["tests/test_synthetic.py"], str(invoked_gates(audit)))
+
+def probe_the_live_tree_declares_every_invoked_gate() -> None:
+    """THE LIVE LEG. Every gate this audit invokes carries a declaration, every declared
+    surface resolves, and no table is unnamed. The classes are PRINTED, so a reader sees
+    the distribution rather than only the verdict -- and the two `exit-owed` entries are
+    the filed debt, not a false exit."""
+    manifest = REPO / "registry" / "gates.json"
+    if not manifest.is_file():
+        check("direction 6 — the kit ships `gates.example.json` and no live manifest; "
+              "the live leg SKIPS with its reason (never a silent pass)", True)
+        return
+    exits = json.loads(manifest.read_text(encoding="utf-8")).get("exits")
+    if exits is None:
+        check("direction 6 — the live manifest declares NO `exits` map -- the leg reports "
+              "that absence rather than a clean run", False, "no `exits` key")
+        return
+    problems, report = exit_declaration_problems(invoked_gates(AUDIT), exits, REPO)
+    check("direction 6 — every gate the audit INVOKES declares its exit",
+          report["missing"] == [], str(report["missing"])[:110] or "none missing")
+    check("direction 6 — no declared key is STALE and no surface fails to resolve",
+          report["stale"] == [] and report["unresolved"] == [],
+          str({"stale": report["stale"], "unresolved": report["unresolved"]})[:110])
+    check("direction 6 — the classes are PRINTED with their counts",
+          sum(report["classes"].values()) == report["declared"] and report["invoked"] > 0,
+          str(report["classes"]))
+    check("direction 6 — the live tree is CLEAN", problems == [], str(problems)[:150])
+
+# --- #604: the wall-kill streak, the probe, and the licence -----------------------
+#
+# THE DEADLOCK THESE PROBES COVER. docs/measurement-procedure.md §5.2 needs a COMPLETED sample to move a budget; a gate
+# killed at its own wall produces `unknown: true` and no sample. Two consecutive rounds leave
+# the entry with a STALE basis and no fresh sample — both conditions refusing, `HELD` forever,
+# and no lane told why. The mechanism is three pieces and every one of them gets a probe, with
+# a POSITIVE CONTROL beside each refusal: a predicate that can only ever refuse is decoration.
+
+def _rederive_module():
+    """`tools/gate_budget_rederive.py` ITSELF, loaded by path.
+
+    Registered in `sys.modules` BEFORE `exec_module` on purpose: the module's dataclasses
+    resolve their annotations through `sys.modules[cls.__module__]`, so a module executed
+    without that entry raises from `dataclasses` instead of running at all. A loader fact,
+    stated once here rather than rediscovered as a mystery.
+    """
+    name = "gate_budget_rederive_under_probe"
+    if name in sys.modules:
+        return sys.modules[name]
+    import importlib.util  # noqa: PLC0415
+
+    path = REPO / "tools" / "gate_budget_rederive.py"
+    if not path.is_file():
+        # THIS FILE IS SHIPPED, and `gate_budget_rederive.py` is NOT part of the kit: it is a
+        # factory-local leg. A probe that assumed its presence would red in every factory that
+        # vendored this test without the tool — the portability class #595 had to be fixed
+        # for. The absence is SKIPPED and NAMED, never silently green.
+        print(
+            "  SKIP  no tools/gate_budget_rederive.py in this tree — the re-derivation leg "
+            "is factory-local, so its #604 probes cannot run here"
+        )
+        return None
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+def _probe_entry(**extra) -> dict:
+    """A WELL-FORMED declared entry, because the manifest loader refuses one without a basis.
+
+    `budget_sec` IS `margin_x x measured_sec` (4.375 x 2.0 = 8.75), which is the law the
+    loader enforces — a fixture that omitted it would make `record_wall_kills`'s write fail
+    for a reason having nothing to do with the streak under probe.
+    """
+    entry = {"measured_sec": 2.0, "margin_x": 4.375, "budget_sec": 8.75,
+             "measured_at": "unstated"}
+    entry.update(extra)
+    return entry
+
+def _probe_tree(root: Path, gates: dict, gate_bodies: dict) -> Path:
+    """A throwaway repo root: `tools/audit.py`, the gate files it registers, and a manifest.
+
+    The registration is written in the audit's OWN form, so `_gate_invocation` resolves the
+    probe's argv through the real reader rather than through a fixture that agrees with the
+    code under test.
+    """
+    (root / "tools").mkdir(parents=True, exist_ok=True)
+    audit = "".join(
+        f'gates_to_run.append([sys.executable, "{rel}"])\n' for rel in gate_bodies
+    )
+    (root / "tools" / "audit.py").write_text(audit, encoding="utf-8")
+    for rel, body in gate_bodies.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(body, encoding="utf-8")
+    manifest = root / "registry" / "gates.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        json.dumps({"default": {"budget_sec": 120.0}, "gates": gates}, indent=2),
+        encoding="utf-8",
+    )
+    return manifest
+
+def probe_a_single_kill_is_NOT_eligible_and_a_streak_is() -> None:
+    """Eligibility is the STREAK, and one kill is contention rather than a lockout."""
+    module = _rederive_module()
+    if module is None:
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        manifest = _probe_tree(
+            Path(tmp),
+            {
+                "tests/test_killed_once.py": _probe_entry(wall_kills={"rounds": ["r1"]}),
+                "tests/test_killed_twice.py": _probe_entry(
+                    wall_kills={"rounds": ["r1", "r2"]}
+                ),
+                "tests/test_never_killed.py": _probe_entry(),
+            },
+            {},
+        )
+        kills = {k.key: k for k in module.read_wall_kills(manifest)}
+        # POSITIVE CONTROL: the reader SAW records, so the absent third entry is a fact about
+        # that entry rather than a blind read.
+        check("#604 — the kill record is READ, not empty", len(kills) == 2,
+              f"{sorted(kills)}")
+        check("#604 — ONE kill is not eligible",
+              kills.get("tests/test_killed_once.py") is not None
+              and not kills["tests/test_killed_once.py"].eligible,
+              str(kills.get("tests/test_killed_once.py")))
+        check("#604 — TWO consecutive kills are eligible",
+              kills.get("tests/test_killed_twice.py") is not None
+              and kills["tests/test_killed_twice.py"].eligible,
+              str(kills.get("tests/test_killed_twice.py")))
+        check("#604 — an entry with no kill record is not in the population",
+              "tests/test_never_killed.py" not in kills)
+
+def probe_an_OUTSTANDING_breach_is_NOT_eligible_and_a_CONSUMED_one_IS() -> None:
+    """#604 ruling (n=4631): eligibility is THREE conjuncts, and the second is not presence.
+
+    THE TRAP THIS PROBE EXISTS FOR, measured on the live manifest: 15 entries carry a
+    `growth_breach` marker, and BOTH deadlocked gates carry one — `tests/test_patrol_host_state.py`
+    CONSUMED (wall moved 1185.31 -> 1647.35 after the breach) and
+    `tests/test_ledger_no_shrink.py` OUTSTANDING (wall still 11.39, the number it was reported
+    at). So an eligibility test written `entry.get(GROWTH_MARKER) is None` excludes the very
+    gate #604 exists to unblock, and reproduces the deadlock one layer up: an escape mechanism
+    that is ineligible on every gate it was built for.
+
+    The discriminating predicate is ARITHMETIC — `budget_sec == marker["declared_sec"]` means
+    the wall never moved. Here that is probed BOTH ways, with the flip as the positive control.
+    """
+    module = _rederive_module()
+    if module is None:
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        manifest = _probe_tree(
+            Path(tmp),
+            {
+                # killed twice, breach still outstanding: the wall has not moved
+                "tests/test_outstanding.py": _probe_entry(
+                    budget_sec=11.39,
+                    growth_breach={"declared_sec": 11.39},
+                    wall_kills={"rounds": ["r1", "r2"]},
+                ),
+                # killed twice, breach CONSUMED: the wall moved off the declared number
+                "tests/test_consumed.py": _probe_entry(
+                    budget_sec=1647.35,
+                    growth_breach={"declared_sec": 1185.31},
+                    wall_kills={"rounds": ["r1", "r2"]},
+                ),
+                # killed twice, no breach ever reported: nothing else can move it
+                "tests/test_unbreached.py": _probe_entry(
+                    wall_kills={"rounds": ["r1", "r2"]},
+                ),
+            },
+            {},
+        )
+        kills = {k.key: k for k in module.read_wall_kills(manifest)}
+        check("#604 — all three entries are in the population",
+              len(kills) == 3, f"{sorted(kills)}")
+        check("#604 — an OUTSTANDING breach makes a streak INELIGIBLE "
+              "(docs/measurement-procedure.md §5.2's trend clause already owns it from the carried sample)",
+              kills.get("tests/test_outstanding.py") is not None
+              and not kills["tests/test_outstanding.py"].eligible,
+              str(kills.get("tests/test_outstanding.py")))
+        check("#604 — a CONSUMED breach leaves the streak ELIGIBLE "
+              "(the marker is PRESENT and must not exclude it)",
+              kills.get("tests/test_consumed.py") is not None
+              and kills["tests/test_consumed.py"].eligible,
+              str(kills.get("tests/test_consumed.py")))
+        check("#604 — a streak with NO breach marker is ELIGIBLE",
+              kills.get("tests/test_unbreached.py") is not None
+              and kills["tests/test_unbreached.py"].eligible,
+              str(kills.get("tests/test_unbreached.py")))
+
+        # THE TRAP, ASSERTED DIRECTLY: BOTH gates in the live instance carry a marker, so a
+        # presence-keyed predicate would refuse both. If this ever stops holding, the clause
+        # above it needs re-deriving rather than quietly passing.
+        markers = [k for k in kills.values() if k.key != "tests/test_unbreached.py"]
+        check("#604 — the presence trap is REAL: both marked entries carry a marker, so "
+              "presence cannot discriminate them",
+              all(getattr(k, "outstanding_breach", None) in (True, False) for k in markers)
+              and len({k.outstanding_breach for k in markers}) == 2,
+              str({k.key: k.outstanding_breach for k in markers}))
+
+        # POSITIVE CONTROL — THE FLIP. Move the outstanding entry's wall to a different number
+        # and the predicate must change its answer. A check that cannot observe the failure
+        # class it is aimed at proves nothing, and a predicate that reads presence cannot move.
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data["gates"]["tests/test_outstanding.py"]["budget_sec"] = 47.0
+        manifest.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        flipped = {k.key: k for k in module.read_wall_kills(manifest)}
+        check("#604 — moving the wall FLIPS the predicate (arithmetic, not presence)",
+              flipped["tests/test_outstanding.py"].eligible,
+              str(flipped["tests/test_outstanding.py"]))
+
+        # And the other direction: consume the consumed one by re-declaring at its own wall.
+        data["gates"]["tests/test_consumed.py"]["growth_breach"]["declared_sec"] = 1647.35
+        manifest.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        back = {k.key: k for k in module.read_wall_kills(manifest)}
+        check("#604 — re-declaring a breach at the CURRENT wall makes it outstanding again",
+              not back["tests/test_consumed.py"].eligible,
+              str(back["tests/test_consumed.py"]))
+
+def probe_the_streak_advances_once_per_round_and_a_COMPLETED_run_clears_it() -> None:
+    """The count is a streak by construction: one round adds one, a completion clears all."""
+    module = _rederive_module()
+    if module is None:
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        manifest = _probe_tree(
+            Path(tmp),
+            {
+                "tests/test_killed.py": _probe_entry(wall_kills={"rounds": ["r1"]}),
+                "tests/test_completed.py": _probe_entry(
+                    wall_kills={"rounds": ["r1", "r2"]}
+                ),
+            },
+            {},
+        )
+        pop = module.Population(
+            declared=2,
+            examined=2,
+            extras={
+                "audit_unknown": ("tests/test_killed.py",),
+                "completed": ("tests/test_completed.py",),
+                "round_id": "2026-11-02:abc123",
+            },
+        )
+        module.record_wall_kills(pop, manifest, Path(tmp))
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        killed = data["gates"]["tests/test_killed.py"]
+        check("#604 — the round is appended to the streak",
+              killed.get("wall_kills", {}).get("rounds") == ["r1", "2026-11-02:abc123"],
+              str(killed.get("wall_kills")))
+        check("#604 — a COMPLETED run CLEARS the record",
+              "wall_kills" not in data["gates"]["tests/test_completed.py"],
+              str(data["gates"]["tests/test_completed.py"]))
+
+        # IDEMPOTENT ON THE ROUND: replaying the same report is not a second kill. Without
+        # this, a re-run of one report would manufacture the streak the mechanism acts on.
+        module.record_wall_kills(
+            module.Population(
+                declared=2,
+                examined=2,
+                extras={
+                    "audit_unknown": ("tests/test_killed.py",),
+                    "completed": (),
+                    "round_id": "2026-11-02:abc123",
+                },
+            ),
+            manifest,
+            Path(tmp),
+        )
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        check("#604 — replaying the SAME round adds nothing",
+              data["gates"]["tests/test_killed.py"]["wall_kills"]["rounds"]
+              == ["r1", "2026-11-02:abc123"],
+              str(data["gates"]["tests/test_killed.py"]["wall_kills"]["rounds"]))
+
+def probe_a_gate_that_OUTRUNS_its_wall_is_probed_and_one_that_MEETS_it_is_not() -> None:
+    """THE POSITIVE CONTROL for the probe itself: a real subprocess, really measured.
+
+    A synthetic gate that takes ~1.5 s against a declared 1.0 s wall is the shape the
+    mechanism exists for, and the probe must produce a SAMPLE from it. A gate that finishes
+    inside its wall carries no kill record, so it is never eligible — the other half of the
+    control, because a probe that ran on every gate would be an expensive decoration.
+    """
+    module = _rederive_module()
+    if module is None:
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        manifest = _probe_tree(
+            root,
+            {
+                "tests/test_slow_gate.py": {
+                    "budget_sec": 1.0,
+                    "measured_sec": 0.2,
+                    "margin_x": 5.0,
+                    "measured_at": "unstated",
+                    "wall_kills": {"rounds": ["r1", "r2"]},
+                },
+                "tests/test_quick_gate.py": {"budget_sec": 5.0},
+            },
+            {
+                "tests/test_slow_gate.py": "import time\ntime.sleep(1.5)\n",
+                "tests/test_quick_gate.py": "import time\ntime.sleep(0.01)\n",
+            },
+        )
+        pop = module.Population(
+            declared=2,
+            examined=2,
+            exhausted=("tests/test_slow_gate.py",),
+            kills=module.read_wall_kills(manifest),
+        )
+        # `peer_count_check` is stubbed because the PRECONDITION is environmental: this runner is
+        # itself a live pytest, so the production /proc scan would refuse every probe here and
+        # the mechanism would read as untestable instead of as tested.
+        probed = module.run_probes(pop, manifest, root, peer_count_check=lambda: 0)
+        by_key = {p.key: p for p in probed.probes}
+        slow = by_key.get("tests/test_slow_gate.py")
+        check("#604 — a gate that OUTRUNS its wall is probed", slow is not None, str(by_key))
+        if slow is not None:
+            check("#604 — the probe TOOK a sample", slow.taken and slow.sample_sec is not None,
+                  f"taken={slow.taken} sample={slow.sample_sec} why={slow.why}")
+            check("#604 — the sample is the REAL runtime, not a projection",
+                  slow.sample_sec is not None and 1.4 <= slow.sample_sec <= 3.0,
+                  str(slow.sample_sec))
+            check("#604 — the sample carries its REGIME",
+                  slow.concurrent_audits == 0 and slow.load_at_start is not None,
+                  f"concurrent={slow.concurrent_audits} load={slow.load_at_start}")
+            check("#604 — the derivation is the margin law applied to the sample",
+                  slow.derived_sec == round(module.margin_for(slow.sample_sec) * slow.sample_sec, 2),
+                  f"{slow.sample_sec} -> {slow.derived_sec}")
+            check("#604 — a legitimate re-derivation is LICENSED (the cap is not the ceiling)",
+                  slow.licensed is True,
+                  f"derived={slow.derived_sec} cap={module.PROBE_HARD_CAP_SEC}")
+        check("#604 — a gate that MEETS its wall is never probed",
+              "tests/test_quick_gate.py" not in by_key, str(sorted(by_key)))
+
+def probe_a_box_with_a_LIVE_PEER_REFUSES_the_probe_and_SAYS_SO() -> None:
+    """A sample taken beside a peer's suite measures the BOX, not the gate (#602's own cost)."""
+    module = _rederive_module()
+    if module is None:
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        manifest = _probe_tree(
+            root,
+            {"tests/test_slow_gate.py": {"budget_sec": 1.0,
+                                         "wall_kills": {"rounds": ["r1", "r2"]}}},
+            {"tests/test_slow_gate.py": "import time\ntime.sleep(1.5)\n"},
+        )
+        pop = module.Population(
+            declared=1, examined=1, exhausted=("tests/test_slow_gate.py",),
+            kills=module.read_wall_kills(manifest),
+        )
+        probed = module.run_probes(pop, manifest, root, peer_count_check=lambda: 3)
+        check("#604 — a box with a LIVE PEER REFUSES the probe", len(probed.probes) == 1
+              and probed.probes[0].taken is False, str(probed.probes))
+        check("#604 — the refusal NAMES the box",
+              "not EXCLUSIVE" in probed.probes[0].why and "3 other" in probed.probes[0].why,
+              probed.probes[0].why[:90])
+
+def probe_a_sample_that_would_CARRY_an_OUTAGE_is_REFUSED_and_the_wall_stays() -> None:
+    """#602's own arithmetic, refused — with the ordinary derivation as the control.
+
+    THE DISCRIMINATING CASE. `margin_for(1496) x 1496 = 5984.75 s` is not a budget, it is an
+    outage: the gate never completed inside its wall, so 1496 s is a LOWER BOUND and the
+    derivation turns it into a wall nothing supports. The control is the SAME code path with a
+    sample whose arithmetic fits — it moves the wall, which is what makes the refusal a
+    decision rather than a wall of `continue`.
+    """
+    module = _rederive_module()
+    if module is None:
+        return
+    basis = {"measured_sec": 20.0, "margin_x": 4.0375, "budget_sec": 80.75,
+             "measured_at": "unstated"}
+
+    def _run(sample_sec: float) -> tuple:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = _probe_tree(
+                root,
+                {"tests/test_gate_budget.py": dict(basis,
+                                                   wall_kills={"rounds": ["r1", "r2"]})},
+                {},
+            )
+            probe = module.ProbeSample(
+                key="tests/test_gate_budget.py",
+                invocation="<stub>",
+                sample_sec=sample_sec,
+                rc=0,
+                ceiling_sec=2992.0,
+                hard_cap_sec=module.PROBE_HARD_CAP_SEC,
+                load_at_start=0.4,
+                load_at_finish=0.4,
+                concurrent_audits=0,
+                taken=True,
+                derived_sec=round(module.margin_for(sample_sec) * sample_sec, 2),
+                licensed=round(module.margin_for(sample_sec) * sample_sec, 2)
+                <= module.PROBE_HARD_CAP_SEC,
+            )
+            pop = module.Population(
+                declared=1,
+                examined=1,
+                exhausted=("tests/test_gate_budget.py",),
+                extras={"samples": {"tests/test_gate_budget.py": sample_sec},
+                        "probe_samples": {"tests/test_gate_budget.py": probe}},
+            )
+            out = module.apply_rederivation(pop, manifest, root, "0" * 40)
+            entry = json.loads(manifest.read_text(encoding="utf-8"))["gates"][
+                "tests/test_gate_budget.py"
+            ]
+            return out, entry
+
+    refused_pop, refused_entry = _run(1496.0)
+    check("#602 — 1496 s licenses 5984.75 s", refused_entry["budget_sec"] == 80.75,
+          f"the wall moved to {refused_entry['budget_sec']}")
+    check("#602 — the refusal is RECORDED, not silent",
+          "probe_refused" in refused_entry
+          and refused_entry["probe_refused"].get("derived_sec") == 5984.75,
+          str(refused_entry.get("probe_refused")))
+    check("#602 — nothing was APPLIED",
+          refused_pop.applied == (), str(refused_pop.applied))
+    check("#602 — the render NAMES the refusal",
+          any("[LICENCE REFUSED]" in line
+              for line in module.render(refused_pop).splitlines()),
+          " | ".join(l for l in module.render(refused_pop).splitlines()
+                     if "LICENCE REFUSED" in l))
+
+    licensed_pop, licensed_entry = _run(30.0)
+    check("#604 — the CONTROL: a sample whose arithmetic fits MOVES the wall",
+          licensed_entry["budget_sec"] == round(module.margin_for(30.0) * 30.0, 2),
+          f"budget_sec={licensed_entry['budget_sec']}")
+    check("#604 — the CONTROL applied it",
+          licensed_pop.applied == ("tests/test_gate_budget.py",), str(licensed_pop.applied))
+    check("#604 — the applied entry carries its PROBE PROVENANCE",
+          licensed_entry.get("probe_sample") is True
+          and licensed_entry.get("probe_regime", {}).get("concurrent_audits") == 0,
+          str(licensed_entry.get("probe_regime")))
+
+def probe_the_PROBE_IS_ON_BY_DEFAULT_and_an_escape_nobody_invokes_is_not_one() -> None:
+    """#604's last clause: the escape must not be a hand-run one.
+
+    `#602` was broken BY HAND, outside any tool, and the daily measurement round invokes this
+    leg with NO flags. A `--probe` flag a caller has to remember would ship a mechanism that
+    never fires — the hand-run escape wearing an argument. So the default is asserted here,
+    not left to a reader of the help text.
+    """
+    module = _rederive_module()
+    if module is None:
+        return
+    parser = module.build_parser()
+    check("#604 — the probe is ON when the leg is invoked with NO flags",
+          parser.parse_args([]).probe is True, str(parser.parse_args([]).probe))
+    check("#604 — --no-probe turns it OFF explicitly",
+          parser.parse_args(["--no-probe"]).probe is False,
+          str(parser.parse_args(["--no-probe"]).probe))
+    # And it costs nothing in the ordinary case: with no kill record there is nothing to probe.
+    with tempfile.TemporaryDirectory() as tmp:
+        manifest = _probe_tree(Path(tmp), {"tests/test_clean.py": _probe_entry()}, {})
+        pop = module.Population(declared=1, examined=1)
+        module.record_wall_kills(pop, manifest, Path(tmp))
+        check("#604 — with no kill record the default costs nothing",
+              pop.kills == (), str(pop.kills))
+
+def probe_an_UNREAD_kill_record_is_NEVER_reported_as_a_clean_one() -> None:
+    """An empty record and an unreadable manifest are the same value and different facts.
+
+    #595's ordering lesson, applied to this leg BEFORE it could bite twice: a clean claim
+    printed under an admitted inability is the defect the row-set renderer had to be fixed for.
+    """
+    module = _rederive_module()
+    if module is None:
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        missing = Path(tmp) / "registry" / "does-not-exist.json"
+        pop = module.Population(declared=1, examined=1)
+        module.record_wall_kills(pop, missing)
+        check("#604 — an unreadable record is marked UNREAD",
+              pop.extras.get(module.WALL_KILLS_READ) is False,
+              str(pop.extras.get(module.WALL_KILLS_READ)))
+        lines = module.render(pop).splitlines()
+        check("#604 — the render says UNSTATED, never 'no gate carries a kill record'",
+              any("unstated (not read)" in line for line in lines)
+              and not any("no gate carries a kill record" in line for line in lines),
+              " | ".join(l for l in lines if "wall kills" in l))
+
+        # THE THREE STATES, AND WHY TWO OF THEM ARE NOT THE THIRD (HQ's #604 clause: "the
+        # eligible population is PRINTED with EMPTY as a reading ... a fresh record must not
+        # read as a clean bill"). The record is written FROM the audit's unknown flag, so it
+        # is empty BY CONSTRUCTION on the round that introduces it. A render that read that
+        # emptiness as health would assert a history the record does not have — the exact
+        # ordering lie #595 fixed one leg over, and it was LIVE in this leg until this probe:
+        # a bare invocation (no --audit-report) printed "every declared wall was met" with NO
+        # audit read at all.
+
+        # (1) READ, BUT NOT ADVANCED — no audit report this round.
+        manifest = _probe_tree(Path(tmp), {"tests/test_clean.py": {"budget_sec": 5.0}}, {})
+        idle = module.Population(declared=1, examined=1)
+        module.record_wall_kills(idle, manifest, Path(tmp))
+        idle_lines = module.render(idle).splitlines()
+        check("#604 — no audit report is NOT a clean record",
+              idle.extras.get(module.WALL_KILLS_SOURCE) == module.KILL_SOURCE_NO_AUDIT
+              and any("NOT advanced this round" in line for line in idle_lines),
+              str(idle.extras.get(module.WALL_KILLS_SOURCE))
+              + " | " + " | ".join(l for l in idle_lines if "wall kills" in l))
+
+        # (2) ADVANCED BY A REAL ROUND, EMPTY — a READING, and the render must SAY so rather
+        # than claim every wall was met. `completed` reaches this state without recording a
+        # kill: the round ran, nothing was exhausted, and nothing had a record to clear.
+        advanced = module.Population(
+            declared=1,
+            examined=1,
+            extras={"audit_unknown": (), "completed": ("tests/test_clean.py",),
+                    "round_id": "2026-11-02:probe"},
+        )
+        module.record_wall_kills(advanced, manifest, Path(tmp))
+        adv_lines = module.render(advanced).splitlines()
+        check("#604 — an empty record on an ADVANCED round is a READING, and the render "
+              "does NOT claim every declared wall was met",
+              advanced.extras.get(module.WALL_KILLS_SOURCE) == module.KILL_SOURCE_ROUND
+              and any("READING, not a clean bill" in line for line in adv_lines)
+              and not any("every declared wall was met" in line for line in adv_lines),
+              str(advanced.extras.get(module.WALL_KILLS_SOURCE))
+              + " | " + " | ".join(l for l in adv_lines if "wall kills" in l))
+
+        # (3) AND THE THREE RENDER DIFFERENTLY — the whole point. One string for all three
+        # would be the collapse this probe exists to prevent.
+        def _wall_line(rendered_lines):
+            hits = [l for l in rendered_lines if "wall kills" in l]
+            return hits[0] if hits else ""
+
+        seen = {_wall_line(lines), _wall_line(idle_lines), _wall_line(adv_lines)}
+        check("#604 — the three states render as three DISTINCT lines",
+              len(seen) == 3 and "" not in seen,
+              " | ".join(sorted(seen)))
+
 def main() -> int:
     print("gate registry — an unregistered gate never runs (P29, issues #59, #68)")
     print("  synthetic probes")
@@ -1844,6 +4462,14 @@ def main() -> int:
     probe_a_prose_mention_is_not_a_mechanism()
     probe_only_the_prevented_by_column_is_read()
     probe_a_dead_reference_is_reported()
+    print("  synthetic probes — #602: a declared SPLIT resolves a retired name")
+    probe_a_declared_split_resolves_a_retired_name()
+    probe_a_split_with_an_absent_successor_does_not_resolve()
+    probe_a_split_with_an_unregistered_successor_does_not_resolve()
+    probe_a_stale_split_is_reported()
+    probe_a_one_successor_entry_is_a_rename_not_a_split()
+    probe_an_absent_split_store_is_a_skip()
+    probe_a_malformed_split_store_fails_rather_than_passing()
     probe_an_unreadable_law_source_fails_rather_than_passing()
     probe_the_law_coverage_predicate_states_its_scope()
     print("  synthetic probes — direction 5, registered -> CAN RUN")
@@ -1854,6 +4480,7 @@ def main() -> int:
     probe_the_runner_is_read_from_argv_not_guessed_from_the_target()
     probe_an_absent_target_is_skipped_and_named_not_double_reported()
     probe_a_tool_invocation_carries_no_target_shape()
+    probe_a_computed_argument_survives_the_projection()
     probe_registered_entries_is_a_projection_of_one_scan()
     probe_a_target_whose_name_contains_pytest_is_not_misread_as_the_runner()
     probe_the_runner_form_predicate_states_its_one_way_bound()
@@ -1861,6 +4488,8 @@ def main() -> int:
     probe_the_scan_is_not_vacuous()
     probe_the_resolver_reads_the_live_declaration()
     probe_the_report_states_the_tool_gap()
+    probe_the_vacuity_predicates_still_fail_a_vacuous_scan()
+    probe_the_live_tool_invocations_are_never_truncated()
     probe_a_string_prefixed_opener_is_read()
     probe_the_predicate_is_stated_with_its_count()
     probe_the_live_tree_is_clean()
@@ -1877,20 +4506,35 @@ def main() -> int:
     probe_a_tree_without_a_resolvable_head_is_not_read_as_clean()
     probe_a_malformed_entry_still_raises()
     probe_the_margin_law_still_raises()
+    print("  synthetic probes — #588: a PRESENT path that is not a manifest is refused")
+    probe_a_non_regular_file_at_the_manifest_path_is_refused()
+    probe_a_dangling_symlink_at_the_manifest_path_is_refused()
+    probe_the_env_override_is_the_live_vector()
+    probe_an_absent_manifest_is_still_the_declared_fallback()
     print("  synthetic probes — #93: a timeout is UNKNOWN, never a 0.0s FAIL")
     timed_out = probe_a_timeout_carries_true_elapsed_and_a_distinct_exit_code()
     probe_the_retry_is_bounded_and_recorded(timed_out)
     probe_a_genuine_failure_is_never_retried()
+    probe_a_chosen_kill_code_is_unknown_not_failed()
     probe_a_real_timeout_lands_in_unknown_end_to_end(timed_out)
+    probe_a_killed_gate_is_never_rendered_as_a_measurement(timed_out)
+    probe_the_staleness_join_reaches_the_verdict_line(timed_out)
     probe_the_three_states_are_distinct_and_a_failure_outranks_unknown()
     probe_a_skipped_suite_is_still_no_verdict()
     probe_the_fail_line_cause_is_read_by_one_predicate()
     probe_a_script_shaped_failure_records_its_count()
     probe_a_declared_marker_is_read_first_and_the_heuristic_is_the_fallback()
     probe_the_note_is_attached_once_for_every_surface()
+    probe_the_stream_join_ranks_what_each_stream_DECLARES()
 
     print("  live manifest — the declared revisions, swept")
     probe_the_live_sweep_states_its_own_account()
+
+    print("  synthetic probes — #226: the load a measurement was taken at")
+    probe_the_load_key_is_optional_and_its_absence_is_printed()
+    probe_a_declared_load_is_counted_and_named()
+    probe_a_non_numeric_load_is_refused()
+    probe_the_live_manifest_states_its_load_population()
 
     print("  synthetic probes — #208: the default's stated derivation is upheld")
     probe_a_population_entry_above_the_default_is_refused()
@@ -1903,6 +4547,55 @@ def main() -> int:
 
     print("  live manifest — the default's derivation, and its population")
     probe_the_live_default_states_a_derivation_that_holds()
+
+    print("  synthetic probes — #269: the re-derivation leg bites, and its population is printed")
+    probe_a_refused_sample_is_not_a_basis_and_a_passing_one_still_derives()
+    probe_a_stale_entries_growth_marker_dies_with_its_wall()
+    probe_the_rederivation_leg_prints_and_bites()
+    probe_the_live_rederivation_leg_is_non_vacuous()
+    print("  synthetic probes — #442: the not-examined population is rendered once")
+    probe_the_not_examined_population_is_rendered_once()
+    print("  synthetic probes — #307: a budget-exhausted gate reaches the trigger")
+    probe_a_budget_exhausted_gate_reaches_the_trigger()
+
+    print("  synthetic probes — #564: growth is a third source, reported first, derived on trend")
+    probe_a_growing_gate_is_reported_first_and_derived_on_the_second_breach()
+
+    print("  synthetic probes — #578: the containment breakdown sums, or the run refuses")
+    probe_the_containment_breakdown_sums_or_refuses()
+
+    print("  synthetic probes — #240: a gate's own cap vs its audit budget")
+    probe_a_budget_below_its_gates_own_cap_is_named()
+    probe_a_budget_above_its_gates_own_cap_is_clean()
+    probe_a_gate_with_no_declared_cap_is_not_in_the_population()
+    probe_the_probe_budget_constant_is_not_misread_as_a_gate_cap()
+
+    print("  live manifest — #240: the cap/budget ordering, and its population")
+    probe_the_live_cap_budget_ordering_holds()
+
+    print("  synthetic probes — #295: every invoked gate DECLARES its exit")
+    probe_a_gate_with_no_declared_exit_is_REFUSED_by_name()
+    probe_a_complete_declaration_is_clean()
+    probe_a_declaration_for_a_gate_that_does_not_run_is_STALE()
+    probe_a_class_outside_the_vocabulary_is_refused()
+    probe_an_exemption_table_that_does_not_resolve_is_refused()
+    probe_a_table_shipping_only_its_example_skeleton_RESOLVES()
+    probe_a_declared_table_the_gate_never_names_is_DRIFT()
+    probe_an_exemption_table_no_declaration_names_is_reported()
+    probe_an_exit_owed_entry_must_name_the_board_item()
+    probe_the_exit_population_is_the_call_sites_not_a_glob()
+
+    print("  #604 — the wall-kill streak, the probe, and the licence")
+    probe_a_single_kill_is_NOT_eligible_and_a_streak_is()
+    probe_an_OUTSTANDING_breach_is_NOT_eligible_and_a_CONSUMED_one_IS()
+    probe_the_streak_advances_once_per_round_and_a_COMPLETED_run_clears_it()
+    probe_a_gate_that_OUTRUNS_its_wall_is_probed_and_one_that_MEETS_it_is_not()
+    probe_a_box_with_a_LIVE_PEER_REFUSES_the_probe_and_SAYS_SO()
+    probe_a_sample_that_would_CARRY_an_OUTAGE_is_REFUSED_and_the_wall_stays()
+    probe_the_PROBE_IS_ON_BY_DEFAULT_and_an_escape_nobody_invokes_is_not_one()
+    probe_an_UNREAD_kill_record_is_NEVER_reported_as_a_clean_one()
+    print("  live manifest — #295: the exit declaration, its classes and its coverage")
+    probe_the_live_tree_declares_every_invoked_gate()
 
     print()
     if failures:

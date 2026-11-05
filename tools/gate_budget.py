@@ -79,11 +79,19 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 GATES_MANIFEST_PATH = REPO_ROOT / "registry" / "gates.json"
 GATES_MANIFEST_ENV = "OC_GATES_MANIFEST"
 
-# The LAST-RESORT cap, used only when no manifest exists at all. It matches the
-# value the template ships (`TEMPLATE/registry/gates.example.json`), so a factory
-# that never measures behaves the same before and after it copies the example. It
-# is deliberately the largest declared budget rather than a round number, so the
-# fallback is never TIGHTER than a gate the factory did measure.
+# The LAST-RESORT cap, reached only when no manifest exists at all: a factory
+# that carries `registry/gates.json` uses that manifest's `default.budget_sec`
+# and never arrives here. It matches the value the template ships
+# (`TEMPLATE/registry/gates.example.json`), so a factory that never measures
+# behaves the same before and after it copies the example.
+#
+# It is a ROUND number, and it is NOT a declared multiple of a measured runtime.
+# This is the one budget the calibration rule cannot supply, because a tree with
+# no measurements has no single runtime to derive from. What upholds it is not its
+# value but its VISIBILITY: the runner prints `[DEFAULT]` for every gate that
+# falls through, so an uncalibrated cap is never silent, and a budget exhausted is
+# UNKNOWN -- never green, never a plain failure. A factory that wants a calibrated
+# cap measures its own box and declares it in its own manifest.
 FALLBACK_DEFAULT_SEC = 120.0
 
 # A timeout gets its OWN exit code -- the one `timeout(1)` uses -- so a killed gate
@@ -96,6 +104,15 @@ TIMEOUT_EXIT_CODE = 124
 # `measured_sec` beside it is a cap picked by feel, which is the defect the law
 # names. The loader refuses the shape rather than reading a bare number.
 ENTRY_KEYS = ("budget_sec", "measured_sec", "measured_at", "margin_x")
+
+# The load the `measured_sec` was taken AT -- the datum whose absence makes a kill
+# unreadable, because a cap exceeded at load 13 and a cap exceeded on an idle box are the
+# same number and different facts (#226). OPTIONAL, and its ABSENCE IS PRINTED rather than
+# refused: the live manifest holds 48 entries and a load reading exists for 2, so a required
+# key would force 46 invented values -- the very class this module exists to remove, a number
+# travelling without its predicate. Forward-only: a NEW or UPDATED measurement carries the
+# load it was taken at; the rest stay unmeasured and VISIBLE, never silently exempt.
+LOAD_KEY = "load_at_measure"
 
 # How far `budget_sec` may sit from `margin_x x measured_sec` before the entry is
 # refused. MEASURED, not chosen: over the live 44-gate manifest the largest
@@ -129,7 +146,18 @@ GIT_TIMEOUT_SEC = 20
 
 
 class GateBudgetManifestError(Exception):
-    """The gate-budget manifest exists but is unparseable or incomplete."""
+    """A path that must hold the gate-budget manifest cannot be read as one.
+
+    Two cases, both defects. Something is PRESENT at the path but is not a regular file --
+    a directory, or a symlink whose target does not resolve -- so a manifest cannot have
+    been read from it. Or it is a regular file that is unparseable or incomplete.
+
+    An ABSENT path is NOT this error: that is the declared fallback, and the distinction is
+    the whole point, because the two are otherwise the same output for a caller that only
+    sees caps (#588). The presence test is `os.path.lexists()`, never `Path.exists()` --
+    `exists()` follows symlinks, so a DANGLING link reports False and would take the absent
+    branch while a link of that name sits at the path.
+    """
 
 
 @dataclass(frozen=True)
@@ -154,11 +182,23 @@ class GateBudgets:
     default_sec: float
     default_source: str
     gates: dict[str, float] = field(default_factory=dict)
+    # WHICH declared entries carry the load their `measured_sec` was taken at, and the
+    # account of the population that does not. The note is the point, on the same reasoning
+    # as `stale_note`: a reader meeting a kill must be able to tell a hung gate from a busy
+    # box, and where no entry states its load that reader has NOTHING to tell them apart --
+    # so the gap is printed beside the verdict instead of being absent from it.
+    load_declared: tuple[str, ...] = ()
+    load_note: str = ""
+    loads: dict[str, float] = field(default_factory=dict)
     # The staleness sweep's findings and its OWN account, so a caller can print the
     # population examined beside the count found. An empty tuple with a note that says
     # why is the honest form of "nothing reported"; an empty tuple alone is not.
     stale: tuple[StaleBudget, ...] = ()
     stale_note: str = ""
+    # The entries the sweep could not examine at all -- no `measured_at`, or one that
+    # resolves to nothing here. Kept beside the note so a machine-readable reader and the
+    # printed account carry ONE population rather than two definitions of "not examined".
+    unreached: tuple[str, ...] = ()
 
     def resolve(self, key: str | None) -> tuple[float, str]:
         """The budget for a gate key, and whether it was DECLARED or fell to the default.
@@ -290,7 +330,7 @@ def _runner_forms(repo_root: Path, commit: str) -> dict[str, tuple[str, ...]] | 
 
 def budget_staleness(
     entries: dict[str, object], repo_root: Path | None = None
-) -> tuple[tuple[StaleBudget, ...], str]:
+) -> tuple[tuple[StaleBudget, ...], str, tuple[str, ...]]:
     """Which declared bases no longer describe what runs, and the sweep's own account.
 
     THE PREDICATE, with its population and its instant. For every declared entry the
@@ -310,7 +350,10 @@ def budget_staleness(
 
     FAIL-OPEN, AND PRINTED RATHER THAN REFUSED. A revision this clone cannot resolve
     (shallow, or a rewritten history) is UNKNOWN, never clean, and it is named in the note
-    with the count it covers. Nothing here raises: a tree checked out without git must
+    with the count it covers. The keys it could not reach are RETURNED as this function's
+    third element, so a caller prints that same population in a machine-readable field by
+    reading the sweep's own answer rather than re-deriving the predicate beside it. Nothing
+    here raises: a tree checked out without git must
     still be able to read its budgets, and this module's own doctrine already carries the
     pattern -- a declared fallback with a PRINTED population is not an exempt-by-silence
     surface, while an unprinted one is.
@@ -323,7 +366,7 @@ def budget_staleness(
         return (), (
             "no declared entries — this manifest declares no per-gate basis, so there is "
             "nothing to compare against HEAD"
-        )
+        ), ()
 
     head = _resolve_commit(root, "HEAD")
     if head is None:
@@ -331,7 +374,7 @@ def budget_staleness(
             f"NOT RUN — no resolvable HEAD under {root}, so there is no revision to compare "
             f"a declared basis against. {len(entries)} declared entr"
             f"{'y' if len(entries) == 1 else 'ies'} left UNEXAMINED rather than reported clean."
-        )
+        ), tuple(sorted(entries))
 
     by_rev: dict[str, list[str]] = {}
     for key, entry in entries.items():
@@ -341,6 +384,7 @@ def budget_staleness(
 
     stale: list[StaleBudget] = []
     unresolved: list[str] = []
+    reached_keys: set[str] = set()
     reached = bytes_blind = runner_blind = 0
     for rev in sorted(by_rev):
         keys = sorted(by_rev[rev])
@@ -349,6 +393,7 @@ def budget_staleness(
             unresolved.append(f"{rev} ({len(keys)} entr{'y' if len(keys) == 1 else 'ies'})")
             continue
         reached += len(keys)
+        reached_keys.update(keys)
 
         # LEG A — the gate FILE's blob at the declared revision against its blob at HEAD.
         was = _blob_ids(root, [f"{commit}:{key}" for key in keys])
@@ -391,17 +436,27 @@ def budget_staleness(
                 evidence.append(runner_moved[key])
             stale.append(StaleBudget(key=key, legs=tuple(legs), detail="; ".join(evidence)))
 
+    # THE ONE RENDERING OF THE NOT-EXAMINED POPULATION, computed BEFORE the note that names
+    # it. An entry is unreached when its `measured_at` is absent, OR present and resolving to
+    # nothing here; the clause below names that WHOLE set by gate key, so the note and the
+    # machine-readable field carry ONE answer (#419) and the sweep prints it ONCE (#442). A
+    # clause naming only the unresolvable REVISIONS would name a subset while the field named
+    # the whole set -- exactly the disagreement #419 closed.
+    unreached = tuple(sorted(set(entries) - reached_keys))
     plural = "y" if len(entries) == 1 else "ies"
     note = (
         f"{len(stale)} of {len(entries)} declared entr{plural} no longer describe what runs "
         f"— the gate's own blob and its registered argv, compared against HEAD {head[:12]}"
     )
-    if unresolved:
+    if unreached:
         note += (
-            " | NOT EXAMINED — measured_at resolves to nothing here for "
-            + ", ".join(unresolved)
-            + "; a basis whose revision is unreachable is UNKNOWN, never clean"
+            f" | NOT EXAMINED — {len(unreached)} entr"
+            f"{'y' if len(unreached) == 1 else 'ies'} carry no reachable `measured_at` here "
+            f"({', '.join(unreached)})"
         )
+        if unresolved:
+            note += f"; measured_at resolves to nothing for {', '.join(unresolved)}"
+        note += "; a basis whose revision is unreachable is UNKNOWN, never clean"
     if bytes_blind or runner_blind:
         note += (
             f" | leg A did not answer for {bytes_blind} entr"
@@ -413,7 +468,9 @@ def budget_staleness(
             f" | NOTHING EXAMINED — 0 of {len(entries)} entries carried a reachable revision, "
             f"so this sweep reaches no verdict at all"
         )
-    return tuple(stale), note
+    # `unreached` was computed ABOVE, before the note that names it, so the note and this
+    # returned field carry the SAME population by construction.
+    return tuple(stale), note, unreached
 
 
 def gate_key_for_cmd(cmd: list[str], repo_root: Path) -> str | None:
@@ -601,8 +658,11 @@ def load_gate_budgets(path: Path | None = None, repo_root: Path | None = None) -
     """Read the gate-budget manifest. Raises `GateBudgetManifestError` on a malformed one.
 
     An ABSENT manifest is not a defect and returns the declared fallback with an
-    empty table; a manifest that exists and cannot be read is a defect and raises,
-    because the two are otherwise the same output for a caller that only sees caps.
+    empty table. Anything PRESENT at the path that cannot be read as a manifest is a
+    defect and raises -- including a path that is not a regular file at all (a directory,
+    a dangling symlink), because the two are otherwise the same output for a caller that
+    only sees caps (#588). Presence is `os.path.lexists()`, so a dangling link is PRESENT
+    and is refused rather than being reported as an absence.
 
     Every declared entry is then swept against its OWN `measured_at` (#125), and the
     findings and the sweep's account come back with the caps. A malformed entry still
@@ -610,13 +670,23 @@ def load_gate_budgets(path: Path | None = None, repo_root: Path | None = None) -
     is what this module owes its caller.
     """
     target = path or gates_manifest_path()
-    if not target.is_file():
+    if not os.path.lexists(target):
         return GateBudgets(
             default_sec=FALLBACK_DEFAULT_SEC,
             default_source=f"no manifest at {target} — declared fallback",
             gates={},
             stale=(),
             stale_note=f"no manifest at {target} — nothing declared to sweep",
+        )
+    if not target.is_file():
+        kind = (
+            "a directory" if target.is_dir()
+            else "a symlink whose target does not resolve" if target.is_symlink()
+            else "an unreadable file type"
+        )
+        raise GateBudgetManifestError(
+            f"{target}: the manifest path is present but is not a regular file ({kind}) — "
+            "refusing to report an absent manifest over a path that exists (#588)"
         )
     try:
         raw = target.read_text(encoding="utf-8")
@@ -642,6 +712,12 @@ def load_gate_budgets(path: Path | None = None, repo_root: Path | None = None) -
     # basis is the defect this manifest exists to remove. A default that states NONE is not
     # refused -- the shipped example carries a bare one on purpose, so a factory inherits the
     # SHAPE without this box's measurement (#208).
+    if LOAD_KEY in default and not _is_positive_number(default[LOAD_KEY]):
+        raise GateBudgetManifestError(
+            f"{target}: default.{LOAD_KEY} must be a positive number, not "
+            f"{default[LOAD_KEY]!r} -- the field states the load the measurement was taken "
+            f"AT, and a value that is not a number states nothing a reader can compare"
+        )
     stated_default_problems = default_basis_problems(default)
     if stated_default_problems:
         raise GateBudgetManifestError(
@@ -664,6 +740,12 @@ def load_gate_budgets(path: Path | None = None, repo_root: Path | None = None) -
                     f"{where} has no `{name}` key — a budget with no stated basis is a "
                     f"cap picked by feel, which is the defect this manifest exists to fix"
                 )
+        if LOAD_KEY in entry and not _is_positive_number(entry[LOAD_KEY]):
+            raise GateBudgetManifestError(
+                f"{where}.{LOAD_KEY} must be a positive number, not {entry[LOAD_KEY]!r} -- "
+                f"the field states the load the measurement was taken AT, and a value that is "
+                f"not a number states nothing a reader can compare against a kill"
+            )
         for name in ("budget_sec", "measured_sec", "margin_x"):
             if not _is_positive_number(entry[name]):
                 raise GateBudgetManifestError(
@@ -684,13 +766,42 @@ def load_gate_budgets(path: Path | None = None, repo_root: Path | None = None) -
             )
         gates[key] = float(budget)
 
-    stale, stale_note = budget_staleness(entries, repo_root)
+    stale, stale_note, unreached = budget_staleness(entries, repo_root)
+    # The load population, printed rather than refused. `default` counts as one declarer of
+    # its own, because a gate that falls through to it inherits that measurement's load.
+    load_declared = tuple(sorted(k for k, e in entries.items() if LOAD_KEY in e))
+    loads = {k: float(e[LOAD_KEY]) for k, e in entries.items() if LOAD_KEY in e}
+    # `default` is a base in its own right: a gate that falls through to it inherits that
+    # measurement, and therefore that measurement's load.
+    total = len(entries)
+    bases = total + 1
+    on_default = LOAD_KEY in default
+    declarers = len(load_declared) + (1 if on_default else 0)
+    if declarers:
+        where = (f"`default` + {len(load_declared)} of {total} declared entries"
+                 if on_default else
+                 f"none on `default`, {len(load_declared)} of {total} declared entries")
+        load_note = (
+            f"{LOAD_KEY}: {declarers} of {bases} declared bases carry it ({where}); the "
+            f"other {bases - declarers} state none, so for those a kill cannot be told from "
+            f"a busy box"
+        )
+    else:
+        load_note = (
+            f"{LOAD_KEY}: 0 of {bases} declared bases carry it (neither `default` nor any of "
+            f"the {total} entries), so a kill on this manifest cannot be told from a busy box "
+            f"on any gate"
+        )
     return GateBudgets(
         default_sec=float(default_sec),
         default_source=f"{target}:default",
         gates=gates,
         stale=stale,
         stale_note=stale_note,
+        unreached=unreached,
+        load_declared=load_declared,
+        load_note=load_note,
+        loads=loads,
     )
 
 

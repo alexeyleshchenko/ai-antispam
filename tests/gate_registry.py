@@ -87,9 +87,10 @@ predicate reads the argv of each `gates_to_run.append(...)`.
 Two scope statements the predicate carries, because it is wrong without them
 ----------------------------------------------------------------------------
 (i)  **A `tests/`-scoped parse does not cover the whole run list.** Three entries are TOOL
-     invocations (`tools/ledger.py verify`, `tools/hygiene.py --audit`,
-     `tools/roadmap.py --audit`) that no test-file predicate can see. They are counted and
-     named in the report so the coverage gap is stated, never implied away.
+     invocations (`tools/ledger.py verify`, `tools/hygiene.py --audit --namespace
+     hygiene_namespace(repo_root)`, `tools/roadmap.py --audit`) that no test-file predicate
+     can see. They are counted and named in the report so the coverage gap is stated, never
+     implied away.
 
 (ii) **The OPENER is matched, never the whole file.** A whole-file search for "gate" picks
      up `tests/test_review.py` (a comment) and `tests/test_telemetry.py` (a data field) —
@@ -104,6 +105,7 @@ Only the declaration discriminates.
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -130,9 +132,26 @@ DECLARATION_WORD = "gate"
 # reverse direction then reports it as a registered gate that stays silent.
 _OPENING = re.compile(r'^\s*(?:#!.*\n)?\s*(?:[rR][bB]?|[bB][rR]?|[uU])?"""(?P<first>[^\n]*)')
 
-# Every append in the audit is a single line with no nested parenthesis, so the argv is
-# taken to the first `)`.
-_APPEND = re.compile(r"gates_to_run\.append\((?P<argv>[^)]*)\)")
+# The append's argv runs to the paren that BALANCES its own opening `(`. The old
+# `[^)]*` stopped at the FIRST `)`, and a nested call is not hypothetical: the hygiene
+# gate's append carries `hygiene_namespace(repo_root)` inside its argv list, so the scan
+# handed the projection `tools/hygiene.py --audit --namespace` -- a truncated argv that
+# reads as a complete, runnable invocation. That is the whole of #436 clause 3: a
+# registration that cannot run its target must not read like one that runs it.
+# Measured 2026-10-07 over tools/audit.py: 90 append sites, exactly ONE nested (depth 1,
+# `hygiene_namespace(repo_root)`); the multi-line sites are paren-flat, so ONE level of
+# nesting closes the gap. `(?:[^()]|\([^()]*\))*` spans newlines and tolerates that level.
+#
+# THE TRUNCATION HAD TWO CUTS, AND THE REGEX WAS ONLY THE FIRST. Reaching the closing paren
+# is necessary and NOT sufficient: the projection then took `" ".join(quoted_literals)`, and
+# a COMPUTED argument carries no quotes, so `hygiene_namespace(repo_root)` was dropped a
+# SECOND time and the very same `tools/hygiene.py --audit --namespace` came back. A wider
+# scan cannot repair a lossy join, so the argv is now rendered from the list literal's own
+# ELEMENTS (`_argv_tokens`): string literals bare, and everything else — `sys.executable`,
+# `hygiene_namespace(repo_root)` — as an explicit placeholder `<expr>`. The placeholder is
+# the point: this projection is a DECLARED FORM for the report and the budget sweep, never
+# a runnable command line, and the command that RUNS is the audit's own live list.
+_APPEND = re.compile(r"gates_to_run\.append\((?P<argv>(?:[^()]|\([^()]*\))*)\)")
 _QUOTED = re.compile(r'"([^"]+)"')
 
 PREDICATE = (
@@ -146,7 +165,9 @@ PREDICATE = (
 TOOL_INVOCATION_NOTE = (
     "a tests/-scoped parse covers the tests/ entries of the run list only; tool "
     "invocations (tools/*.py) are outside any test-file predicate and are named in the "
-    "report so the gap is stated"
+    "report so the gap is stated — and each is rendered as a DECLARED FORM, a computed "
+    "argument appearing as the placeholder `<expr>` rather than as text that reads like a "
+    "command anyone could run"
 )
 
 OPENER_ONLY_NOTE = (
@@ -158,11 +179,16 @@ LAW_COVERAGE_PREDICATE = (
     "a tests/test_*.py that a RECORDED LAW names as an upholding mechanism must be "
     "REGISTERED. The law sources are the rework log's `Prevented by` column — section 11 "
     "makes that log a law surface — and the skill's own sentences. A mechanism named and "
-    "not registered FAILS, NAMING it. SCOPE BOUND: this covers mechanisms a recorded law "
-    "names; the GENERAL case (a test file that should be a gate and is named nowhere) is "
-    "#48, already open, and this direction must NOT swallow it. The report PRINTS the "
-    "entries parsed, the mechanisms named and the files it read on every run — an "
-    "unprinted population is the exempt-by-silence surface ruled at n=571."
+    "not registered FAILS, NAMING it. A name the tree no longer carries FAILS as a dead "
+    "reference UNLESS the store `docs/mechanism-splits.json` declares it SPLIT — and then "
+    "EVERY successor must EXIST and be REGISTERED, because the law's claim is that the "
+    "probes it cites still run; the retired file must be GONE, and a one-successor entry "
+    "is a RENAME rather than a split and is refused. SCOPE BOUND: this covers mechanisms "
+    "a recorded law names; the GENERAL case (a test file that should be a gate and is "
+    "named nowhere) is #48, already open, and this direction must NOT swallow it. The "
+    "report PRINTS the entries parsed, the mechanisms named, the split store and the "
+    "files it read on every run — an unprinted population is the exempt-by-silence "
+    "surface ruled at n=571."
 )
 
 # A `tests/test_*.py` NAMED as a token. The token form is what makes the scan safe on
@@ -176,6 +202,16 @@ _FILE_TOKEN = re.compile(r"\btest_[A-Za-z0-9_]+\.py\b")
 # header text: matching is case-insensitive, but the column reader builds its failure
 # reason from this string, so the casing is what a reader of that reason sees.
 _PREVENTED_BY_HEADER = "Prevented by"
+
+# Where a factory DECLARES that one mechanism a law names was SPLIT into several. Absent
+# is the empty state — a factory that has split nothing carries no store — so absence is
+# a skip, never a failure.
+MECHANISM_SPLITS_PATH = "docs/mechanism-splits.json"
+
+# A BARE `test_*.py` file name, matched whole. `_FILE_TOKEN` above finds that shape
+# inside prose; a store entry IS the name, so a partial match there would accept a
+# sentence and quietly resolve nothing.
+_SPLIT_FILE = re.compile(r"^test_[A-Za-z0-9_]+\.py$")
 
 # The two runner forms an append can use, and the two shapes a target can have. The RUNNER
 # is read from the append's argv; the SHAPE is read from the target's own text.
@@ -230,15 +266,90 @@ def declared_gates(tests_dir: Path) -> list[tuple[Path, str]]:
             found.append((path, first))
     return found
 
-def registration_entries(audit_text: str) -> list[dict]:
-    """Every `gates_to_run.append(...)`, with BOTH projections read from ONE scan.
+def _argv_tokens(argv_source: str) -> list[str]:
+    """The append's argv as a DECLARED FORM: literals bare, everything else a placeholder.
 
-    An append's argv carries two facts: the TARGET it registers and the RUNNER it
-    registers it under. `registered_entries` kept only the first and DISCARDED the
-    second, so a registration that cannot run its target read exactly like one that runs
-    it — the reason direction 4 exists (#107(d), HQ ruling n=639 Part 2). Both
-    projections come from this single scan: a second `_APPEND` scan would be the same
-    defect one level down.
+    Two facts must hold at once, and `" ".join(quoted_literals)` held only one:
+
+      * downstream consumers SPLIT this value back into argv tokens
+        (`gate_budget.gate_key_for_cmd(argv.split(), ...)`), so it has to stay a
+        whitespace-separated token list with the quotes REMOVED; and
+      * an element that is NOT a string literal carries no quotes, so a literals-only join
+        DROPS it, and `tools/hygiene.py --audit --namespace` came back reading like a
+        complete, runnable command line while being a truncation of one — a registration
+        that cannot run its target must not read like one that runs it.
+
+    So the list literal is split at its own TOP-LEVEL commas and each element is rendered
+    as the value it denotes, with a DELIBERATE asymmetry between the two kinds:
+
+      * a string LITERAL renders BARE — it is exactly what runs; and
+      * anything else renders as an explicit PLACEHOLDER, `<expr>`, because its value is
+        computed at run time and no text can state it.
+
+    The asymmetry IS the contract: this is a DECLARED FORM, never a runnable command. Paste
+    `<sys.executable> tools/hygiene.py --audit --namespace <hygiene_namespace(repo_root)>`
+    into a shell and the `<` is a literal token, not a redirect — an error, which is the
+    honest reading. The command that RUNS is the audit's own live list
+    (`tools/audit.py::registered_gates`); this projection exists for the report and the
+    budget sweep. `gate_key_for_cmd` skips a placeholder for the same reason it skips
+    `sys.executable`: it does not resolve to a file under the root.
+
+    BOUND: the carrier is a space-joined string, so an element whose own text contains
+    whitespace could not round-trip through `split()`. No registration in this tree has one
+    (measured 2026-10-07 over all 90 append sites: 0), and the token count is what the
+    consumers read.
+    """
+    text = argv_source.strip()
+    if text.startswith("["):
+        text = text[1:]
+    if text.endswith("]"):
+        text = text[:-1]
+    elements: list[str] = []
+    depth = 0
+    quote = ""
+    current = ""
+    for ch in text:
+        if quote:
+            current += ch
+            if ch == quote:
+                quote = ""
+            continue
+        if ch in "\"'":
+            quote = ch
+            current += ch
+            continue
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            elements.append(current)
+            current = ""
+            continue
+        current += ch
+    elements.append(current)
+
+    tokens: list[str] = []
+    for element in elements:
+        token = " ".join(element.split())
+        if not token:
+            continue
+        if len(token) >= 2 and token[0] == token[-1] and token[0] in "\"'":
+            tokens.append(token[1:-1])
+        else:
+            tokens.append(f"<{token}>")
+    return tokens
+
+def registration_entries(audit_text: str) -> list[dict]:
+    """Every `gates_to_run.append(...)`, with ALL projections read from ONE scan.
+
+    An append's argv carries three facts: the TARGET it registers, the RUNNER it
+    registers it under, and the ARGUMENTS it passes. `registered_entries` kept only the
+    first and DISCARDED the second, so a registration that cannot run its target read
+    exactly like one that runs it — the reason direction 4 exists (#107(d), HQ ruling
+    n=639 Part 2). The third was dropped by the argv's own projection, which is #436
+    clause 3. Every projection comes from this single scan: a second `_APPEND` scan would
+    be the same defect one level down.
     """
     entries: list[dict] = []
     for match in _APPEND.finditer(audit_text):
@@ -253,7 +364,7 @@ def registration_entries(audit_text: str) -> list[dict]:
                 "name": Path(target).name,
                 "kind": "tests" if target.startswith("tests/") else "tool",
                 "runner": _runner_of(quoted),
-                "argv": " ".join(quoted),
+                "argv": " ".join(_argv_tokens(argv)),
             }
         )
     return entries
@@ -481,6 +592,18 @@ REQUIRED_GATES: tuple[str, ...] = (
     "test_ledger_identity.py",
     "test_commit_pathspec_law.py",
     "test_criteria_count.py",
+    # Added with its registration (board #507, ruled n=3539). REQUIRED is the correct grain:
+    # the gate drives SYNTHETIC issues and a THROWAWAY git repository under a temp directory
+    # — no live board, no fleet manifest, no box-local fixture — so it passes in a
+    # bootstrapped factory exactly as it does here, and its live arm tolerates the absent
+    # store that a member factory ships (the `.example.json` skeleton is the shipped shape).
+    # It is byte-paired with a TEMPLATE copy, so the manifest grain is what keeps a factory
+    # from dropping the runner and keeping the file. THE LEG IT GUARDS is the ABSENT-BY-LAW
+    # half of the `criterion-paths` leg: a criterion naming `docs/hygiene-protected.json` is
+    # correct because the law forbids that file from shipping, and the leg red it as a
+    # defect — while a path absent because its work is BLOCKED must STILL red, which is the
+    # arm that makes this gate discriminating rather than decorative.
+    "test_criterion_path_exemptions.py",
     # Added with its registration (issue #54, P7 + P28). REQUIRED is the correct grain and
     # OPTIONAL is not: the predicate is PURE over a LIST of cron rows and reads no live
     # table, so it passes in a bootstrapped factory exactly as it does here — there is no
@@ -488,10 +611,64 @@ REQUIRED_GATES: tuple[str, ...] = (
     # with a TEMPLATE copy, so the manifest grain is what keeps a factory from dropping the
     # runner and keeping the file.
     "test_cron_thinness.py",
+    # Added with its registration (board #485, ruled n=3307, dispatched n=3308). REQUIRED is
+    # the correct grain and OPTIONAL is not: the predicate is PURE over a LIST of cron rows
+    # and reads no live `cron_jobs` table, so it passes in a bootstrapped factory exactly as
+    # it does here — there is no box-local fixture that would make it red. It is byte-paired
+    # with a TEMPLATE copy, so the manifest grain is what keeps a factory from dropping the
+    # runner and keeping the file. THE MECHANISM IT GUARDS: an envelope that declares a
+    # `receipt_subject:` promises a receipt row, and four such envelopes in three days named
+    # no route to LAND it (#474, #479, #480, #481) with no gate able to see any of them. The
+    # census predicate that found them is a PRESENCE test, so it passes the shape that
+    # survived the repair — a route that is NAMED and points at the pre-#445 pusher in the
+    # shared tree. This gate's second leg (the target RESOLVES at `origin/main`) is the
+    # discriminating one, and its live arm reconciles against `docs/landing-route-debt.json`
+    # so an undeclared instance REDs and a repaired-but-still-declared one REDs as stale.
+    "test_cron_landing_route.py",
+    # Added with its registration (board #313, ruling n=3360). REQUIRED is the correct grain
+    # and OPTIONAL is not: the predicate reads SOURCE in both trees and never `evidence/`, so
+    # it examines a bootstrapped factory's own law surfaces exactly as it examines this
+    # tree's, and it passes there on the same rule. It is byte-paired with a TEMPLATE copy, so
+    # the manifest grain is what keeps a factory from dropping the runner and keeping the
+    # file. THE MECHANISM IT GUARDS: two COMMITTED homes declare the same surfaces -- the law
+    # table in `SKILL.md` (A) and the `surface` tables across `docs/instruments/*.md` (B) --
+    # and the pre-existing single-writer gate parses A ALONE, so a surface declared in B and
+    # never mirrored into A reads clean. This one asserts the one-directional `B ⊆ A` and
+    # PRINTS its population, so an empty run is distinguishable from a clean one.
+    "test_declaration_drift.py",
+    # Added with its registration (board #431, ruling n=2799, dispatched n=2793). REQUIRED is
+    # the correct grain and OPTIONAL is not: the predicate reads SOURCE and never `evidence/`,
+    # so it examines a bootstrapped factory's own modules exactly as it examines this tree's,
+    # and it passes there on the same rule -- which is also why its population rule is not a
+    # bare `twin.exists()`. It is byte-paired with a TEMPLATE copy, so the manifest grain is
+    # what keeps a factory from dropping the runner and keeping the file. THE MECHANISM IT
+    # GUARDS is the one that let six hardcoded boundaries hide in five gates and a seventh be
+    # written while the fix for them was open: a census that enumerates its population by the
+    # MARKER it is hunting sees only the spellings it already knows. This one enumerates by
+    # what a module READS.
+    "test_declared_boundary_census.py",
     "test_docs_sync.py",
+    # Added with its registration (board #48, ruling 2026-09-26). REQUIRED is the correct
+    # grain: the gate drives SYNTHETIC git repositories under a temp directory — the
+    # negative is proven there and never on this tree — so it reads no live board and no
+    # box-local fixture and passes in a bootstrapped factory exactly as it does here. It is
+    # byte-paired with a TEMPLATE copy, so the manifest grain is what keeps a factory from
+    # dropping the runner and keeping the file.
+    "test_law_mechanism_same_commit.py",
     "test_duplicate_prose.py",
     "test_gate_fixtures_closure.py",
     "test_gate_registration.py",
+    # Added with its registration (board #294, ruling n=2106). REQUIRED is the correct
+    # grain and OPTIONAL is not, and the deciding fact is the same one the map's own
+    # default-deny states: a factory that ships the SELECTOR and the HOOK leg but drops this
+    # gate has a derivation nobody checks — the map could lose a gate, or the default-deny
+    # branch could be gutted, and every surface would still read green. It resolves the map
+    # through the SELECTOR's own loader (live, then the shipped example), so it passes in a
+    # bootstrapped factory that has copied the example exactly as it does here, and it FAILS
+    # with the copy command rather than silently where no map resolves at all. It is
+    # byte-paired with a TEMPLATE copy, so the manifest grain is what keeps a factory from
+    # dropping the runner and keeping the file.
+    "test_gate_triggers.py",
     # Added with its registration (board #195, ruling n=1340). REQUIRED is the correct
     # grain: the gate's population is the audit's OWN call sites and a synthetic pair, so it
     # needs no live board, no fleet manifest and no box-local fixture — it passes in a
@@ -516,6 +693,15 @@ REQUIRED_GATES: tuple[str, ...] = (
     # factory would have been reported as diverging on its own README. Both were fixed in the
     # change that shipped this gate.
     "test_kit_pin.py",
+    # Added with its registration (board #254, ruling n=1810). REQUIRED is the correct grain
+    # and OPTIONAL is not: the predicate is PURE over the tree -- it reads law files and its
+    # own exemption table, with no live board, no fleet manifest and no box-local fixture --
+    # so it passes in a bootstrapped factory exactly as it does here. It is byte-paired with
+    # a TEMPLATE copy, so the manifest grain is what keeps a factory from dropping the
+    # runner and keeping the file. Its PARAMETERS are factory data in
+    # `docs/law-uuid-exemptions.json`, never inline, precisely because the file is paired:
+    # a factory's declared debt must not ship to every other factory.
+    "test_law_no_raw_session_uuid.py",
     "test_law_structure.py",
     "test_ledger.py",
     "test_ledger_close_preflight.py",
@@ -528,6 +714,16 @@ REQUIRED_GATES: tuple[str, ...] = (
     # intake anywhere was invisible to a close-keyed reading until the close failed.
     "test_ledger_claim_preflight.py",
     "test_ledger_commit_cites_no_rows.py",
+    "test_commit_subject_issue_refs.py",
+    # Added with its registration (#611). REQUIRED is the correct grain: the gate drives the
+    # writer's three verdicts through INJECTION (no board, no network, no clock) and neuters
+    # each mechanism on a COPY of the writer in a temp dir, so it passes in a bootstrapped
+    # factory exactly as it does here — the copy's `PATROL_TOOL` is re-anchored to the tree
+    # it is run from. What it guards is the close boundary: a ruling posted with `gh issue
+    # comment` and never paired with a `ruling` row is the omission behind every entry in
+    # `docs/ruling-board-exemptions.json`, and the writer now refuses the close that would
+    # end the item with that divergence in place.
+    "test_close_ruling_paired.py",
     # Added with its registration (board #137). REQUIRED is the correct grain: the gate
     # parses the ledger header's own declaration and compares it to the file's ACTUAL
     # intra-repo imports, driving four constructed sources so it bites for each reason it
@@ -536,6 +732,15 @@ REQUIRED_GATES: tuple[str, ...] = (
     # so the manifest grain is what keeps a factory from dropping the runner and keeping the
     # file. The claim it guards is the one a factory READS BEFORE COPYING: a header saying
     # "byte-identical" about a file that needs three siblings is the defect it was filed for.
+    # (#312, 2026-10-17): the resolver is SCOPED to this factory's own fragment. It read
+    # EVERY factory fragment and returned the first matching lane as a bare role string, so a
+    # foreign lane whose role name collided (`hq` is declared by all six factories, `triage` by
+    # four, `worker` by three) passed membership AND authorization here. Measured on the live
+    # fleet before the fix: 20 of 33 resolvable sessions belonged to other factories. REQUIRED,
+    # not OPTIONAL, because the predicate is pure over its arguments and the live legs read only
+    # the fleet manifest and the tool itself; it SKIPS with a stated reason where no manifest
+    # exists, which is what a bootstrapped factory looks like.
+    "test_ledger_factory_scope.py",
     "test_ledger_header_closure.py",
     # Added with its registration (board #192). REQUIRED is the correct grain: the gate
     # drives the index's OWN SELFTEST against a THROWAWAY ledger under a temp directory —
@@ -545,10 +750,52 @@ REQUIRED_GATES: tuple[str, ...] = (
     # file.
     "test_ledger_index.py",
     "test_ledger_no_shrink.py",
+    # Added with its registration (board #232). REQUIRED is the correct grain: the gate
+    # drives a THROWAWAY ledger AND a THROWAWAY kind declaration under a temp directory
+    # through the `OC_LEDGER_PATH` / `OC_REFS_KINDS_PATH` seams — no live ledger, no fleet
+    # manifest, no box-local fixture — so it passes in a bootstrapped factory exactly as it
+    # does here. It is byte-paired with a TEMPLATE copy, so the manifest grain is what keeps
+    # a factory from dropping the runner and keeping the file. The leg it guards is the
+    # REF-KIND half of the pre-flight: an undeclared `--ref` kind was accepted at `append`
+    # and refused only at `verify`, on a row that was already written and pushed.
+    "test_ledger_refs_preflight.py",
     "test_ledger_schema.py",
     "test_ontology.py",
-    "test_patrol_host_state.py",
+    "test_duty_receipt_exemptions.py",
+    # Added with its registration (board #330, ruled n=3362). REQUIRED is the correct
+    # grain: the gate drives SYNTHETIC ledger rows and SYNTHETIC stores under a temp
+    # directory — no live board, no fleet manifest, no box-local fixture — so it passes in
+    # a bootstrapped factory exactly as it does here. It is byte-paired with a TEMPLATE
+    # copy, so the manifest grain is what keeps a factory from dropping the runner and
+    # keeping the file. THE LEG IT GUARDS is the ROLE half of a `row:` pointer: the write
+    # path checks EXISTENCE only, so a receipt asserting `intake row n=X` for a row that is
+    # a CLOSE passes the write and misleads every reader who follows it.
+    "test_ledger_ref_roles.py",
+    "test_patrol_criterion.py",
+    "test_patrol_ruling.py",
+    "test_patrol_tree_instants.py",
+    "test_patrol_worktree.py",
+    "test_patrol_publish.py",
+    "test_patrol_workspace.py",
+    "test_patrol_round_receipts.py",
+    "test_patrol_cron_duty.py",
+    "test_patrol_render.py",
+    "test_patrol_census.py",
+    "test_patrol_board.py",
+    "test_patrol_preamble.py",
     "test_citation_clause_titles.py",
+    # Added with its registration (board #441, ruled n=2907, dispatched n=2909). REQUIRED is
+    # the correct grain: the gate drives SYNTHETIC repositories under a temp directory — a
+    # bare remote, a work repo, a tracking ref — so it reads no live board, no fleet
+    # manifest and no box-local fixture, and it passes in a bootstrapped factory exactly as
+    # it does here. It is byte-paired with a TEMPLATE copy, so the manifest grain is what
+    # keeps a factory from dropping the runner and keeping the file. THE MECHANISM IT
+    # GUARDS is the ORDERING of the ruling act: the writer stamps a `ruling` row and posts
+    # the paired board comment in one invocation, so the comment is public while the row it
+    # names is still in the working tree — and the pusher's 900s window means it stays so.
+    # A factory that dropped this runner would publish citations to rows no reader can
+    # reach, which is exactly the state this gate makes loud.
+    "test_citation_published.py",
     # Added with its registration (board #184, ruling n=1231). REQUIRED is the correct
     # grain: the gate's live leg reads a TREE and its seven probes drive synthetic text,
     # so it needs no live board, no fleet manifest and no box-local fixture, and it passes
@@ -596,6 +843,34 @@ REQUIRED_GATES: tuple[str, ...] = (
     # gate would let a factory drop the runner and keep the file.
     "test_registry_render.py",
     "test_roadmap_transition.py",
+    # Added with its registration (board #430, ruling n=2777). REQUIRED is the correct grain
+    # and OPTIONAL is not: its requirement is declared by `docs/measurement-procedure.md`,
+    # which the kit ships, and its LIVE population is this factory's `evidence/scores/` -- a
+    # bootstrapped factory has none, so it checks nothing and SAYS SO rather than reding, and
+    # its procedure-coupling leg asserts `docs/measurement-procedure.md` §5.3's own clause markers wherever the procedure is
+    # present. Its predicate and its probes are pure over synthetic text. It is byte-paired
+    # with a TEMPLATE copy, so the manifest grain is what keeps a factory from dropping the
+    # runner and keeping the file. THE MECHANISM IT GUARDS: `docs/measurement-procedure.md` §5.3's mandatory measurable-count
+    # disclosure landed with NO gate reading it -- the sibling `test_score_artifact_sections.py`
+    # asserts the family view's PRESENCE and cannot read its arithmetic -- so a mean computed
+    # over a reduced population was indistinguishable from one computed over the whole family.
+    "test_score_artifact_measurable.py",
+    # Added with its registration (#566, ruled at n=4320, dispatched at n=4328). REQUIRED is
+    # the correct grain and OPTIONAL is not: every probe drives a SYNTHETIC repository the
+    # fixture BUILDS (three commits, the third orphaned by a hard reset), so it reads no live
+    # board, no fleet manifest and no box-local fixture, and it passes in a bootstrapped
+    # factory exactly as it does here. Its ONE live-tree dependency is the scores directory
+    # and the boundary declaration, and both are handled the way `tests/ledger_boundary.py`
+    # exists to enforce -- an ABSENT declaration SKIPS with its reason, a MALFORMED one
+    # FAILS, and a tree with no scores artifact to judge skips rather than passing vacuously.
+    # It is byte-paired with a TEMPLATE copy, so the manifest grain is what keeps a factory
+    # from dropping the runner and keeping the file. THE MECHANISM IT GUARDS: a round
+    # artifact is written before the push and the catch-up rebase rewrites every sha it
+    # created, so a citation recorded at write time is dead BY CONSTRUCTION -- it happened
+    # twice (`ea7f357d`, then `48244053` and `686aae47`) and nothing asserted the property.
+    # THE NEAR-MISS IT HOLDS OPEN: `48244053` is ALL DIGITS, so the obvious "skip all-digit
+    # tokens" filter drops the exact defect the gate exists to catch.
+    "test_score_artifact_citations.py",
     "test_score_artifact_sections.py",
     "test_score_gate_recorded.py",
     "test_single_writer.py",
@@ -614,7 +889,192 @@ REQUIRED_GATES: tuple[str, ...] = (
     "test_skill_version_contract.py",
     "test_subject_form.py",
     "test_telemetry_reader_registry.py",
+    # Added with its registration (board #488, ruled n=3332). REQUIRED is the correct grain:
+    # the CLASS it guards is a property of the KIT, not of this factory — a factory that adds
+    # a gate under `TEMPLATE/` inherits exactly the obligation this tree has, and the gate
+    # proves it by RUNNING the candidate with `cwd=TEMPLATE` rather than inspecting it. It
+    # reads no live board, no fleet manifest and no box-local fixture: its subject is the
+    # staged index plus the shipped tree's own audit and skip surfaces, so it passes in a
+    # bootstrapped factory exactly as it does here. Byte-paired with a TEMPLATE copy, so the
+    # manifest grain is what keeps a factory from dropping the instrument and keeping the
+    # shipped gates it was supposed to watch.
+    "test_template_gate_pairing.py",
     "test_template_integrity.py",
+    # Added with its registration (board #235). REQUIRED is the correct grain: the gate scans
+    # `tools/*.py`, which every factory has, so it passes in a bootstrapped factory exactly
+    # as it does here, and it reads no live board, fleet manifest or box-local fixture. It is
+    # byte-paired with a TEMPLATE copy, so the manifest grain is what keeps a factory from
+    # dropping the gate and keeping the tool it guards.
+    "test_audit_undefined_names.py",
+    # Added with its registration (G3 in the surface inventory; q15 ruled 2026-09-30).
+    # REQUIRED is the correct grain and OPTIONAL is not, for the deciding fact the entries
+    # around it state: the gate drives the leg against THROWAWAY directories under a temp
+    # root, so it reads no live board, no fleet manifest and no box-local fixture, and it
+    # passes in a bootstrapped factory exactly as it does here. It is byte-paired with a
+    # TEMPLATE copy, so the manifest grain is what keeps a factory from dropping the runner
+    # and keeping the file. THE MECHANISM IT GUARDS: the build residue pytest and ruff
+    # create is SELF-IGNORING — each writes a `.gitignore` of `*` into its own cache — so it
+    # is absent from `git status`, excluded from the manifest as transient and outside the
+    # scratch glob, and NO leg of `tools/hygiene.py` could see it. The owner ruled the class
+    # DECLARED OUT rather than reaped, so the remedy is a printed population on every run:
+    # without this gate a factory would carry that declaration with nothing measuring it,
+    # which is the dead text P29 names.
+    "test_hygiene_build_residue.py",
+    # G2 (q13, 2026-10-02): the declaration cross-sweep. The `docs/*.json` files are the
+    # factory's debt register, and a stale exemption reads as a live grant while granting
+    # nothing -- so an entry whose target no longer exists must be REPORTED. Report-only
+    # (`removes: no`), asserted structurally; each surface's own tool keeps its write path.
+    "test_hygiene_declaration_sweep.py",
+    # G5 (q13, 2026-10-02): the placement map. `ONTOLOGY.md` states the naming half only
+    # as patterns; nothing answered "is this file in the folder its content belongs to",
+    # so a misplaced file read clean everywhere. Report-only (`removes: no`), asserted
+    # structurally; the map is checked against the TREE, so an undeclared directory is
+    # reported rather than absorbed.
+    "test_hygiene_placement.py",
+    # G6 (q13, 2026-10-02): stale directories outside the namespace. The reaper's glob is
+    # the whole of its vision, so a worktree this factory created at any other path is
+    # invisible to it -- `git worktree add` names the path, so `/tmp/af-223` and
+    # `/tmp/af-225/wt` are both ours and neither matches. Report-only (`removes: no`),
+    # asserted structurally; the census is git's own and the population is shown to move.
+    "test_hygiene_stale_dirs.py",
+    # G7 (q13, 2026-10-02): evidence supersession. `evidence/` is append-only history, so
+    # which snapshot governs is stated in PROSE -- and measured 2026-10-02 there is not one
+    # mechanical `superseded_by` marker in the tree. The leg reads the declared naming
+    # convention AND a prose successor notice, both failing differently; a tie at the newest
+    # date is a set of CURRENT siblings, not a supersession. Report-only (`removes: no`),
+    # asserted structurally; a marker naming nothing is its own debt, reported separately.
+    "test_hygiene_evidence_supersession.py",
+    # G8 (#504, 2026-10-17): branch occupancy. The worktree census has always parsed each
+    # tree's `branch` and NO leg read it, so two trees on one branch was invisible to every
+    # leg -- while it silently corrupts the tree the whole factory reads: when the second
+    # tree commits, the branch ref moves and the SHARED tree's HEAD re-points under its own
+    # index, rendering a published ledger row as a staged deletion in a tree that lost
+    # nothing. Report-only (`removes: no`), asserted structurally (no subprocess, no write);
+    # the leg is shown to FIRE on a contended census and to read clean on the same census
+    # minus one tree, so a predicate that flags everything cannot pass.
+    "test_hygiene_branch_occupancy.py",
+    # Added with its registration (board #270, ruled n=1925, dispatched n=1927). REQUIRED is
+    # the correct grain and OPTIONAL is not, for the deciding fact the entries around it
+    # state: the gate reads `evidence/ledger.jsonl` plus kit files loaded BY PATH -- the
+    # predicate module and the live leg's own `resolve_ruling_issue`, both pure over their
+    # arguments -- so it reads no live board, no fleet manifest and no box-local fixture, and
+    # it passes in a bootstrapped factory exactly as it does here. Its writer probe runs
+    # `tools/rule.py --dry-run`, which is HERMETIC by construction: it resolves no `gh` and
+    # no `git remote`, so the probe cannot fail for a network reason. It is byte-paired with
+    # a TEMPLATE copy, so the manifest grain is what keeps a factory from dropping the runner
+    # and keeping the file. THE MECHANISM IT GUARDS: a ruling is two acts in two surfaces --
+    # a board comment and a ledger `ruling` row -- and until #270 nothing bound them, so they
+    # diverged 11 times, then 13 while the board-ruling leg watched. A reader does not
+    # prevent; this gate is the ROW side of the pairing that `tools/rule.py` writes.
+    "test_ruling_row_recorded.py",
+    # Added with its registration (board #262, ruled n=2246, dispatched n=2247). REQUIRED is
+    # the correct grain and OPTIONAL is not, for the deciding fact the entries around it
+    # state: the predicate is PURE over a tree -- it reads `evidence/ledger.jsonl`, the
+    # boundary declaration and `tools/field_predicate.py`, with no live board, no fleet
+    # manifest and no box-local fixture -- and every probe drives a synthetic tree under a
+    # temp directory, so it passes in a bootstrapped factory exactly as it does here. Its
+    # live leg SKIPS with a stated reason where the factory has declared no boundary, which
+    # is the state a factory that has not adopted the invariant is legitimately in. It is
+    # byte-paired with a TEMPLATE copy, so the manifest grain is what keeps a factory from
+    # dropping the runner and keeping the file. THE MECHANISM IT GUARDS: the ledger is the
+    # one surface whose rows cite by section number and are never re-read out of tree, so a
+    # bare number in a row resolves against no document at all -- measured when the item was
+    # filed, 149 of 219 citations (68%) named nothing, and one of them asserted a remedy
+    # against a section of a document that holds no such thing (#184). The shipped
+    # citation gate keeps ONE population and ONE predicate and its `SCOPE_DIRS` is
+    # UNCHANGED: the ledger sits outside it by a DIRECTORY BOUNDARY, so it gets its own
+    # leg with the ledger's own gate set (`docs/instruments/ledger.md` section 5).
+    "test_ledger_citation_declared.py",
+    # Added with its registration (board #454, ruling n=3024, intake n=3023). REQUIRED is the
+    # correct grain and OPTIONAL is not, for the deciding fact the entries around it state:
+    # the gate is PURE over the tree -- it reads the declared routing surfaces and drives
+    # SYNTHETIC claim units in its probes, with no live board, no fleet manifest and no
+    # box-local fixture -- so it passes in a bootstrapped factory exactly as it does here.
+    # It is byte-paired with a TEMPLATE copy, so the manifest grain is what keeps a factory
+    # from dropping the runner and keeping the file. THE MECHANISM IT GUARDS: the owner
+    # order of 2026-10-09 retired the issue-routing discriminator -- EVERY OpenCrabs binary
+    # issue goes to the fork board, upstream `opencrabs/opencrabs` receives PULL REQUESTS
+    # ONLY -- and four live surfaces went on restating the RETIRED routing (binary defects
+    # upstream), because the class had NO observer: the rework log's #305 entry states the
+    # bound, "no gate compares these prose surfaces". A restatement that no gate reads is
+    # law drift with no failing signal, which is why this gate's population is DECLARED and
+    # its probes are the defect's own pre-fix bytes -- a gate that never looked cannot pass.
+    "test_issue_routing_surfaces.py",
+    # Added with its registration (issue #79, ruling n=531, dispatch n=532). REQUIRED is the
+    # correct grain and OPTIONAL is not, for the deciding fact the entries around it state:
+    # the gate is PURE over the tree -- it DISCOVERS the law files the tree ships with a
+    # filesystem walk and drives SYNTHETIC trees in its probes, with no live board, no fleet
+    # manifest and no box-local fixture -- so it passes in a bootstrapped factory exactly as
+    # it does here. Its profile leg reads a surface OUTSIDE the tree, and that is handled by
+    # SKIPPING WITH ITS STATED REASON unless a profile root is supplied (the discipline
+    # `tests/ledger_boundary.py` exists to enforce after #76/#78), so the live binding is
+    # upheld by a patrol rather than asserted by a gate that cannot reach it. It is
+    # byte-paired with a TEMPLATE copy, so the manifest grain is what keeps a factory from
+    # dropping the runner and keeping the file. THE MECHANISM IT GUARDS: the template
+    # PRESCRIBES a profile skill symlink (`BOOTSTRAP.md`, the harness-link step) and shipped
+    # NO mechanism anywhere that verified it, so a factory could bootstrap, pass every gate,
+    # and have its law never load at runtime -- a codified law with no active process and no
+    # deterministic gate upholding it, which is the failure P29 names. The surface is a
+    # DECLARED manifest (`docs/harness-bindings.json`), never a derivation over the repo's
+    # own `skills/` directory: a derivation sees only what EXISTS, and the property under
+    # test is that a load path is OWED -- the repo directory is empty exactly when the
+    # factory has not yet created one, so a gate keyed on it returns the empty set and passes
+    # on the one case that motivated the finding.
+    "test_harness_bindings.py",
+    # Added with its registration (issue #271, ruled by HQ 2026-10-02T18:21:56Z). REQUIRED is
+    # the correct grain and OPTIONAL is not, for the deciding fact the entries above state:
+    # the gate is PURE over the tree -- it reads the instrument's law and the SKILL.md §State — every surface has one writer pointer,
+    # drives its metric probes on a FIXTURE store, and SKIPS its SKILL.md §State — every surface has one writer leg by name where the
+    # root-only `skills/meta-factory/SKILL.md` is absent -- so it passes in a bootstrapped
+    # factory exactly as it does here. Its only outside-tree read is the LIVE store, and that
+    # lives in `tools/intake_metric.py`, which returns NOT RUN with its reason rather than
+    # failing, the discipline #68 established for a reader whose store a member tree has no
+    # reason to carry. THE MECHANISM IT GUARDS: nothing separated an OWNER decision from an
+    # INTERNAL one before it reached the register, so four of the five answers in the measured
+    # burst (q21, q23, q24, q26) had to decline the question as internal -- and SKILL.md §State — every surface has one writer defines
+    # the OPEN-QUESTION COUNT as the human-gate metric, so each mis-routed question inflated
+    # the owner's queue by exactly its own volume with nothing measuring the leak.
+    "test_question_intake.py",
+    # Added with its registration (board #503, ordered by the ruling on #502). REQUIRED is
+    # the correct grain: the gate probes a PURE predicate over a synthetic FACTS dict and
+    # builds its one real repository under a temp directory, so it reads no live board, no
+    # fleet manifest and no box-local fixture, and passes in a bootstrapped factory exactly
+    # as it does here -- including a factory that has declared no binding at all, where the
+    # tool prints NOT RUN with its reason rather than a clean verdict. It is byte-paired with
+    # a TEMPLATE copy, so the manifest grain is what keeps a factory from dropping the
+    # instrument and keeping the gate that would judge nothing. THE MECHANISM IT GUARDS: the
+    # tree serving a profile's law binding is a shared working tree that nothing fetches into,
+    # so its currency was owned by nobody and two crons computed against a ledger 812 rows
+    # behind; the tool that repairs it may move ONLY by `--ff-only`, and this gate proves the
+    # refusal fires before it proves the move works.
+    "test_binding_sync.py",
+    # Added with its registration (#526, ruled at ledger n=3908). REQUIRED is the correct
+    # grain: the gate drives a HERMETIC fixture pair under a temp directory — a declaration
+    # naming only the eight instrument lanes must exit 1, the same fixture widened by the six
+    # core claim lanes must clear, an empty declaration must skip with its reason printed — so
+    # it reads no live board, no fleet manifest and no box-local fixture, and passes in a
+    # bootstrapped factory exactly as it does here. It reads THIS tree's declared vocabulary
+    # only to print its population; a factory that has declared no event skips, stated. It is
+    # byte-paired with a TEMPLATE copy, so the manifest grain is what keeps a factory from
+    # dropping the detector and keeping the vocabulary it would have judged. THE MECHANISM IT
+    # GUARDS: a DECLARED event has no core matrix row, so its `by_event` entry is its ENTIRE
+    # population — and the vacuity pin beside it can see an event that authorizes NOBODY,
+    # never one that authorizes 8 of 14. Measured twice (#462 conversion, #461 release), both
+    # by measurement and neither by a gate.
+    "test_declared_event_population.py",
+    # Added with its registration (issue #542, ruling n=4071). REQUIRED is the correct grain
+    # and OPTIONAL is not: the gate walks `tests/test_*.py` and parses them with `ast`, so it
+    # reads no live board, no fleet manifest and no box-local fixture, and it passes in a
+    # bootstrapped factory exactly as it does here -- a factory needs it MORE, because it
+    # inherits the pytest-family gates whose documented invocation executes nothing. It is
+    # byte-paired with a TEMPLATE copy, so the manifest grain is what keeps a factory from
+    # dropping the detector and keeping the files it was meant to police. THE MECHANISM IT
+    # GUARDS: `python3 tests/<name>.py` on a file with no `__main__` block imports the module
+    # and runs NO test, reporting rc=0 with zero bytes of output -- indistinguishable from a
+    # pass to every reader, log and lane that pipes it. Measured at three wrong diagnoses in
+    # one night on `tests/test_hygiene_placement.py`, which was RED and correct on main while
+    # the script form reported it green three times.
+    "test_gate_direct_invocation.py",
 )
 
 # Gates the template does NOT ship, each with the reason it is not required. Stated rather
@@ -681,24 +1141,31 @@ OPTIONAL_GATES: dict[str, str] = {
         "defaults instead of refusing. Every probe is fixture-driven, because the live "
         "register IS the artifact under measurement."
     ),
-    "test_insights_class.py": (
+    "test_insights_audience.py": (
         "meta-factory-only (owner order 2026-09-28) — its subject tool tools/insights.py is "
         "live-only and does not ship, the same reason its author sibling above is OPTIONAL. "
-        "It carries the probes for the CLASS field's three failure modes: an append that "
-        "accepts a missing class, an append that accepts an unknown one, and a verify that "
-        "passes a stored blank while still accepting a legacy key-less row. Every probe is "
-        "fixture-driven, because the live register IS the artifact under measurement."
+        "It carries the probes for the AUDIENCE field — the reader a claim has outside this "
+        "factory, which is what routes it to a publishing surface — and for the RETIREMENT of "
+        "the `class` axis that field replaced (kept as history, validated against nothing). "
+        "Three failure modes: an append that accepts a missing audience, an append that "
+        "accepts an unknown one, and a verify that passes a stored blank while still "
+        "accepting a legacy key-less row. It also guards the `set_audience` backfill's "
+        "additive contract, which is what makes the 33-row migration a migration and not a "
+        "rewrite. Every probe is fixture-driven, because the live register IS the artifact "
+        "under measurement."
     ),
     "test_insights_status.py": (
         "meta-factory-only (owner order 2026-09-28) — its subject tool tools/insights.py is "
-        "live-only and does not ship, the same reason its author and class siblings above are "
-        "OPTIONAL. It carries the probes for the STATUS field, the WORKFLOW axis: that a new "
-        "entry OPENS at `pending` and is stamped, that a blank or unknown status is refused at "
-        "the append, that `status_at` travels WITH the status, that verify rejects a stored "
-        "blank or an unstamped status while still accepting a legacy key-less row, that a "
-        "transition rewrites the label and NOTHING else, and that the two axes stay "
-        "orthogonal. Every probe is fixture-driven, because the live register IS the artifact "
-        "under measurement."
+        "live-only and does not ship, the same reason its author and audience siblings above "
+        "are OPTIONAL. It carries the probes for the STATUS field, the WORKFLOW axis: that a "
+        "new entry OPENS at `pending` and is stamped, that a blank or unknown status is "
+        "refused at the append, that `status_at` travels WITH the status, that verify rejects "
+        "a stored blank or an unstamped status while still accepting a legacy key-less row, "
+        "that a transition rewrites the label and NOTHING else, that the routing group and "
+        "the status stay orthogonal, and the two laws that bind them together — a publishing "
+        "row names its `surface` and no other row does, and a publishing row is `public` "
+        "while an HQ row is `process: yes`. Every probe is fixture-driven, because the live "
+        "register IS the artifact under measurement."
     ),
     "test_insights_gate_recorded.py": (
         "meta-factory-only (OWNER ORDER 2026-09-28: 'this insights tool should not be a part of "
@@ -757,6 +1224,17 @@ OPTIONAL_GATES: dict[str, str] = {
         "was run by NOTHING until #214 — an instrument whose verdict reaches no consumer is "
         "indistinguishable from one that passes, which is how an S1 predicate that could "
         "never match a hyphenated tool survived as its own headline red."
+    ),
+    "test_kit_questions_homes.py": (
+        "meta-factory-only (issue #188 step 2) — its POPULATION is the EXECUTING copy of "
+        "the questions register, which `/opt/questions/backend.py` resolves from the ops "
+        "profile's skill tree and which sits inside NO member root. A member has no second "
+        "home to compare, and this gate resolves that copy through `tools/kit_census.py`, "
+        "repo-side and unshipped, so it has neither the tool nor the population. It is this "
+        "factory's gate for the RETURN leg nothing owned: a fix landed on "
+        "`TEMPLATE/tools/questions` alone while the executing copy kept the pre-fix refusal "
+        "for two days (#183 -> #188). Its predicate is a SUBSET, so byte-identity PASSES — "
+        "the gate stays green once the Toolsmith's owner-ordered adoption completes."
     ),
 }
 
@@ -838,6 +1316,84 @@ def optional_gate_lines() -> list[str]:
         for name, reason in sorted(OPTIONAL_GATES.items())
     ]
 
+def declared_splits(path: Path) -> tuple[dict[str, list[str]], list[str], bool]:
+    """(splits, problems, read) — retired mechanism name -> the files now carrying it.
+
+    A SPLIT is the one event that retires a FILE NAME without retiring the MECHANISM: a
+    gate too large to measure was divided into leg-scoped gates, and every row of law
+    that named the undivided file is still TRUE — the probes those rows cite still run,
+    in the successors. Rewriting the rows would be a fabrication twice over: they record
+    what prevented the defect at the time, and which leg now carries which probe is not
+    derivable from a row whose cell names no function. Matching the retired name by a
+    GLOB is worse — a pattern that resolves to nothing still passes, which is the
+    exempt-by-silence class ruled at n=571.
+
+    So the division is DECLARED here and VALIDATED: every successor must EXIST under
+    `tests/` and be REGISTERED (asserted by the caller, which owns the run list), and the
+    retired file must be GONE. Three shapes are refused as problems rather than resolved:
+
+      * a retired file still present — the entry claims a division that has not happened,
+        so the store is stale debt sitting there looking live;
+      * fewer than two successors — that is a RENAME wearing the word split, and a rename
+        is followed in the law, never laundered through a store;
+      * an entry missing `issue` or `date` — an entry nobody can check is forgiveness.
+
+    An ABSENT file is the empty state, not a failure: a bootstrapped factory carries no
+    such store until it splits something, and `read=False` says so rather than letting a
+    skipped read look like a clean one.
+    """
+    if not path.is_file():
+        return {}, [], False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return {}, [f"mechanism-splits store is unreadable: {exc}"], True
+    if not isinstance(data, dict) or not isinstance(data.get("splits"), list):
+        return {}, ["mechanism-splits store carries no `splits` list"], True
+
+    splits: dict[str, list[str]] = {}
+    problems: list[str] = []
+    for index, entry in enumerate(data["splits"], 1):
+        where = f"mechanism-splits entry {index}"
+        if not isinstance(entry, dict):
+            problems.append(f"{where} is not an object")
+            continue
+        retired = entry.get("retired")
+        if not isinstance(retired, str) or not _SPLIT_FILE.match(retired):
+            problems.append(f"{where} carries no `retired` file name")
+            continue
+        where = f"mechanism-splits entry {index} ({retired})"
+        if retired in splits:
+            problems.append(f"{where} is declared twice")
+            continue
+        successors = entry.get("successors")
+        if (
+            not isinstance(successors, list)
+            or len(successors) < 2
+            or not all(
+                isinstance(s, str) and _SPLIT_FILE.match(s) for s in successors
+            )
+        ):
+            problems.append(
+                f"{where} needs `successors` — at least TWO file names, because a "
+                "one-successor entry is a rename and a rename is followed, not declared"
+            )
+            continue
+        missing = [
+            key
+            for key in ("issue", "date")
+            if entry.get(key) in (None, "", [])
+        ]
+        if missing:
+            problems.append(
+                f"{where} is missing "
+                + ", ".join(f"`{key}`" for key in missing)
+                + " — an entry nobody can check is forgiveness"
+            )
+            continue
+        splits[retired] = list(successors)
+    return splits, problems, True
+
 def law_named_mechanisms(
     rework_path: Path, skill_path: Path | None
 ) -> tuple[dict[str, list[str]], dict]:
@@ -889,6 +1445,7 @@ def law_coverage_problems(
     audit_path: Path,
     rework_path: Path,
     skill_path: Path | None = None,
+    splits_path: Path | None = None,
 ) -> tuple[list[str], dict]:
     """Direction 4: a mechanism a RECORDED LAW names must be REGISTERED.
 
@@ -896,12 +1453,21 @@ def law_coverage_problems(
     what the template ships. This one reads the LAW, because a law naming a mechanism
     that is not wired up is the dead text P29 forbids, one step further out.
 
-    Two failure legs, reported DISTINCTLY so a reader can tell them apart:
+    Three failure legs, reported DISTINCTLY so a reader can tell them apart:
 
       (a) named, the file exists, and it is not registered in `tools/audit.py` — the
           mechanism the law relies on does not run.
       (b) named and no such file exists under `tests/` — a DEAD REFERENCE: the law cites
           a mechanism this tree does not carry at all.
+      (c) named, gone, and the store `docs/mechanism-splits.json` declares it SPLIT into
+          successors that do not all run — a split is only a resolution when EVERY
+          successor exists AND is registered, because the law's claim is that the probes
+          it cites still run.
+
+    A declared split whose successors all run RESOLVES leg (b) and is printed with the
+    successors it resolved to, so the resolution is visible rather than assumed. The store
+    is validated in its own right too: an entry whose retired file is still present is
+    stale, and a one-successor entry is a rename rather than a split.
 
     SCOPE BOUND, carried in `LAW_COVERAGE_PREDICATE`: this covers mechanisms a recorded
     law NAMES. The GENERAL case — a test file that should be a gate and is named nowhere
@@ -914,6 +1480,15 @@ def law_coverage_problems(
     mechanisms, report = law_named_mechanisms(rework_path, skill_path)
 
     problems: list[str] = []
+
+    # The split store sits BESIDE `tests/`, so a caller that hands over a synthetic tests
+    # directory gets that tree's own store — and a tree with none simply declares none.
+    splits, split_problems, splits_read = declared_splits(
+        splits_path
+        if splits_path is not None
+        else tests_dir.parent / MECHANISM_SPLITS_PATH
+    )
+    problems += split_problems
 
     # A law source that EXISTS and cannot be read is not an absent one. Passing here would
     # be the vacuous-green class this repo names: an empty result from an unparsed region
@@ -928,18 +1503,59 @@ def law_coverage_problems(
 
     unregistered: list[str] = []
     dead_reference: list[str] = []
+    split_resolved: list[str] = []
+    split_broken: list[str] = []
     for name in sorted(mechanisms):
         if name in registered:
             continue
         where = "; ".join(mechanisms[name])
         if (tests_dir / name).is_file():
             unregistered.append(f"{name} — named by {where}")
+        elif name in splits:
+            # A declared split is a RESOLUTION only when the mechanism the law names is
+            # actually running: every successor present AND registered. A split that
+            # resolves to a file the audit never runs is a dead reference with extra
+            # paperwork, so it fails naming the successor that broke.
+            absent = [s for s in splits[name] if not (tests_dir / s).is_file()]
+            unrunnable = [
+                s
+                for s in splits[name]
+                if (tests_dir / s).is_file() and s not in registered
+            ]
+            if absent or unrunnable:
+                broken: list[str] = []
+                if absent:
+                    broken.append(f"absent under tests/: {', '.join(absent)}")
+                if unrunnable:
+                    broken.append(
+                        f"not registered in tools/audit.py: {', '.join(unrunnable)}"
+                    )
+                split_broken.append(
+                    f"{name} — declared split into {', '.join(splits[name])}, but "
+                    f"{'; '.join(broken)} — named by {where}"
+                )
+            else:
+                split_resolved.append(f"{name} -> {', '.join(splits[name])}")
         else:
             dead_reference.append(f"{name} — named by {where}, no such file under tests/")
+
+    # The store's own claim is about the TREE, so staleness is judged over EVERY entry,
+    # not only over the names a law happens to cite: an entry whose retired file is still
+    # present declares a division that has not happened.
+    stale_splits = [
+        f"{retired} — declared split, but the retired file is STILL present under tests/"
+        for retired in sorted(splits)
+        if (tests_dir / retired).is_file()
+    ]
 
     problems += [
         f"law-named mechanism not registered in tools/audit.py: {item}"
         for item in unregistered
+    ] + [
+        f"law-named mechanism's declared split does not resolve: {item}"
+        for item in split_broken
+    ] + [
+        f"mechanism-splits store is stale: {item}" for item in stale_splits
     ] + [
         f"law-named mechanism is a dead reference: {item}" for item in dead_reference
     ]
@@ -951,12 +1567,20 @@ def law_coverage_problems(
             "named": len(mechanisms),
             "unregistered": unregistered,
             "dead_reference": dead_reference,
+            "split_resolved": split_resolved,
+            "split_broken": split_broken,
+            "stale_splits": stale_splits,
             "law_sources": [
                 f"rework log: {report['rework_rows']} row(s) read, reason={report['rework_reason']}",
                 (
                     f"skill: {report['skill_lines']} line(s) read"
                     if report["skill_read"]
                     else "skill: NOT READ"
+                ),
+                (
+                    f"mechanism-splits store: {len(splits)} split(s) declared"
+                    if splits_read
+                    else "mechanism-splits store: NOT READ"
                 ),
             ],
         }
@@ -1041,3 +1665,228 @@ def runner_form_problems(tests_dir: Path, audit_path: Path) -> tuple[list[str], 
         "mismatches": mismatches,
     }
     return problems, report
+
+# --- direction 6: exit -> declared (#295) --------------------------------------------
+
+# The vocabulary. Every class names the LAWFUL PATH from a red on an ALREADY-EXISTING
+# violation back to green, which is the question the "stop with no andon cord" law
+# asks and which nothing asked at registration before this direction existed. The set
+# is closed on purpose: a class
+# outside it is an ERROR rather than a new word, because a vocabulary that grows one
+# ad-hoc token at a time is the same silent-absence defect one level up.
+EXIT_CLASSES = (
+    "write-path-refusal",
+    "exemption-table",
+    "repair-verb",
+    "always-satisfiable",
+    "exit-owed",
+)
+
+# Per class, the fields the declaration must carry and the kind each one is read as.
+# `path` resolves in the tree; `int` is a positive integer; `text` is a non-empty
+# command string that must name a tool the tree actually ships.
+EXIT_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
+    "write-path-refusal": (("refuser", "path"),),
+    "exemption-table": (("table", "path"),),
+    "repair-verb": (("command", "text"),),
+    "always-satisfiable": (),
+    "exit-owed": (("board", "int"),),
+}
+
+EXIT_MANIFEST_KEY = "exits"
+
+# The glob the orphan leg reads: a factory-data exemption table in docs/. The `.example`
+# siblings are the SHIPPED SKELETONS and are excluded -- they are the shape a member
+# copies, not a table this box reads.
+EXEMPTION_TABLE_GLOB = "docs/*exemptions*.json"
+EXEMPTION_EXAMPLE_MARKER = ".example"
+
+
+def invoked_gates(audit_path: Path) -> list[str]:
+    """Every gate the audit INVOKES, as repo-relative paths, from ONE append scan.
+
+    Never a file glob: a `tests/test_*.py` that exists but is never appended to the run
+    list is direction 1's finding, and a population keyed on the glob would demand an
+    exit declaration for a gate that does not run — inflating the population and hiding
+    the real count behind files that are not gates. This is the SAME scan the runner and
+    target projections use (`registration_entries`), so the three directions can never
+    disagree about what the audit contains.
+    """
+    text = audit_path.read_text(encoding="utf-8") if audit_path.is_file() else ""
+    keys: list[str] = []
+    for entry in registration_entries(text):
+        prefix = "tests" if entry["kind"] == "tests" else "tools"
+        keys.append(f"{prefix}/{entry['name']}")
+    return sorted(set(keys))
+
+
+def exit_declaration_problems(
+    invoked: list[str], exits: dict, repo_root: Path
+) -> tuple[list[str], dict]:
+    """Direction 6: every invoked gate DECLARES the exit its red has (#295).
+
+    Three legs, and the first is the acceptance one:
+
+      (a) COMPLETENESS. A gate the audit invokes that carries no declaration is REFUSED
+          BY NAME. This is the leg that would have made all eight exemption tables
+          unnecessary: each was added when a gate was DISCOVERED to have no lawful exit,
+          one gate at a time, each costing a RED origin/main plus a full cycle (#295).
+      (b) RESOLUTION. A declared exemption table, refuser or repair command must resolve
+          in THIS TREE. `always-satisfiable` carries nothing to resolve, which is the
+          point of it — its claim is about the artifact, not about a surface that exists.
+          An exemption table resolves against the file OR its shipped `.example.json`
+          sibling, because a table whose entries are legitimately zero ships as a skeleton
+          and its absence means "no exemptions", not "no surface" (the #112 shape).
+      (c) DRIFT. A declared key that is no longer invoked is an ERROR, not a harmless
+          leftover — it is a declaration for a gate that does not run. A declared
+          exemption table must be NAMED in the gate's own source, so the declaration and
+          the gate cannot disagree about which table it reads. And the INVERSE: a factory
+          exemption table in docs/ that NO declaration names is REPORTED, because that is
+          an exit whose reader is unregistered — measured on this tree, where
+          `docs/ruling-board-exemptions.json` is read by the patrol runner's board-ruling
+          leg and by no invoked gate directly.
+
+    WHAT THIS DOES NOT DECIDE, stated so a green is not read as more than it is: the CLASS
+    is a declaration by the registering lane. Nothing here can mechanically settle whether
+    a repair verb REACHES a given predicate, which is exactly why #317 and #320 stood
+    unseen. What the direction removes is the silent ABSENCE, and what it makes checkable
+    is every declared exit, in one file, on every run.
+    """
+    problems: list[str] = []
+    invoked_set = set(invoked)
+
+    missing = [k for k in invoked if k not in exits]
+    for key in missing:
+        problems.append(
+            f"{key} is invoked by the audit and declares NO exit — a gate whose only "
+            f"exits are barred is a stop with no andon cord, so declare its class in "
+            f"registry/gates.json `{EXIT_MANIFEST_KEY}` (or refuse the registration)"
+        )
+
+    stale = sorted(k for k in exits if k not in invoked_set)
+    for key in stale:
+        problems.append(
+            f"{key} declares an exit but is NOT invoked by the audit — a declaration for "
+            f"a gate that does not run is drift; remove it or register the gate"
+        )
+
+    unresolved: list[str] = []
+    drift: list[str] = []
+    for key in sorted(exits):
+        entry = exits[key]
+        if not isinstance(entry, dict):
+            problems.append(f"{key} declares {entry!r} — an exit declaration is an object")
+            continue
+        cls = entry.get("class")
+        if cls not in EXIT_CLASSES:
+            problems.append(
+                f"{key} declares the class {cls!r}, which is outside the vocabulary "
+                f"({', '.join(EXIT_CLASSES)})"
+            )
+            continue
+        for field, kind in EXIT_FIELDS[cls]:
+            value = entry.get(field)
+            if kind == "int":
+                if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                    problems.append(
+                        f"{key} is `{cls}` and declares {field}={value!r} — the debt must "
+                        f"name the board item that carries it"
+                    )
+                continue
+            if kind == "text":
+                if not isinstance(value, str) or not value.strip():
+                    problems.append(f"{key} is `{cls}` and declares no {field}")
+                continue
+            if not isinstance(value, str) or not value.strip():
+                problems.append(f"{key} is `{cls}` and declares no {field}")
+                continue
+            target = repo_root / value
+            resolves = target.is_file() or _example_sibling(target).is_file()
+            if not resolves:
+                unresolved.append(f"{key}: {field} {value} does not resolve in this tree")
+                problems.append(
+                    f"{key} is `{cls}` and its {field} {value!r} does not resolve — the "
+                    f"declared surface is not in this tree"
+                )
+                continue
+            if cls == "exemption-table" and field == "table":
+                source = _gate_source(key, repo_root)
+                if source is not None and Path(value).name not in source:
+                    drift.append(f"{key} does not name {Path(value).name} in its own source")
+                    problems.append(
+                        f"{key} declares the exemption table {value} but its own source "
+                        f"never names {Path(value).name} — the declaration and the gate "
+                        f"disagree about which table it reads"
+                    )
+
+    orphans = _unnamed_exemption_tables(exits, repo_root)
+    for table in orphans:
+        problems.append(
+            f"{table} is a factory exemption table that NO declaration names — an exit "
+            f"whose reader is unregistered; declare the gate that reads it, or remove "
+            f"the table"
+        )
+
+    counts: dict[str, int] = {}
+    for entry in exits.values():
+        if isinstance(entry, dict) and isinstance(entry.get("class"), str):
+            counts[entry["class"]] = counts.get(entry["class"], 0) + 1
+
+    report = {
+        "invoked": len(invoked),
+        "declared": len(exits),
+        "classes": counts,
+        "missing": missing,
+        "stale": stale,
+        "unresolved": unresolved,
+        "drift": drift,
+        "orphan_tables": orphans,
+    }
+    return problems, report
+
+
+def _example_sibling(path: Path) -> Path:
+    """`docs/x-exemptions.json` -> `docs/x-exemptions.example.json`, its shipped skeleton.
+
+    The marker carries no trailing dot: the stem is joined to `.example` and the SUFFIX
+    supplies the dot, so `stem + ".example." + ".json"` would read
+    `x-exemptions.example..json` and never resolve -- which is exactly what this
+    direction's first live run reported, on a tree whose skeleton was sitting there.
+    """
+    return path.with_name(path.stem + EXEMPTION_EXAMPLE_MARKER + path.suffix)
+
+
+def _gate_source(key: str, repo_root: Path) -> str | None:
+    """The gate's own text, or None when the file is absent.
+
+    A None is NOT an error here: presence is direction 3's leg, and a second direction
+    reporting absence would double-report one defect. The drift check simply has nothing
+    to read, and says so by returning None rather than by inventing a pass.
+    """
+    path = repo_root / key
+    if not path.is_file():
+        return None
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _unnamed_exemption_tables(exits: dict, repo_root: Path) -> list[str]:
+    """Factory exemption tables in docs/ that no declaration names, as repo-relative paths.
+
+    The INVERSE of the drift leg, and the direction that found this tree's own instance:
+    `docs/ruling-board-exemptions.json` is read by `tools/patrol_host_state.py`'s
+    board-ruling leg, and the patrol runner is not itself an invoked gate, so a
+    declaration keyed only on invoked gates could not name it at all. Reporting the
+    orphan is what keeps that fact visible instead of implied away.
+    """
+    named = {
+        Path(entry["table"]).name
+        for entry in exits.values()
+        if isinstance(entry, dict) and isinstance(entry.get("table"), str)
+    }
+    orphans: list[str] = []
+    for path in sorted(repo_root.glob(EXEMPTION_TABLE_GLOB)):
+        if EXEMPTION_EXAMPLE_MARKER in path.name:
+            continue
+        if path.name not in named:
+            orphans.append(str(path.relative_to(repo_root)))
+    return orphans
