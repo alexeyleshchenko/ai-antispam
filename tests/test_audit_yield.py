@@ -37,24 +37,25 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "tools"))
 
-from audit import first_pass_yield_pct  # noqa: E402
+from audit import format_yield_percent, format_run_row_detail  # noqa: E402
 
 
 def check_single_site() -> list[str]:
     """The percentage is produced in exactly one place, and it is correct there."""
     problems: list[str] = []
 
-    if first_pass_yield_pct(14, 17) != 82.4:
+    if format_yield_percent(14 / 17) != "82.4%":
         problems.append(
-            f"first_pass_yield_pct(14, 17) = {first_pass_yield_pct(14, 17)}, expected 82.4"
+            f"format_yield_percent(14/17) = {format_yield_percent(14 / 17)}, expected 82.4%"
         )
-    if first_pass_yield_pct(0, 0) != 0.0:
-        problems.append("first_pass_yield_pct(0, 0) must be 0.0, not a ZeroDivisionError")
+    # An unstated yield is `n/a`, never `0%` — UNKNOWN is not a failure (#143).
+    if format_yield_percent(None) != "n/a":
+        problems.append("format_yield_percent(None) must read n/a, not 0%")
 
     # The guard must be able to FAIL: this is the expression the fix replaced,
     # and it reads a different number at the first reachable divergent ratio.
     old_row_pct = int(round(14 / 17, 4) * 100)
-    if old_row_pct == first_pass_yield_pct(14, 17):
+    if f"{old_row_pct}%" == format_yield_percent(14 / 17):
         problems.append(
             "the pre-fix expression agrees with the fixed one at 14/17 -- this "
             "check no longer discriminates and cannot detect a regression"

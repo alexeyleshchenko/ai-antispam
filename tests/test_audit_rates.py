@@ -1,0 +1,1505 @@
+#!/usr/bin/env python3
+"""Gate: every rate is reported in a named form, with its denominator and its coverage.
+
+Origin, part 1 (issue #31). `tools/audit.py` emitted a single field called
+`rework_rate` whose value was `rework entries ÷ closed subjects` — a per-close rate —
+while `evidence/rework.md`'s Rates table used the same two words, "Rework rate", for
+the *share* form, `entries ÷ (closed + entries)`. One name, two numbers, and the two
+surfaces disagreed by 22 points (58.6% against 37.0%). A reader could not tell which
+was meant, and neither could a diff.
+
+Origin, part 2 (issue #34). The factory had no change fail rate at all — the O2
+Stability metric the rubric asks for. Adding one is where the same defect returns one
+level down, in two shapes: a numerator written by hand (it drifts from the log it
+describes, and nothing notices), and a rate published bare (an under-linked numerator
+of 0 reads as "nothing ever failed" when the truth is "nothing is linked").
+
+The rules this gate enforces:
+
+1. **Two names, never one.** `rework_rate` is gone. The payload carries
+   `rework_share` and `rework_per_close`, and each is computed from the denominator
+   its own name states.
+2. **The forms cannot collapse.** `share` and `per_close` are equal only when the
+   arithmetic is wrong, so equality is a failure rather than a coincidence.
+3. **The denominator is reconciled, not assumed.** `close_events` (close rows) travels
+   beside `closed_subjects` (distinct work units), and `close_events` must equal the
+   close-row count read independently from the ledger — the ledger can be perfectly
+   numbered and still report a close nobody took.
+4. **All three rates name one population.** The change fail rate's denominator is
+   `closed_subjects` — the same population the two rework forms name, never
+   `close_events` (rows, not units) and never `git rev-list --count HEAD`.
+5. **The change fail rate travels with its coverage.** The payload carries the
+   coverage numerator and denominator beside the rate, and the coverage denominator
+   is the rework entry count. A rate whose linkage is zero is refused outright: with
+   entries in the log and no determinate link, 0 means "nothing is linked", not
+   "nothing failed", and publishing it would state the second while meaning the first.
+6. **The numerator is derived, not stated.** `test_the_rate_is_derived_not_stated`
+   re-reads `evidence/rework.md` and the ledger with a *second* implementation and
+   compares. That second parser deliberately reads the Subject cell as the last cell
+   rather than index 7, and states its own copy of the Subject vocabulary rather than
+   importing the reader's: a gate that borrows the reader's pattern cannot catch the
+   reader's pattern being wrong. Independence is the point, not duplication.
+
+**Not restated here:** the empty-Subject-cell rule. `tests/test_rework.py` already
+fails on an empty cell, so this gate does not say it twice — a rule in two places
+splits the next time one of them changes.
+
+The invariant is factored into `rate_form_problems()` so it can be probed with
+synthetic payloads as well as the live one: a rule that only ever sees good input has
+not been shown to reject bad input.
+
+7. **An outcome is a FIELD, read from the canonical trailer and validated.** Absent is
+   UNKNOWN, never `accepted` (issue #53). The old reader scanned free prose for the first
+   `outcome=` substring and never checked the value against the domain, so a sentence
+   containing the word read as a verdict and a typo read as a failure. Two live shapes:
+   `outcome=` alone in a claim row's prose parsed as the empty string, and a close row
+   whose sentence's full stop sat inside the value — `outcome=accepted.` — silently
+   dropped a genuinely accepted work unit out of the success set. A bucket key must
+   therefore be a domain value, `unstated`, or an explicitly `invalid:` bucket.
+8. **The population travels with the rate.** The yield is divided by the rows that STATE
+   an outcome, and its coverage says how much of the ledger it speaks for. With rows
+   present and none stating an outcome the ratio is null, not 1.0 — the favourable
+   fabrication this clause removes. No gate rides on the coverage figure itself (clause
+   6): against append-only rows a threshold would be permanently RED with no lawful
+   repair.
+
+10. **The declaration figure is PRINTED, and its READER is reconciled.** The close
+    trailer's `rework=` marker (issue #106, ruling `n=386` clause 5) is printed and
+    never gated: no threshold here rides on the share. What IS gated is that the
+    printed figure equals the population a SECOND implementation measures on the same
+    ledger — rule 6's shape, applied to the marker's reader. That reader re-derives the
+    canonical trailer boundary itself and keeps its own vocabulary, so a slip in the
+    shared predicate cannot hide in both; it also reports MULTIPLICITY, which the
+    audit's row count cannot see, the law giving a row one `rework` token.
+
+11. **A gate with no exit carries an exemption surface, and its debt is PRINTED.** The
+    multiplicity leg above has no lawful repair for a row ALREADY PUBLISHED: `repair`
+    composes `f"{head} {appended} {run}"` and so inserts BEFORE the canonical run, and it
+    cannot remove a token INSIDE it, while the #104 re-declaration refusal blocks a second
+    `rework=`. So the one published row of this shape is admitted as visible debt in
+    `docs/audit-rates-exemptions.json`, keyed by its OWN `n` — a future close can never be
+    excused by it — printed as an `excused:` line on EVERY run in BOTH invocation modes,
+    with the closing line distinguishing clean from excused. The surface declares its
+    GROUND (`bar`) with ONE lawful value and REFUSES every other, so a ground that does not
+    hold is unexpressible rather than merely discouraged (`docs/instruments/ledger.md` §9.12);
+    an entry that matches NO doubled row is an ERROR, never a silent pass, because a
+    stale exemption inflates the visible debt while excusing nothing. The remedy for the
+    CLASS is the write-path refusal in `tools/ledger.py append`, and it lands in the SAME
+    commit — prevention and repair are not alternatives (issue #496, ruling `n=3412`; the
+    #144 ruling, `n=936`; the `n=405` precedent as applied at `n=2844`).
+
+Run:  python3 -m pytest tests/test_audit_rates.py -q
+Exit: 0 clean or fully excused, non-zero on any rate regression.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+
+
+# The absence contract is SHARED, not re-implemented per gate (#83).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ledger_boundary import (  # noqa: E402
+    GateError,
+    SkipGate,
+    evidence_skip_reason,
+    module_skip,
+    read_rows,
+)
+
+# BOTH INVOCATION MODES MUST REACH THE GUARD (#199). The audit invokes this gate in pytest
+# mode and pytest never calls `main()`, so a guard there protects only the script-mode run —
+# #195's split exactly. `pytestmark` COLLECTS the tests and skips them (exit 0); a module-level
+# `pytest.skip` would exit 5, which the audit reads as a failure.
+# STATED SKIP: evidence/ (BOOTSTRAP-created, steps 4b/4c)
+_SKIP_REASON = module_skip(REPO)
+if _SKIP_REASON:
+    import pytest as _pytest  # noqa: E402
+
+    pytestmark = _pytest.mark.skipif(True, reason=_SKIP_REASON)
+
+AUDIT = REPO / "tools" / "audit.py"
+LEDGER = REPO / "evidence" / "ledger.jsonl"
+REWORK = REPO / "evidence" / "rework.md"
+ONTOLOGY = REPO / "ONTOLOGY.md"
+GATE_CMD = "tests/test_audit_rates.py"
+
+# The reader under test, imported rather than re-implemented: rule 7 is about what
+# THIS function does with a detail string, so the probes call it. Its own copy of
+# the domain lives below, and the two are compared.
+sys.path.insert(0, str(REPO / "tools"))
+import audit as audit_reader  # noqa: E402
+
+FORBIDDEN = "rework_rate"
+REQUIRED_FORMS = ("rework_share", "rework_per_close")
+REQUIRED_FAIL_FIELDS = (
+    "change_fail_rate",
+    "change_fail_rate_numerator",
+    "change_fail_rate_denominator",
+    "subject_coverage",
+    "subject_coverage_numerator",
+    "subject_coverage_denominator",
+)
+
+# This file's own copy of the Subject column's vocabulary — see rule 6. `none` is a
+# defined answer (the defect is not attributable to a closed work unit — caught before
+# any change landed, or sitting in landed work that is not itself a work unit), not a
+# placeholder.
+SUBJECT_NONE = "none"
+SUBJECT_WORK_UNIT_RE = re.compile(r"#\d+")
+
+# ---------------------------------------------------------------------------------------
+# THE EXEMPTION SURFACE (issue #496, ruling `n=3412` PART 6, item 2). FACTORY DATA, never source:
+# this file is paired byte-identically with `TEMPLATE/tests/test_audit_rates.py`, so a
+# factory's own row number must not live in a file that ships to every new factory.
+#
+# `n=3399`'s canonical run declares `rework` TWICE. The row's prose ends `... the
+# declaration is rework=none.`; that token carries `=`, so the positional trailer reader
+# absorbs it into the run beside the trailer's own `rework=none`, and one declaration reads
+# as two. The row is defective and stays exactly as it is — no hand edit, no rewrite of a
+# published detail, no backfill. The WRITE PATH now refuses the shape (`tools/ledger.py
+# append`), which is the PREVENTION; this table is the REPAIR for the one row already
+# written, and neither closes #496 alone (`n=936`: prevention and repair are not
+# alternatives).
+#
+# THE GROUND, stated truthfully (`docs/instruments/ledger.md` §9.12). The close-board surface declares
+# `bar=no-truthful-value` because ITS rows are REACHABLE — its own recorded probe returns
+# rc=0 — and only the truthfulness of the value bars them; its note says so in as many
+# words ("a TRUTHFULNESS bar, never a claim of unreachability"). THAT GROUND DOES NOT HOLD
+# HERE, so it is NOT reused. `tools/ledger.py repair` composes `f"{head} {appended} {run}"`,
+# inserting the appended text BEFORE the canonical run, so it cannot remove a token INSIDE
+# it; and the #104 re-declaration refusal blocks appending a second `rework=`. The repair is
+# therefore barred BY CONSTRUCTION — the recorded probe returns rc=1 and the row reads back
+# byte-identical — which is the bar this surface declares, and the only value it admits.
+# The mismatch with the sibling surface is STATED rather than papered over by reusing a
+# ground that does not hold (ruling `n=3412` PART 6, item 2). The barred phrase at
+# `docs/instruments/ledger.md` §9.3 — the claim that "no lawful path restores the token",
+# a MECHANICAL claim of absence the close-board probe FALSIFIED — is not restated here:
+# what is declared is the measured outcome of THIS row's own repair probe, and the entry's
+# `proof` carries it.
+EXEMPTIONS_PATH = REPO / "docs" / "audit-rates-exemptions.json"
+AUDIT_RATES_EXEMPT_DOMAIN = (
+    "the close row's canonical run declares its `rework` disposition twice",
+)
+AUDIT_RATES_EXEMPT_BAR_KEY = "bar"
+AUDIT_RATES_EXEMPT_BAR_VALUE = "repair-barred-by-construction"
+AUDIT_RATES_EXEMPT_BARS = (AUDIT_RATES_EXEMPT_BAR_VALUE,)
+
+def load_exemptions(path: Path | None = None) -> tuple[dict[int, dict], list[str]]:
+    """Load the factory's audit-rates exemptions, keyed by row `n`.
+
+    Absent or empty data means no exemptions — the shipped state of a new factory, and the
+    state of the shipped skeleton itself. Anything malformed is a problem, never a silent
+    pass: an exemption list that quietly fails to load is indistinguishable from no
+    exemptions, which is the vacuous-pass shape this gate exists to catch.
+    """
+    path = EXEMPTIONS_PATH if path is None else path
+    if not path.is_file():
+        return {}, []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {}, [f"{path.name}: unreadable or malformed JSON: {exc!r}"]
+    if not isinstance(data, dict):
+        return {}, [f"{path.name}: expected a JSON object with an 'exemptions' list"]
+    raw = data.get("exemptions", [])
+    if not isinstance(raw, list):
+        return {}, [f"{path.name}: 'exemptions' must be a list"]
+    out: dict[int, dict] = {}
+    problems: list[str] = []
+    for i, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            problems.append(f"{path.name}: exemption #{i} is not an object")
+            continue
+        row_n = entry.get("n")
+        if not isinstance(row_n, int) or isinstance(row_n, bool):
+            problems.append(f"{path.name}: exemption #{i} has no integer `n`")
+            continue
+        reason = str(entry.get("reason") or "").strip()
+        proof = str(entry.get("proof") or "").strip()
+        domain = str(entry.get("domain") or "").strip()
+        if not reason or not proof:
+            problems.append(
+                f"{path.name}: exemption n={row_n} must state both `reason` and `proof`"
+            )
+            continue
+        if domain not in AUDIT_RATES_EXEMPT_DOMAIN:
+            problems.append(
+                f"{path.name}: exemption n={row_n} declares domain {domain!r}, outside the "
+                f"declared domain {AUDIT_RATES_EXEMPT_DOMAIN}"
+            )
+            continue
+        # The GROUND, required and refused outside its one lawful value
+        # (`docs/instruments/ledger.md` §9.12). This is
+        # the arm that makes a ground that does NOT hold unexpressible rather than merely
+        # discouraged, and an entry that states NO ground is refused rather than defaulted
+        # — a missing bar is the vacuous-pass shape this gate exists to catch, one level up.
+        bar = str(entry.get(AUDIT_RATES_EXEMPT_BAR_KEY) or "").strip()
+        if bar not in AUDIT_RATES_EXEMPT_BARS:
+            problems.append(
+                f"{path.name}: exemption n={row_n} must declare "
+                f"`{AUDIT_RATES_EXEMPT_BAR_KEY}` as one of {AUDIT_RATES_EXEMPT_BARS} — its "
+                f"ground is the bar that HOLDS; got {bar!r}"
+            )
+            continue
+        if row_n in out:
+            problems.append(f"{path.name}: exemption n={row_n} is declared twice")
+            continue
+        out[row_n] = entry
+    return out, problems
+
+def rework_excused(independent: dict, exempt: dict[int, dict] | None) -> list[str]:
+    """The doubled-declaration rows an entry EXCUSES, as printable lines.
+
+    Keyed by the row's own `n` — the value the gate reads — so a FUTURE close (a different
+    `n`) can never be excused by an entry written for this one. Printed on EVERY run, in
+    both invocation modes, so the debt is visible rather than forgiven.
+    """
+    declared = exempt or {}
+    return [
+        f"n={n} declares its `rework` disposition twice, EXEMPTED — "
+        f"{declared[n].get('reason')} [proof: {declared[n].get('proof')}]"
+        for n in independent.get("multi", [])
+        if n in declared
+    ]
+
+def load_audit() -> dict:
+    """Read the live audit payload with the gate suite skipped.
+
+    `--no-gates` is what makes this file safe to register as a gate: without it the
+    audit would run this gate, which would run the audit, recursively. The flag
+    reports `healthy: null` rather than a green, so a skipped suite is never read
+    as a passing one.
+    """
+    res = subprocess.run(
+        [sys.executable, str(AUDIT), "--json", "--no-gates"],
+        cwd=REPO,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=60,
+    )
+    assert res.returncode == 0, f"audit exited {res.returncode}: {res.stderr.strip()[:400]}"
+    return json.loads(res.stdout)
+
+def ledger_close_counts(path: Path = LEDGER) -> tuple[int, int]:
+    """Return (close rows, distinct closed subjects), read straight from the ledger."""
+    rows = 0
+    subjects: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        ev = json.loads(line)
+        if ev.get("event") == "close" and ev.get("subject"):
+            rows += 1
+            subjects.add(ev["subject"])
+    return rows, len(subjects)
+
+def derive_fail_linkage(rework_path: Path = REWORK, ledger_path: Path = LEDGER) -> dict:
+    """Recompute the change fail rate's numerator and coverage from the raw files.
+
+    A second implementation, on purpose — see rule 6. It reads the Subject cell as
+    the last cell of the row and keeps its own vocabulary, so a slip in the audit's
+    parser cannot hide in both.
+    """
+    closed: set[str] = set()
+    for line in ledger_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        ev = json.loads(line)
+        if ev.get("event") == "close" and ev.get("subject"):
+            closed.add(ev["subject"])
+
+    entries = 0
+    determinate = 0
+    failures = 0
+    in_entries = False
+    for line in rework_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            in_entries = stripped.lower().startswith("## entries")
+            continue
+        if not in_entries or not stripped.startswith("|"):
+            continue
+        cells = [c.strip() for c in stripped.split("|")]
+        if len(cells) < 8:
+            continue
+        first = cells[1]
+        if not first or first.startswith("Date") or first.startswith("*") or set(first) <= {"-"}:
+            continue
+        subject = cells[-2]
+        entries += 1
+        if SUBJECT_WORK_UNIT_RE.fullmatch(subject):
+            determinate += 1
+            if subject in closed:
+                failures += 1
+        elif subject == SUBJECT_NONE:
+            determinate += 1
+
+    return {
+        "closed_subjects": len(closed),
+        "total_entries": entries,
+        "failures": failures,
+        "determinate": determinate,
+    }
+
+def derivation_problems(payload: dict, derived: dict) -> list[str]:
+    """Every payload field that disagrees with an independent read of the raw files."""
+    problems: list[str] = []
+    rework = payload.get("rework") or {}
+    for field, key in (
+        ("change_fail_rate_numerator", "failures"),
+        ("change_fail_rate_denominator", "closed_subjects"),
+        ("subject_coverage_numerator", "determinate"),
+        ("subject_coverage_denominator", "total_entries"),
+    ):
+        if rework.get(field) != derived[key]:
+            problems.append(
+                f"{field} is {rework.get(field)!r}, an independent read of the raw files says {derived[key]}"
+            )
+    return problems
+
+def rate_form_problems(payload: dict) -> list[str]:
+    """Every way a payload can state a rate wrongly. Empty list means sound."""
+    problems: list[str] = []
+    rework = payload.get("rework") or {}
+    delivery = payload.get("delivery") or {}
+
+    if FORBIDDEN in rework or FORBIDDEN in payload:
+        problems.append(f"a field named {FORBIDDEN!r} is back: one name cannot carry two numbers")
+
+    for form in REQUIRED_FORMS:
+        if form not in rework:
+            problems.append(f"missing named form {form!r}")
+
+    entries = rework.get("total_entries")
+    closed = rework.get("closed_subjects")
+    if not isinstance(entries, int) or not isinstance(closed, int):
+        problems.append("total_entries and closed_subjects must both be integers")
+        return problems
+    if closed <= 0:
+        problems.append("closed_subjects must be positive for a rate to be defined")
+        return problems
+
+    want_share = round(entries / (closed + entries), 4)
+    want_per_close = round(entries / closed, 4)
+    if rework.get("rework_share") != want_share:
+        problems.append(
+            f"rework_share {rework.get('rework_share')!r} != {want_share} "
+            "(entries / (closed subjects + entries))"
+        )
+    if rework.get("rework_per_close") != want_per_close:
+        problems.append(
+            f"rework_per_close {rework.get('rework_per_close')!r} != {want_per_close} "
+            "(entries / closed subjects)"
+        )
+    if entries > 0 and want_share == want_per_close:
+        problems.append("the two forms collapsed onto one number: they are not the same measure")
+
+    # --- the change fail rate (#34) ---
+
+    missing = [f for f in REQUIRED_FAIL_FIELDS if rework.get(f) is None]
+    if missing:
+        problems.append(
+            f"the change fail rate is incomplete: missing {', '.join(missing)} — "
+            "it is published as a rate with its numerator, its denominator and its linkage coverage"
+        )
+
+    cfr = rework.get("change_fail_rate")
+    cfr_num = rework.get("change_fail_rate_numerator")
+    cfr_den = rework.get("change_fail_rate_denominator")
+    cov = rework.get("subject_coverage")
+    cov_num = rework.get("subject_coverage_numerator")
+    cov_den = rework.get("subject_coverage_denominator")
+
+    if cfr_den is not None and cfr_den != closed:
+        problems.append(
+            f"change_fail_rate_denominator {cfr_den!r} != closed_subjects {closed!r}: "
+            "the three rates must name one population"
+        )
+    if cov_den is not None and cov_den != entries:
+        problems.append(
+            f"subject_coverage_denominator {cov_den!r} != total_entries {entries!r}: "
+            "the coverage is a share of the rework entries, nothing else"
+        )
+    if isinstance(cfr_num, int) and isinstance(cfr_den, int) and cfr_den > 0 and cfr is not None:
+        want_cfr = round(cfr_num / cfr_den, 4)
+        if cfr != want_cfr:
+            problems.append(f"change_fail_rate {cfr!r} != {want_cfr} (numerator / denominator)")
+    if isinstance(cov_num, int) and isinstance(cov_den, int) and cov_den > 0 and cov is not None:
+        want_cov = round(cov_num / cov_den, 4)
+        if cov != want_cov:
+            problems.append(f"subject_coverage {cov!r} != {want_cov} (determinate / entries)")
+    if isinstance(cfr_num, int) and isinstance(cov_num, int) and cfr_num > cov_num:
+        problems.append(
+            "change_fail_rate_numerator exceeds subject_coverage_numerator: "
+            "a failure must be a determinate link"
+        )
+    if entries > 0 and cov_num == 0:
+        problems.append(
+            "no rework entry carries a determinate Subject: the numerator is 0 because "
+            "nothing is LINKED, not because nothing failed — a rate in that state cannot "
+            "be published (an empty rework log is exempt: there is nothing to link)"
+        )
+
+    # The two surfaces must name the same work unit as the denominator.
+    if rework.get("closed_subjects") != delivery.get("closed_subjects"):
+        problems.append("rework and delivery name different closed-subject denominators")
+    if delivery.get("closed_tasks") != delivery.get("closed_subjects"):
+        problems.append("closed_tasks and closed_subjects disagree")
+    if delivery.get("close_events", 0) < delivery.get("closed_subjects", 0):
+        problems.append("close_events < closed_subjects: a subject cannot close fewer times than it exists")
+    return problems
+
+def test_live_payload_states_both_forms():
+    problems = rate_form_problems(load_audit())
+    assert not problems, "; ".join(problems)
+
+def test_close_events_reconciles_with_the_ledger():
+    payload = load_audit()
+    rows, subjects = ledger_close_counts()
+    assert payload["delivery"]["close_events"] == rows, (
+        f"audit reports {payload['delivery']['close_events']} close rows, the ledger holds {rows}"
+    )
+    assert payload["delivery"]["closed_subjects"] == subjects, (
+        f"audit reports {payload['delivery']['closed_subjects']} closed subjects, "
+        f"the ledger holds {subjects}"
+    )
+
+def test_the_rate_is_derived_not_stated():
+    """The published numerator and coverage must be reproducible from the raw files."""
+    problems = derivation_problems(load_audit(), derive_fail_linkage())
+    assert not problems, "; ".join(problems)
+
+def test_the_derivation_gate_rejects_a_stated_numerator():
+    """The re-derivation must reject a number that was written, not computed."""
+    payload = load_audit()
+    derived = derive_fail_linkage()
+    assert derivation_problems(payload, derived) == [], "the live payload must reproduce"
+
+    bumped = json.loads(json.dumps(payload))
+    bumped["rework"]["change_fail_rate_numerator"] += 1
+    assert derivation_problems(bumped, derived), "a hand-raised numerator survived the independent read"
+
+    zeroed = json.loads(json.dumps(payload))
+    zeroed["rework"]["change_fail_rate_numerator"] = 0
+    if derived["failures"] != 0:
+        assert derivation_problems(zeroed, derived), "a zeroed numerator survived the independent read"
+
+    dropped = json.loads(json.dumps(payload))
+    dropped["rework"]["subject_coverage_denominator"] = 1
+    assert derivation_problems(dropped, derived), "a doctored coverage denominator survived the independent read"
+
+def test_gate_is_registered_in_the_audit():
+    src = AUDIT.read_text(encoding="utf-8")
+    registered = [ln for ln in src.splitlines() if GATE_CMD in ln and "gates_to_run.append" in ln]
+    assert registered, f"{GATE_CMD} is not registered in the audit gate list"
+
+def test_synthetic_probes_reject_each_regression():
+    """The invariant must reject bad input, not merely accept good input."""
+    good = {
+        "rework": {
+            "total_entries": 17,
+            "closed_subjects": 29,
+            "rework_share": round(17 / 46, 4),
+            "rework_per_close": round(17 / 29, 4),
+            "change_fail_rate": round(4 / 29, 4),
+            "change_fail_rate_numerator": 4,
+            "change_fail_rate_denominator": 29,
+            "subject_coverage": round(9 / 17, 4),
+            "subject_coverage_numerator": 9,
+            "subject_coverage_denominator": 17,
+        },
+        "delivery": {"closed_subjects": 29, "closed_tasks": 29, "close_events": 31},
+    }
+    assert rate_form_problems(good) == [], "the synthetic sound payload must pass"
+
+    # 1. The old single-name form reappears.
+    single = json.loads(json.dumps(good))
+    single["rework"][FORBIDDEN] = single["rework"].pop("rework_share")
+    assert any(FORBIDDEN in p for p in rate_form_problems(single))
+
+    # 2. The two forms collapse onto the per-close value.
+    collapsed = json.loads(json.dumps(good))
+    collapsed["rework"]["rework_share"] = collapsed["rework"]["rework_per_close"]
+    assert rate_form_problems(collapsed)
+
+    # 3. A form is renamed away entirely.
+    missing = json.loads(json.dumps(good))
+    del missing["rework"]["rework_per_close"]
+    assert any("rework_per_close" in p for p in rate_form_problems(missing))
+
+    # 4. The denominator disagrees between the two surfaces.
+    split = json.loads(json.dumps(good))
+    split["delivery"]["closed_subjects"] = 31
+    assert any("denominator" in p for p in rate_form_problems(split))
+
+    # 5. Fewer close rows than closed subjects.
+    short = json.loads(json.dumps(good))
+    short["delivery"]["close_events"] = 12
+    assert any("close_events < closed_subjects" in p for p in rate_form_problems(short))
+
+    # 6. The change fail rate is dropped from the payload.
+    no_rate = json.loads(json.dumps(good))
+    del no_rate["rework"]["change_fail_rate"]
+    assert any("change_fail_rate" in p for p in rate_form_problems(no_rate))
+
+    # 7. The coverage is dropped, leaving the rate unreadable on its own.
+    no_cov = json.loads(json.dumps(good))
+    del no_cov["rework"]["subject_coverage"]
+    assert any("subject_coverage" in p for p in rate_form_problems(no_cov))
+
+    # 8. The coverage denominator drifts off the entry count.
+    cov_drift = json.loads(json.dumps(good))
+    cov_drift["rework"]["subject_coverage_denominator"] = 46
+    assert any("total_entries" in p for p in rate_form_problems(cov_drift))
+
+    # 9. The change fail rate names a different population than the rework forms.
+    other_pop = json.loads(json.dumps(good))
+    other_pop["rework"]["change_fail_rate_denominator"] = 31
+    other_pop["rework"]["change_fail_rate"] = round(4 / 31, 4)
+    assert any("one population" in p for p in rate_form_problems(other_pop))
+
+    # 10. The numerator claims more failures than there are determinate links.
+    over = json.loads(json.dumps(good))
+    over["rework"]["change_fail_rate_numerator"] = 12
+    over["rework"]["change_fail_rate"] = round(12 / 29, 4)
+    assert any("determinate link" in p for p in rate_form_problems(over))
+
+    # 11. Entries exist and nothing is linked: the rate cannot be published.
+    unlinked = json.loads(json.dumps(good))
+    unlinked["rework"]["change_fail_rate_numerator"] = 0
+    unlinked["rework"]["change_fail_rate"] = 0.0
+    unlinked["rework"]["subject_coverage_numerator"] = 0
+    unlinked["rework"]["subject_coverage"] = 0.0
+    assert any("nothing is LINKED" in p for p in rate_form_problems(unlinked))
+
+    # 12. A rate that does not follow from its own numerator and denominator.
+    bad_math = json.loads(json.dumps(good))
+    bad_math["rework"]["change_fail_rate"] = 0.9
+    assert any("numerator / denominator" in p for p in rate_form_problems(bad_math))
+
+
+# ---------------------------------------------------------------------------
+# Rule 7/8 — the outcome reader (#53). The gate states its OWN copy of the domain:
+# a gate that borrows the reader's tuple cannot notice the tuple being widened.
+# ---------------------------------------------------------------------------
+
+OUTCOME_DOMAIN = ("accepted", "reworked", "abandoned", "failed")
+
+def outcome_reader_problems() -> list[str]:
+    """The reader must read a FIELD, validate the value, and default to UNKNOWN."""
+    problems: list[str] = []
+
+    if tuple(audit_reader.OUTCOME_DOMAIN) != OUTCOME_DOMAIN:
+        problems.append(
+            f"the reader's outcome domain is {tuple(audit_reader.OUTCOME_DOMAIN)!r}, "
+            f"this gate states {OUTCOME_DOMAIN!r}"
+        )
+
+    # An unstated outcome is UNKNOWN — never `accepted`. That default is the defect.
+    bucket, problem = audit_reader.declared_outcome("HQ closes #50, verified complete.")
+    if bucket != "unstated":
+        problems.append(f"a row stating no outcome was bucketed {bucket!r}, expected 'unstated'")
+    if problem is not None:
+        problems.append("a row stating no outcome was reported as malformed; absence is not a bad value")
+
+    # A malformed value is REPORTED when it sits IN the canonical run, never bucketed as
+    # a verdict — and the SAME token in prose is a mention, not a declaration (#498).
+    # The fixture is the ruling's: the token goes into the run (`board=closed {malformed}`),
+    # because a malformed token left in prose is not reported at all under a positional read
+    # and an arm asserting otherwise would be asserting the old prose scan.
+    for malformed in ("outcome=accepted.", "outcome=Accepted", "outcome=done"):
+        bucket, problem = audit_reader.declared_outcome(f"work landed. board=closed {malformed}")
+        if bucket in OUTCOME_DOMAIN:
+            problems.append(f"{malformed!r} was bucketed as the verdict {bucket!r}")
+        if not problem:
+            problems.append(f"{malformed!r} was not reported")
+        prose_bucket, prose_problem = audit_reader.declared_outcome(
+            f"work landed. {malformed} the sentence then continues. board=closed"
+        )
+        if prose_bucket != "unstated" or prose_problem is not None:
+            problems.append(
+                f"{malformed!r} in PROSE was read as {prose_bucket!r} {prose_problem!r}; "
+                f"the canonical run is positional and a token outside it declares nothing"
+            )
+
+    # An EMPTY value is a MENTION, not a declaration — `keyed_value` refuses an empty value
+    # by design, so `outcome=` states nothing even INSIDE the run. It belongs to the ABSENCE
+    # class, not the malformed one (#498 correction, superseding the ruling's Part 4 item 4
+    # for this entry: the prescribed fix would have moved it into the run, where it would
+    # still declare nothing, while the arm demanded a report).
+    for shape in ("work landed. board=closed outcome=", "work landed. outcome= board=closed"):
+        bucket, problem = audit_reader.declared_outcome(shape)
+        if bucket != "unstated":
+            problems.append(
+                f"an empty outcome value was bucketed {bucket!r}, expected 'unstated'"
+            )
+        if problem is not None:
+            problems.append(
+                "an empty outcome value was reported as malformed; a mention is not a value"
+            )
+
+    # A mention in prose is not the declaration: the writer appends its trailer LAST, so
+    # the last token is canonical. The old reader took the first and parsed `and` out of
+    # a dispatch row's sentence.
+    bucket, _ = audit_reader.declared_outcome(
+        "the outcome=accepted substring was the old reader's bug. cost_usd=1.0 outcome=failed"
+    )
+    if bucket != "failed":
+        problems.append(
+            f"the reader took an earlier prose mention over the canonical trailer: {bucket!r}"
+        )
+
+    # Every domain value must round-trip.
+    for value in OUTCOME_DOMAIN:
+        bucket, problem = audit_reader.declared_outcome(f"done. outcome={value} gate=all-pass")
+        if bucket != value or problem:
+            problems.append(f"the domain value {value!r} did not round-trip: {bucket!r} {problem!r}")
+
+    return problems
+
+def outcome_population_problems(payload: dict) -> list[str]:
+    """The populations must reconcile, and no bucket may be a verdict nobody stated."""
+    problems: list[str] = []
+    delivery = payload.get("delivery", {})
+
+    def invalid_rows(by_outcome: dict) -> int:
+        return sum(n for key, n in by_outcome.items() if key.startswith("invalid:"))
+
+    legs = (
+        ("run", delivery.get("runs_by_outcome", {}), "run_events",
+         "run_rows_stating_outcome", "unstated_run_rows"),
+        ("close", delivery.get("close_rows_by_outcome", {}), "close_events",
+         "close_rows_stating_outcome", "unstated_close_rows"),
+    )
+    for label, by_outcome, total_key, stated_key, unstated_key in legs:
+        total = delivery.get(total_key, 0)
+        stated = delivery.get(stated_key, 0)
+        unstated = delivery.get(unstated_key, 0)
+        if sum(by_outcome.values()) != total:
+            problems.append(
+                f"{label} buckets sum to {sum(by_outcome.values())}, but {total_key} is {total}"
+            )
+        if stated + unstated + invalid_rows(by_outcome) != total:
+            problems.append(
+                f"{label} rows do not partition: {stated} stating + {unstated} unstated + "
+                f"{invalid_rows(by_outcome)} invalid != {total} {total_key}"
+            )
+        if by_outcome.get("unstated", 0) != unstated:
+            problems.append(f"{label} unstated bucket {by_outcome.get('unstated', 0)} != {unstated_key} {unstated}")
+        # A verdict bucket nobody stated is how the favourable default returns.
+        for key in by_outcome:
+            if key not in OUTCOME_DOMAIN and key != "unstated" and not key.startswith("invalid:"):
+                problems.append(
+                    f"{label} bucket {key!r} is neither a domain value, 'unstated', nor an invalid: bucket"
+                )
+
+    population = delivery.get("first_pass_yield_population", 0)
+    if population != delivery.get("run_rows_stating_outcome", 0):
+        problems.append(
+            f"the yield's population {population} is not the rows stating an outcome "
+            f"({delivery.get('run_rows_stating_outcome', 0)})"
+        )
+    coverage = delivery.get("first_pass_yield_coverage", [])
+    if coverage != [population, delivery.get("run_events", 0)]:
+        problems.append(
+            f"the yield's coverage {coverage!r} does not state the population and the run rows"
+        )
+    yield_val = delivery.get("first_pass_yield")
+    if population == 0 and delivery.get("run_events", 0) > 0 and yield_val is not None:
+        problems.append(
+            f"no run row states an outcome, yet the yield is published as {yield_val!r} — "
+            "an undefined ratio must be null, never 1.0"
+        )
+
+    # The ratio must FOLLOW from the buckets the payload itself reports. Trusting the
+    # published number would let a reader that divided by every run row pass every
+    # structural check above while publishing a number no bucket supports.
+    accepted = delivery.get("runs_by_outcome", {}).get("accepted", 0)
+    if population > 0 and yield_val is not None:
+        # The payload carries the RAW ratio (#143), and the comparison is a TOLERANCE rather
+        # than an equality against a pre-rounded value: pinning 4 dp here would re-introduce
+        # exactly the second rounding the defect consisted of, and a gate whose expected
+        # value is a rounded form of the number under test cannot catch a rounding error.
+        expected = accepted / population
+        if abs(yield_val - expected) > 1e-9:
+            problems.append(
+                f"the published yield {yield_val} does not follow from {accepted} accepted "
+                f"÷ {population} runs stating an outcome (expected {expected})"
+            )
+
+    # A work unit cannot succeed without a close row saying so: this is the invariant the
+    # favourable default broke, and it is why a per-subject count is bounded by a row count.
+    successful = delivery.get("successful_closed_tasks", 0)
+    accepted_rows = delivery.get("close_rows_by_outcome", {}).get("accepted", 0)
+    if successful > accepted_rows:
+        problems.append(
+            f"successful_closed_tasks {successful} exceeds the {accepted_rows} close rows "
+            "that state an accepted outcome — a subject cannot succeed without a row saying so"
+        )
+
+    # And the cost ratio is re-derived the same way.
+    if successful > 0:
+        expected_cost = round(delivery.get("total_cost_usd", 0.0) / successful, 4)
+        if delivery.get("cost_per_successful_task_usd") != expected_cost:
+            problems.append(
+                f"the published cost per successful task "
+                f"{delivery.get('cost_per_successful_task_usd')} does not follow from "
+                f"{delivery.get('total_cost_usd')} ÷ {successful} (expected {expected_cost})"
+            )
+    return problems
+
+def test_the_outcome_reader_reads_a_field_and_validates_it():
+    problems = outcome_reader_problems()
+    assert not problems, "; ".join(problems)
+
+def test_the_outcome_populations_reconcile():
+    problems = outcome_population_problems(load_audit())
+    assert not problems, "; ".join(problems)
+
+def test_a_doctored_outcome_bucket_is_rejected():
+    """The invariant must reject bad input, not merely accept good input."""
+    payload = load_audit()
+    assert outcome_population_problems(payload) == [], "the live payload must reconcile"
+
+    # The favourable default, restored by hand: a verdict bucket no row stated.
+    doctored = json.loads(json.dumps(payload))
+    doctored["delivery"]["runs_by_outcome"]["accepted"] += 1
+    assert outcome_population_problems(doctored), "a hand-raised accepted bucket survived"
+
+    # A published ratio with no population behind it.
+    doctored = json.loads(json.dumps(payload))
+    doctored["delivery"]["first_pass_yield_population"] = 0
+    doctored["delivery"]["first_pass_yield"] = 1.0
+    assert outcome_population_problems(doctored), "a yield with no population survived"
+
+# ---------------------------------------------------------------------------
+# The close trailer's `rework` declaration — printed, never gated (#106)
+# ---------------------------------------------------------------------------
+
+# The vocabulary `audit.rework_bucket` answers in. This file states its own copy, as it
+# does for the outcome domain: a gate that borrows the reader's constants cannot catch a
+# reader that changed them.
+REWORK_WORK_UNIT = "work_unit"
+REWORK_NONE = "none"
+REWORK_UNSTATED = "unstated"
+
+def rework_bucket_problems() -> list[str]:
+    """The ONE classifier's forms, probed directly.
+
+    `audit_reader.rework_bucket` is shared — the audit's declaration count and
+    `tests/test_rework_declared_landed.py` both call it — so a slip here is a slip in
+    both, and the vocabulary is the one the rework log's Subject column uses.
+    """
+    problems: list[str] = []
+    cases = (
+        ("#7", REWORK_WORK_UNIT),
+        ("#102", REWORK_WORK_UNIT),
+        (SUBJECT_NONE, REWORK_NONE),
+        ("unstated", REWORK_UNSTATED),
+        ("seven", "invalid:seven"),
+        ("#", "invalid:#"),
+        ("#12x", "invalid:#12x"),
+        ("", "invalid:"),
+    )
+    for value, expected in cases:
+        got = audit_reader.rework_bucket(value)
+        if got != expected:
+            problems.append(f"rework value {value!r} bucketed {got!r}, expected {expected!r}")
+    return problems
+
+def read_rework_declarations(path: Path = LEDGER) -> dict:
+    """A SECOND, independent read of the declaration population — see rule 10.
+
+    It re-derives the canonical trailer boundary itself, walking the detail's tokens
+    from the END while they carry `=`, rather than importing
+    `field_predicate.trailer_tokens`. That is the point: a gate that borrows the
+    reader's pattern cannot catch the reader's pattern being wrong.
+
+    Returns the population the printed figure must match —
+    `rows_declaring` (close rows declaring `#N` or `none`), `buckets` (the same values
+    tallied by form) and `multi` (rows carrying MORE THAN ONE `rework` token, by row
+    number, which the audit's per-row count cannot see).
+    """
+    rows_declaring = 0
+    buckets = {REWORK_WORK_UNIT: 0, REWORK_NONE: 0, REWORK_UNSTATED: 0}
+    multi: list[int] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        ev = json.loads(line)
+        if ev.get("event") != "close" or not ev.get("subject"):
+            continue
+        values: list[str] = []
+        for token in reversed(str(ev.get("detail", "")).split()):
+            if "=" not in token:
+                break
+            if token.startswith("rework="):
+                value = token[len("rework="):]
+                if value:
+                    values.append(value)
+        if len(values) > 1:
+            multi.append(ev.get("n"))
+        declared = False
+        for value in values:
+            if SUBJECT_WORK_UNIT_RE.fullmatch(value):
+                buckets[REWORK_WORK_UNIT] += 1
+                declared = True
+            elif value == SUBJECT_NONE:
+                buckets[REWORK_NONE] += 1
+                declared = True
+            elif value == REWORK_UNSTATED:
+                buckets[REWORK_UNSTATED] += 1
+        if declared:
+            rows_declaring += 1
+    return {"rows_declaring": rows_declaring, "buckets": buckets, "multi": multi}
+
+def rework_declaration_problems(
+    payload: dict,
+    independent: dict | None = None,
+    exempt: dict[int, dict] | None = None,
+) -> list[str]:
+    """The printed declaration figure must MATCH an independent read (#106).
+
+    Nothing here thresholds the share — it is PRINTED, never gated (ruling `n=386`
+    clause 5). What is gated is the reader: a figure the audit publishes must equal the
+    population a second implementation measures on the same ledger, or it reports a
+    number nobody can re-derive.
+
+    The MULTIPLICITY leg is the one a declared exemption may reach (#496, ruling `n=3412`):
+    `exempt` keys the rows whose doubled declaration is admitted as visible debt, and an
+    entry that matches no such row is a problem of its own — a stale exemption inflates the
+    visible debt while excusing nothing.
+    """
+    problems: list[str] = []
+    delivery = payload.get("delivery", {})
+    if independent is None:
+        independent = read_rework_declarations()
+    if exempt is None:
+        exempt, exempt_problems = load_exemptions()
+        problems.extend(exempt_problems)
+
+    declared = delivery.get("close_rows_declaring_rework")
+    close_events = delivery.get("close_events", 0)
+    buckets = delivery.get("rework_declarations_by_bucket", {}) or {}
+    rate = delivery.get("rework_declaration_rate")
+
+    # The exemption arm sits AFTER the deficiency is established, never before it: an
+    # exemption may only excuse a row that genuinely carries the doubled declaration.
+    # Applied first it would excuse a clean row, and the stale-exemption check below could
+    # never see it — the row consumed before it could be judged (the shape the sibling
+    # close-board gate's own probe caught on 2026-10-03).
+    doubled = list(independent["multi"])
+    unexcused = [n for n in doubled if n not in exempt]
+    if unexcused:
+        problems.append(
+            "close row(s) declare the `rework` field more than once "
+            f"(n={unexcused}): the law gives a row one token"
+        )
+    for n in sorted(exempt):
+        if n not in doubled:
+            problems.append(
+                f"exemption n={n} matches NO close row declaring the `rework` field more "
+                f"than once — a stale exemption excuses nothing while inflating the "
+                f"visible debt ({exempt[n].get('reason')})"
+            )
+    if declared != independent["rows_declaring"]:
+        problems.append(
+            f"the audit prints {declared} close row(s) declaring a disposition, an "
+            f"independent read finds {independent['rows_declaring']}"
+        )
+    for form in (REWORK_WORK_UNIT, REWORK_NONE, REWORK_UNSTATED):
+        if buckets.get(form, 0) != independent["buckets"][form]:
+            problems.append(
+                f"the audit's {form!r} bucket is {buckets.get(form, 0)}, an independent "
+                f"read finds {independent['buckets'][form]}"
+            )
+    # A row declares ONE disposition, so the two declaring forms must sum to the row
+    # count — unless a row carried two tokens, which is reported above.
+    summed = buckets.get(REWORK_WORK_UNIT, 0) + buckets.get(REWORK_NONE, 0)
+    if not independent["multi"] and summed != declared:
+        problems.append(
+            f"the declaring buckets sum to {summed} but {declared} row(s) are counted"
+        )
+    if buckets.get(REWORK_UNSTATED, 0) > close_events - (declared or 0):
+        problems.append(
+            "the `unstated` bucket is larger than the undeclared population: a row "
+            "carrying the absence token cannot also be a row that declared nothing"
+        )
+    expected_rate = round(declared / close_events, 4) if close_events else 0.0
+    if rate != expected_rate:
+        problems.append(
+            f"the printed rate {rate} does not follow from {declared}/{close_events} "
+            f"(expected {expected_rate})"
+        )
+    if delivery.get("invalid_rework_reports") is None:
+        problems.append("the payload carries no invalid_rework_reports list")
+    return problems
+
+def test_the_rework_classifier_names_each_form():
+    problems = rework_bucket_problems()
+    assert not problems, "; ".join(problems)
+
+def test_the_printed_rework_declaration_figure_is_derived_not_stated():
+    # BOTH INVOCATION MODES PRINT THE DEBT (#496, ruling `n=3412` PART 6, item 4). The audit invokes this gate in
+    # pytest mode, and pytest never calls `main()` — so the `excused:` lines are printed
+    # here too, and a debt visible only in script mode would be invisible where the audit
+    # actually reads the gate.
+    independent = read_rework_declarations()
+    exempt, exempt_problems = load_exemptions()
+    for line in rework_excused(independent, exempt):
+        print(f"  excused: {line}")
+    problems = list(exempt_problems) + rework_declaration_problems(
+        load_audit(), independent, exempt
+    )
+    assert not problems, "; ".join(problems)
+
+def test_the_exemption_surface_admits_only_its_declared_ground():
+    """The surface must BITE, not merely accept (#496, ruling `n=3412` PART 6, item 2).
+
+    A rule that has only ever seen good input has not been shown to reject bad input, so
+    every arm below is a shape the surface MUST refuse: a wrong ground, a foreign domain, a
+    missing `reason`/`proof`, a malformed or duplicated entry — and the stale arm, which is
+    what keeps an exemption from outliving the row it was written for.
+    """
+    base = {
+        "n": 3399,
+        "subject": "#495",
+        "domain": AUDIT_RATES_EXEMPT_DOMAIN[0],
+        AUDIT_RATES_EXEMPT_BAR_KEY: AUDIT_RATES_EXEMPT_BAR_VALUE,
+        "reason": "probe",
+        "proof": "probe",
+    }
+
+    def load(entries: list) -> tuple[dict, list[str]]:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "audit-rates-exemptions.json"
+            path.write_text(json.dumps({"exemptions": entries}), encoding="utf-8")
+            return load_exemptions(path)
+
+    got, problems = load([base])
+    assert got.get(3399) and not problems, (got, problems)
+
+    # The GROUND is REQUIRED and refused outside its one lawful value — including the
+    # sibling surface's value, whose ground (truthfulness on a REACHABLE row) does not hold
+    # for this row (`docs/instruments/ledger.md` §9.12, ruling n=3412 PART 6, item 2).
+    for bad in (None, "", "no-truthful-value", "the repair space is empty"):
+        entry = dict(base)
+        if bad is None:
+            entry.pop(AUDIT_RATES_EXEMPT_BAR_KEY)
+        else:
+            entry[AUDIT_RATES_EXEMPT_BAR_KEY] = bad
+        got, problems = load([entry])
+        assert not got and problems, (bad, got, problems)
+
+    for entry in (
+        {**base, "reason": ""},
+        {**base, "proof": ""},
+        {**base, "domain": "the board close happened but was not recorded in the row"},
+        {**base, "n": "3399"},
+        "not-an-object",
+    ):
+        got, problems = load([entry])
+        assert not got and problems, (entry, got, problems)
+
+    # A DUPLICATE is a problem, and the FIRST entry stands: the loader reports the clash
+    # and does not let a second declaration of the same `n` overwrite the one it read.
+    got, problems = load([base, dict(base)])
+    assert any("declared twice" in p for p in problems), (got, problems)
+    assert got.get(3399) == base, got
+
+    # An exemption matching NO doubled row is a PROBLEM, never a silent pass; and an
+    # exempted row is EXCUSED rather than reported as a defect.
+    real = read_rework_declarations()
+    payload = load_audit()
+    stale = rework_declaration_problems(payload, {**real, "multi": []}, {3399: base})
+    assert any("matches NO close row" in p for p in stale), stale
+
+    # ADAPTED, and declared in registry/kit-exemptions.json (#126, measured 2026-11-05).
+    # The kit's live arms name `n=3399` / `#495`, which is the KIT's own ledger row: the
+    # kit's ledger holds exactly ONE close row declaring `rework` twice and that is it.
+    # A member whose ledger carries no doubled row cannot satisfy the arm, so the kit's
+    # unadapted form reds such a tree permanently with no exemption surface -- the #45 /
+    # #156 class. The arm now derives its subject from the LIVE population and, when the
+    # population is empty, STATES the skip instead of passing silently; the synthetic
+    # arms above (and the stale arm just above this block) keep the surface's bite.
+    live_multi = real.get("multi") or []
+    if not live_multi:
+        print(
+            "  stated skip: this ledger holds no close row declaring `rework` twice, so "
+            "the live-exemption arms have no row to exempt; the synthetic and stale arms "
+            "above still prove the surface bites"
+        )
+        return
+    live_n = live_multi[0]
+    live_subject = ""
+    for line in LEDGER.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        ev = json.loads(line)
+        if ev.get("n") == live_n:
+            live_subject = str(ev.get("subject") or "")
+            break
+    live_entry = {**base, "n": live_n, "subject": live_subject}
+    live = rework_declaration_problems(payload, real, {live_n: live_entry})
+    assert not live, live
+    assert rework_excused(real, {live_n: live_entry}), "the live entry printed nothing"
+
+def test_a_doctored_rework_declaration_figure_is_rejected():
+    """The reconciliation must reject bad input, not merely accept good input."""
+    payload = load_audit()
+    assert rework_declaration_problems(payload) == [], "the live payload must reconcile"
+
+    doctored = json.loads(json.dumps(payload))
+    doctored["delivery"]["close_rows_declaring_rework"] += 1
+    assert rework_declaration_problems(doctored), "a hand-raised declaration count survived"
+
+    doctored = json.loads(json.dumps(payload))
+    doctored["delivery"]["rework_declarations_by_bucket"]["none"] += 1
+    assert rework_declaration_problems(doctored), "a hand-raised bucket survived"
+
+    doctored = json.loads(json.dumps(payload))
+    doctored["delivery"]["rework_declaration_rate"] = 0.99
+    assert rework_declaration_problems(doctored), "a stated rate survived"
+
+
+def telemetry_scope_problems() -> list[str]:
+    """Rule 9 — telemetry is read from the canonical TRAILER, never from prose (#90).
+
+    `n=405` PART 5 rules the CLASS, not the three call sites it named, so the audit's
+    aggregator is in scope as a FOURTH site: it split the whole `detail` and took every
+    `key=value` token, which reads a row that REPORTS numbers as a row that TAKES them.
+    Measured on the live ledger, that over-reported cost by ~20% ($165.9265 against
+    $135.1871) because `n=382`, an INTAKE row, carries `cost_usd=26` meaning "26 close
+    rows carry cost_usd" — a census, and read as a value it was the second-largest
+    single cost in the ledger.
+
+    The probes below run a SYNTHETIC ledger through the real reader, so they pin the
+    reader's behaviour rather than a copy of it, and they assert both directions: prose
+    must not ADD to a total, and a declared trailer must still COUNT wherever it sits
+    (`run` rows carry telemetry too, so an event-scoped scope would drop 22 of them).
+    """
+    problems: list[str] = []
+    trailer = "closed; board=closed cost_usd=1.2500 tokens_in=10 tokens_out=20 turns=2"
+
+    def totals(rows: list[dict]) -> dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ledger.jsonl"
+            path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+            stats, _ = audit_reader.parse_ledger(path)
+        return {k: stats[k] for k in (
+            "total_cost_usd", "total_tokens_in", "total_tokens_out", "total_turns",
+            "out_of_trailer_count",
+        )}
+
+    def row(n: int, event: str, detail: str) -> dict:
+        return {
+            "n": n, "ts": "2026-09-19T00:00:00Z", "event": event,
+            "actor": "worker", "subject": "#90", "detail": detail,
+        }
+
+    # (a) A close row DECLARES its telemetry: the total must see it.
+    declared = totals([row(1, "close", trailer)])
+    if declared["total_cost_usd"] != 1.25:
+        problems.append(f"a declared close trailer was not counted: {declared}")
+
+    # (b) A `run` row DECLARES telemetry too. Scope is positional, ALL events — an
+    #     event-scoped scope would report 0 here, and 22 live `run` rows with it.
+    on_run = totals([row(1, "run", trailer)])
+    if on_run["total_cost_usd"] != 1.25:
+        problems.append(f"a declared run trailer was not counted (event-scoped scope?): {on_run}")
+
+    # (c) THE PHANTOM. The same numbers, in an INTAKE row that merely REPORTS them,
+    #     with prose after them so they are not terminal — `n=382`'s real shape. Its
+    #     own detail reads: "field-like tokens over the 52 close rows give outcome=34
+    #     gate=30 cost_usd=26 turns=25 duration=25 tokens_out=23" and then keeps
+    #     talking. A positional reader must see those as a CENSUS, never as spend.
+    census = (
+        "Marker absence: field-like tokens over the 52 close rows give outcome=34 gate=30 "
+        "cost_usd=26 turns=25 duration=25 tokens_out=23, and the marker test is not one "
+        "of them — the census counts rows, it does not measure them."
+    )
+    phantom = totals([row(1, "intake", census)])
+    if phantom["total_cost_usd"] != 0.0:
+        problems.append(f"PROSE WAS READ AS SPEND: a census row added {phantom['total_cost_usd']} USD")
+    if phantom["total_turns"] != 0 or phantom["total_tokens_out"] != 0:
+        problems.append(f"a census row's prose reached the token/turn totals: {phantom}")
+
+    # ...and it is not silently dropped either: the exclusion is VISIBLE, which is the
+    # only way a reader can tell an audited exclusion from an unnoticed loss.
+    if phantom["out_of_trailer_count"] != 1:
+        problems.append(
+            f"the out-of-trailer exclusion is invisible: count={phantom['out_of_trailer_count']}"
+        )
+
+    # (d) A row that QUOTES another row's trailer is the same defect one level down
+    #     (`n=561` quotes `n=554`, and then keeps writing). Quoted telemetry is a
+    #     mention, not a declaration.
+    quoted = totals([
+        row(1, "intake", f"the repaired row ends {trailer}, quoted here as its evidence, and then continues."),
+    ])
+    if quoted["total_cost_usd"] != 0.0:
+        problems.append(f"a QUOTED trailer was read as a declaration: {quoted}")
+
+    return problems
+
+# ---------------------------------------------------------------------------
+# #39 — the definition and the counted population must admit the same shapes.
+#
+# The ontology defines `work unit`; `closed_subjects` counts a population. When the
+# definition narrows to issues while the count stays unfiltered, every per-task
+# denominator answers a different question than the law states — the class P29 exists
+# to catch. This block couples the two. It does NOT pick a resolution: narrowing the
+# count and widening the definition are both consistent, and both pass. What it
+# refuses is the drift between them.
+# ---------------------------------------------------------------------------
+
+WORK_UNIT_TERM = "work unit"
+
+# The `## Canonical terms` table, read with the idiom the ontology gate uses for its
+# own section reads: the lookahead stops at the next heading of either level.
+TERMS_SECTION_RE = re.compile(
+    r"^## Canonical terms\s*$(.*?)(?=^## |^### )", re.MULTILINE | re.DOTALL
+)
+
+# A definition ADMITS a non-issue subject when it names that form. Vocabulary, not a
+# phrase match: the cell is prose and a lawful rewording must not red the gate.
+WORK_UNIT_ADMITS_NON_ISSUE = ("stem", "descriptive", "no board issue", "no issue")
+
+def work_unit_definition(ontology_path: Path = ONTOLOGY) -> str:
+    """The Definition cell of the `work unit` row, or "" when it cannot be read."""
+    match = TERMS_SECTION_RE.search(ontology_path.read_text(encoding="utf-8"))
+    if not match:
+        return ""
+    for line in match.group(1).splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = [c.strip() for c in stripped.split("|")]
+        # cells[0] is the empty run before the leading pipe, so the term is cells[1]
+        # and the definition cells[2] — the same offset the ontology gate relies on.
+        if len(cells) < 4 or cells[1].strip("`").strip().lower() != WORK_UNIT_TERM:
+            continue
+        return cells[2]
+    return ""
+
+def closed_subject_shapes(path: Path = LEDGER) -> tuple[int, int]:
+    """(issue-shaped, non-issue) among the DISTINCT closed subjects in the ledger.
+
+    Distinct SUBJECTS, never close rows — the same population `closed_subjects` counts,
+    split by the shape predicate the audit and the rework log already share.
+    """
+    subjects: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        ev = json.loads(line)
+        if ev.get("event") == "close" and ev.get("subject"):
+            subjects.add(ev["subject"])
+    issue_shaped = sum(1 for s in subjects if SUBJECT_WORK_UNIT_RE.fullmatch(s))
+    return issue_shaped, len(subjects) - issue_shaped
+
+def work_unit_definition_problems(
+    payload: dict, definition: str | None = None, ontology_path: Path = ONTOLOGY
+) -> list[str]:
+    """Every way the `work unit` definition and the counted population disagree.
+
+    The count's EXPECTED value is DERIVED from the definition, so the two cannot drift
+    in either direction: an issue-only definition requires an issue-shaped count, and a
+    definition that admits descriptive stems requires a count that keeps them. An
+    unreadable definition is reported, never read as agreement.
+    """
+    text = definition if definition is not None else work_unit_definition(ontology_path)
+    if not text:
+        return [
+            f"could not read the `{WORK_UNIT_TERM}` definition from {ontology_path.name} "
+            f"— an unreadable definition is not agreement"
+        ]
+
+    issue_shaped, non_issue = closed_subject_shapes()
+    admits_non_issue = any(t in text.lower() for t in WORK_UNIT_ADMITS_NON_ISSUE)
+    expected = issue_shaped + non_issue if admits_non_issue else issue_shaped
+    why = (
+        "the definition admits non-issue subjects, so the count must keep them"
+        if admits_non_issue
+        else "the definition is issue-only, so the count must be issue-shaped"
+    )
+
+    counted = (payload.get("delivery") or {}).get("closed_subjects")
+    if counted is not None and counted != expected:
+        return [
+            f"`{WORK_UNIT_TERM}`: {why} — expected {expected} ({issue_shaped} issue-shaped, "
+            f"{non_issue} descriptive stem(s)), closed_subjects reports {counted}; "
+            f"definition reads {text!r}"
+        ]
+    return []
+
+def test_the_row_and_the_report_state_the_SAME_yield():
+    """#143: one ratio, ONE rounding — the run row and the report beside it must agree.
+
+    Origin: the row TRUNCATED (`int(ratio * 100)`) while the report ROUNDED to 1 dp, so a
+    single run published two yields. Modelled over every `a/d` for d in 1..399, 74,451 of
+    80,199 pairs diverge, and the first is `1/3` — so a fix scoped by denominator threshold
+    would be scoped wrong, and the divergence is not rare.
+
+    The probe drives the ratio the defect was stated on, `2/7` (`int(28.57) = 28` against
+    `round(28.57, 1) = 28.6`), through BOTH renderers. It fails on pre-fix code in the row
+    arm, which is the arm no existing probe covered.
+    """
+    ratio = 2 / 7
+    stats = {
+        "first_pass_yield": ratio,
+        "first_pass_yield_population": 7,
+        "run_events": 7,
+        "runs_by_outcome": {"accepted": 2},
+    }
+    report = audit_reader.format_yield_rate(stats)
+    assert report == "28.6%", (
+        f"the report must round to one decimal, got {report!r} — and 28% is the TRUNCATED "
+        f"value the row used to publish for this same ratio"
+    )
+    text = audit_reader.format_yield_text(stats)
+    assert text.startswith("28.6% ("), (
+        f"the report's text form must state the same number as its table form: {text!r}"
+    )
+    # The ROW's arm, driven through the row's own builder. Pre-fix this rendered `28%`
+    # (`int(28.57)`), so this assertion is what the defect fails.
+    row = audit_reader.format_run_row_detail(stats, "accepted", "all-pass", 7.0)
+    assert "yield=28.6%" in row, (
+        f"the run row must state the same number as the report beside it, got {row!r} — "
+        f"pre-fix it truncated this ratio to 28%"
+    )
+    assert audit_reader.format_yield_percent(ratio) == report, (
+        "the row's renderer IS the report's renderer — that identity is the cure, and it "
+        "is what a second arithmetic site at the row breaks"
+    )
+    # The negative arm: `None` is UNKNOWN, never a favourable `0%`.
+    assert audit_reader.format_yield_percent(None) == "n/a", (
+        "an unstated yield must not render as 0%"
+    )
+
+def test_the_run_row_duration_comes_from_the_argument_not_a_literal():
+    """#276: `duration=` is a TELEMETRY key, so its value must be one the caller measured.
+
+    Origin: `format_run_row_detail` rendered a hardcoded `duration=4s`, so every
+    `internal-self-audit` row declared the same four seconds while a real audit of that
+    tree ran 771 s — and a lane read `n=1980`'s `duration=4s` as "a 4-second audit". That
+    is the #130 class (a hand-typed value in a measured field) one population over: #130
+    swept close rows, and run rows carry no provenance token at all.
+
+    TWO-SIDED, because a constant can satisfy a one-sided check: the same call with two
+    different elapsed values must produce two different trailers, and each must carry the
+    value it was GIVEN. The probe therefore fails on the pre-fix signature (it takes no
+    elapsed argument) AND on any fix that keeps rendering a literal.
+    """
+    stats = {"first_pass_yield": 1.0}
+    fast = audit_reader.format_run_row_detail(stats, "accepted", "all-pass", 3.0)
+    slow = audit_reader.format_run_row_detail(stats, "accepted", "all-pass", 771.55)
+    assert "duration=3s" in fast, f"the row must carry the elapsed value it was GIVEN: {fast!r}"
+    assert "duration=771s" in slow, (
+        f"a second call with another elapsed value must render that value — a trailer that "
+        f"does not vary with its argument is the hardcoded literal returning: {slow!r}"
+    )
+    assert fast != slow, (
+        "two runs of different length must not render identical trailers; equality here IS "
+        "the fabricated-measurement defect"
+    )
+    # The structural arm: the literal must not be reachable in the source at all.
+    src = AUDIT.read_text(encoding="utf-8")
+    assert "duration=4s" not in src, (
+        "the hardcoded duration is the defect; it must not return in any form"
+    )
+    # `turns=0` is honest and the key is NOT dropped — the sibling run rows carry varied,
+    # measured values, so the fix conforms the outlier rather than deleting the field.
+    assert "turns=0" in fast, "turns=0 is a true statement about a mechanical run and stays"
+    # The renderer's own unit arm, driven directly: sub-second runs are a measurement, not
+    # a floor, and the value is integer seconds matching every sibling row's form.
+    assert audit_reader.format_elapsed_seconds(0.4) == "0s", (
+        "a sub-second run renders 0s — a fact about the run, not a default"
+    )
+    assert audit_reader.format_elapsed_seconds(59.9) == "59s", (
+        "the renderer truncates to integer seconds, matching the sibling rows' form"
+    )
+
+def test_no_SECOND_arithmetic_site_renders_the_yield():
+    """#143's structural half: the row must not do its own percentage arithmetic.
+
+    A behavioural probe cannot see a second site that happens to agree on the day it runs;
+    this asserts the SHAPE that produced the disagreement — the row computing a percentage
+    itself. Both halves are needed: the behavioural one fails on the truncating expression,
+    and this one fails if that expression returns in any form.
+    """
+    src = AUDIT.read_text(encoding="utf-8")
+    assert "format_run_row_detail(ledger_stats, outcome, gate_summary, elapsed_secs)" in src, (
+        "the run row must render its yield through the one rounding site — and its duration "
+        "from the run's own measured clock (#276)"
+    )
+    assert "yield_pct" not in src, (
+        "no local percentage variable in the row: it IS the second arithmetic site"
+    )
+    assert "int(_yield * 100)" not in src, (
+        "the truncating expression is the defect; it must not return"
+    )
+    assert 'round(yield_val, 4)' not in src, (
+        "a pre-rounded payload is the second site the disagreement rode on — the parser "
+        "exposes the RAW ratio"
+    )
+
+def test_the_work_unit_definition_matches_the_counted_population():
+    problems = work_unit_definition_problems(load_audit())
+    assert not problems, "; ".join(problems)
+
+def test_the_definition_gate_rejects_a_narrowed_definition():
+    """The coupling must reject drift, not merely accept the wording that is live."""
+    payload = load_audit()
+    assert work_unit_definition_problems(payload) == [], "the live pair must agree"
+
+    # The pre-#39 wording: a definition that admits issues only.
+    assert work_unit_definition_problems(
+        payload, definition="One issue, from opened to closed"
+    ), "an issue-only definition survived against a count that keeps descriptive stems"
+
+    # The other direction: the definition admits descriptive stems while the count has
+    # been narrowed to issues. Both halves must bite, or the gate guards only one way.
+    filtered = json.loads(json.dumps(payload))
+    filtered["delivery"]["closed_subjects"] = 1
+    filtered["delivery"]["closed_tasks"] = 1
+    assert work_unit_definition_problems(filtered), (
+        "a count narrowed away from the definition survived"
+    )
+
+    # An unreadable definition is reported, never read as agreement.
+    assert work_unit_definition_problems(payload, definition="")
+
+
+def main() -> int:
+    payload = load_audit()
+
+    # The exemption surface (#496, ruling `n=3412` PART 6, item 4). Loaded ONCE, here, so the table's
+    # own problems and the `excused:` lines it produces are read from the same bytes the
+    # predicate below is handed. A malformed table is a defect in ANY tree — absent means
+    # "no exemptions", which is the shipped state — so its problems are added before the
+    # population guard rather than inside it.
+    exempt, exempt_problems = load_exemptions()
+    excused: list[str] = []
+
+    # The legs that judge a POPULATION this tree may legitimately not have yet (#83).
+    # They are guarded TOGETHER because absence propagates through all of them: with no
+    # ledger the payload's denominators are zeroed, so `rate_form_problems` would report
+    # a malformed rate that the tree cannot have, and the other four read the ledger, the
+    # rework log or the ontology DIRECTLY and raise. A leg that ran over that state would
+    # report a defect or a crash where the honest reading is "nothing to judge yet".
+    skip = evidence_skip_reason(REPO)
+
+    # These four read only the SHIPPED source and the payload's form, so they run in
+    # every tree — including the kit's own, where they are the whole of what can be said.
+    problems = outcome_reader_problems()
+    problems += outcome_population_problems(payload)
+    problems += rework_bucket_problems()
+    problems += telemetry_scope_problems()
+    problems += exempt_problems
+
+    if not skip:
+        # The directory IS present, so the ledger must be READABLE. A CORRUPT ledger is a
+        # failure the shared reader names (#164) — and the legs below re-read the SAME file
+        # with their own `json.loads`, so a named failure must also STOP them: appending the
+        # problem and running them anyway would red for the right reason while still crashing
+        # on the way, which is a traceback rather than the verdict the reader's law wants.
+        # This is the one shape gate and reader must agree on: absent = skip, unreadable = fail.
+        try:
+            read_rows(REPO)
+            ledger_readable = True
+        except SkipGate as exc:
+            problems.append(f"evidence/ exists but the ledger is not judgeable: {exc}")
+            ledger_readable = False
+        except GateError as exc:
+            problems.append(f"the ledger cannot be read: {exc}")
+            ledger_readable = False
+        if ledger_readable:
+            try:
+                problems += rate_form_problems(payload)
+                problems += derivation_problems(payload, derive_fail_linkage())
+                # One read, handed to both the predicate and the printer, so the excused
+                # lines and the excused verdict can never disagree about which rows carry
+                # the doubled declaration (#496).
+                independent_rework = read_rework_declarations()
+                excused = rework_excused(independent_rework, exempt)
+                problems += rework_declaration_problems(payload, independent_rework, exempt)
+                problems += work_unit_definition_problems(payload)
+            except FileNotFoundError as exc:
+                # The directory IS present and a file is gone: a live factory that lost its
+                # evidence. A real problem, reported by name — never read as a skip.
+                problems.append(f"instance file unreadable: {exc}")
+
+    if problems:
+        print("rate gate FAILED:", file=sys.stderr)
+        for p in problems:
+            print(f"  - {p}", file=sys.stderr)
+        return 1
+
+    if skip:
+        # Stated, never printed as zeros: a vacuous "0 of 0" reads as a measurement.
+        print(f"rate gate OK — population legs SKIPPED: {skip}")
+        return 0
+
+    # The declared debt, printed on EVERY run (#496, ruling `n=3412` PART 6, item 4): the entry
+    # is a visible debt, not forgiveness, and clean is never the same output as excused.
+    for line in excused:
+        print(f"  excused: {line}")
+
+    rows, subjects = ledger_close_counts()
+    rw = payload["rework"]
+    print(
+        f"rate forms OK — share {rw['rework_share']} = {rw['total_entries']}/({rw['closed_subjects']}"
+        f"+{rw['total_entries']}), per close {rw['rework_per_close']} = {rw['total_entries']}/{rw['closed_subjects']}"
+    )
+    print(
+        f"change fail rate OK — {rw['change_fail_rate']} = {rw['change_fail_rate_numerator']}"
+        f"/{rw['change_fail_rate_denominator']} closed work units, linkage coverage "
+        f"{rw['subject_coverage_numerator']}/{rw['subject_coverage_denominator']} "
+        f"({round(rw['subject_coverage'] * 100, 1)}%) — derived, not stated"
+    )
+    print(f"denominators reconciled — {rows} close rows over {subjects} distinct closed subjects")
+    issue_shaped, non_issue = closed_subject_shapes()
+    print(
+        f"work unit definition OK — admits all {issue_shaped + non_issue} closed "
+        f"subject(s): {issue_shaped} issue-shaped, {non_issue} descriptive stem(s); "
+        f"definition reads {work_unit_definition()!r}"
+    )
+    dl = payload["delivery"]
+    print(
+        f"rework declarations OK — {dl['close_rows_declaring_rework']} of "
+        f"{dl['close_events']} close rows declare a disposition "
+        f"({round(dl['rework_declaration_rate'] * 100, 1)}%), buckets "
+        f"{dl['rework_declarations_by_bucket']} — printed, never gated (n=386 clause 5); "
+        f"{len(dl['invalid_rework_reports'])} invalid value(s) reported"
+    )
+    print(
+        f"outcomes read as fields — yield population {dl['first_pass_yield_population']} of "
+        f"{dl['run_events']} run rows, coverage {dl['first_pass_yield_coverage']}; "
+        f"{dl['unstated_run_rows']} run and {dl['unstated_close_rows']} close rows state none "
+        f"(UNKNOWN, never accepted); {len(dl['invalid_outcome_reports'])} invalid value(s) reported"
+    )
+    # The closing line distinguishes CLEAN from EXCUSED (#496, ruling `n=3412` PART 6, item 4):
+    # a run that excused a row must never read as a run that found nothing.
+    if excused:
+        print(
+            f"rate gate OK — {len(excused)} doubled declaration(s) EXCUSED by "
+            f"{EXEMPTIONS_PATH.name}: visible debt, and the write path now REFUSES the "
+            f"shape (`tools/ledger.py append`), so no second row of this class can be "
+            f"written at all"
+        )
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

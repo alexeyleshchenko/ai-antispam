@@ -27,10 +27,16 @@ REPO = Path(__file__).resolve().parent.parent
 REWORK = REPO / "evidence" / "rework.md"
 
 COLUMNS = ["Date", "Source", "Defect", "Root cause", "Resolution", "Prevented by"]
+# The Subject column is NOT one of COLUMNS: `none` is a DEFINED answer here, while the
+# six above refuse `none` as a placeholder. Adding it to that list would make the one
+# lawful non-link value fail the completeness rule it is meant to satisfy.
+SUBJECT_NONE = "none"
+SUBJECT_WORK_UNIT_RE = re.compile(r"#\d+")
 PLACEHOLDERS = {"tbd", "todo", "n/a", "-", "?", "unknown", "none"}
 
-HEADER = "| Date | Source | Defect | Root cause | Resolution | Prevented by |"
-SEPARATOR = "|---|---|---|---|---|---|"
+HEADER = "| Date | Source | Defect | Root cause | Resolution | Prevented by | Subject |"
+SEPARATOR = "|---|---|---|---|---|---|---|"
+EXPECTED_CELLS = len(COLUMNS) + 1
 
 def section_body(text: str) -> str | None:
     """The body of the `## Entries` section, or None when it is absent."""
@@ -89,8 +95,8 @@ def check_text(text: str) -> tuple[list[str], int]:
         problems.append("no entries — an empty log cannot report a rework rate")
 
     for n, cells in rows:
-        if len(cells) != len(COLUMNS):
-            problems.append(f"row {n}: {len(cells)} cells, expected {len(COLUMNS)}")
+        if len(cells) != EXPECTED_CELLS:
+            problems.append(f"row {n}: {len(cells)} cells, expected {EXPECTED_CELLS}")
             continue
         date = cells[0]
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
@@ -103,6 +109,20 @@ def check_text(text: str) -> tuple[list[str], int]:
                     f"row {n} ({date}): '{label}' is a placeholder ({value!r}) — "
                     "say what is true, or 'nothing yet'"
                 )
+        # The change-fail numerator reads this cell and nothing else, so an empty or
+        # free-form value is a row the rate cannot see. Two forms are lawful: a work
+        # unit that closed, or the DECLARED answer that this defect belongs to none.
+        subject = cells[-1]
+        if not subject:
+            problems.append(
+                f"row {n} ({date}): 'Subject' is empty — name the work unit as #<n>, "
+                "or declare `none`"
+            )
+        elif subject != SUBJECT_NONE and not SUBJECT_WORK_UNIT_RE.fullmatch(subject):
+            problems.append(
+                f"row {n} ({date}): Subject {subject!r} is neither a work unit (#<n>) "
+                "nor `none` — the change-fail numerator can only see those two forms"
+            )
 
     problems.extend(contiguity_problems(body, len(rows)))
     return problems, len(rows)
@@ -115,8 +135,10 @@ def probe(name: str, text: str, want_problems: bool, failures: list[str]) -> Non
     if not ok:
         failures.append(name)
 
-def good_row(n: int) -> str:
-    return f"| 2026-09-12 | probe {n} | defect {n} | cause {n} | fix {n} | gate {n} |"
+def good_row(n: int, subject: str = "none") -> str:
+    return (
+        f"| 2026-09-12 | probe {n} | defect {n} | cause {n} | fix {n} | gate {n} | {subject} |"
+    )
 
 def main() -> int:
     if not REWORK.is_file():
@@ -150,6 +172,24 @@ def main() -> int:
     probe(
         "a duplicated header is caught",
         f"## Entries\n\n{HEADER}\n{SEPARATOR}\n{good_row(1)}\n{HEADER}\n{SEPARATOR}\n{good_row(2)}\n",
+        True, failures,
+    )
+    # The Subject column's own two controls: a determined link must PASS, and each of the
+    # two ways to say nothing the numerator can read must FAIL. Without these the column
+    # could be dropped from every row and the gate would still read clean.
+    probe(
+        "a Subject naming a work unit passes",
+        f"## Entries\n\n{HEADER}\n{SEPARATOR}\n{good_row(1, '#7')}\n",
+        False, failures,
+    )
+    probe(
+        "an empty Subject is caught",
+        f"## Entries\n\n{HEADER}\n{SEPARATOR}\n{good_row(1, '')}\n",
+        True, failures,
+    )
+    probe(
+        "a free-form Subject is caught",
+        f"## Entries\n\n{HEADER}\n{SEPARATOR}\n{good_row(1, 'tbd')}\n",
         True, failures,
     )
 

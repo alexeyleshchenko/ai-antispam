@@ -17,7 +17,7 @@ defect to fix, not a synonym to tolerate.
 | `owner` | The party accountable for a thing. When unqualified, refers to the human who approves and directs the factory. Not a lane, not a role | boss, admin, user, client, customer |
 | `HQ` | The lane that rules, holds the owner relationship, and owns law authorship | supervisor, lead, manager, boss, admin |
 | `lane` | A persistent session bound to one named place | worker session, thread, channel, chat session, agent |
-| `work unit` | One issue, from opened to closed | task, ticket, job, item |
+| `work unit` | Any subject that reaches a close: a board issue of the board the ledger records, or a descriptive stem where no issue exists — or where a second board's numbering would collide with that board's | task, ticket, job, item |
 | `surface` | The chat product a factory runs on | chat, channel, platform, messenger |
 | `law` | A factory's versioned, prescriptive process rules that bind agent execution | policy, guidelines, SOP, playbook, rules doc |
 | `process` | A recurring act that keeps a property true. It has an owner, a declared cadence, product(s) it delivers to its client(s), and a run that leaves a trace | workflow, routine, procedure, pipeline |
