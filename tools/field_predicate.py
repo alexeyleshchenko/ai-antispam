@@ -417,6 +417,27 @@ def _value_parses(key: str, value: str) -> bool:
         return True
     return telemetry_value_problem(key, value) is None
 
+OUTCOME_KEY = "outcome"
+
+def declared_outcome_values(detail: str) -> list[str]:
+    """Every `outcome` value `detail`'s CANONICAL TRAILER declares, in order.
+
+    The positional leg of the read, published so `tools/audit.py::declared_outcome` can
+    COMPOSE it rather than scan the text itself (#498). Until then that function was the
+    last field reader in the tree that did not go through this module: it took the LAST
+    `outcome=` token ANYWHERE in the detail, which equals the trailer read only while the
+    trailer is intact AND terminal.
+
+    An EMPTY value is a MENTION, not a declaration — `keyed_value` refuses an empty value
+    by design, so `outcome=` contributes nothing even inside the run.
+
+    A LIST, not a single value, for `_declared_values`' reason: a resolving caller must
+    see every token it has to resolve. A caller reading a DISPOSITION takes the last,
+    which is the law's canonical token and the only one the run can carry — `append`
+    refuses a run that declares a key twice (#496).
+    """
+    return _declared_values(detail, OUTCOME_KEY)
+
 def _declared_values(detail: str, key: str) -> list[str]:
     """Every `key` value `detail`'s CANONICAL TRAILER declares, in order.
 

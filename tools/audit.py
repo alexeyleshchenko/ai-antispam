@@ -24,6 +24,7 @@ import os
 import re
 import subprocess
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -37,7 +38,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # (its own dir is already sys.path[0]) and imported by `tests/` (which appends `tools/`)
 # -- without reordering anything.
 sys.path.append(str(Path(__file__).resolve().parent))
-from field_predicate import declared_cause_count  # noqa: E402
+from field_predicate import (  # noqa: E402
+    declared_cause_count,
+    declared_outcome_values,
+    declared_telemetry,
+    mentioned_telemetry,
+)
 from gate_budget import TIMEOUT_EXIT_CODE  # noqa: E402
 
 
@@ -74,6 +80,171 @@ def first_pass_yield_pct(accepted: int, total: int) -> float:
     return round(accepted / total * 100, 1) if total else 0.0
 
 
+# The `Subject` column's vocabulary, named once. `tests/test_rework.py` enforces the
+# same three values on the document; they live here as well because the audit *reads*
+# the column to derive a numerator, and a second hand-written pattern would let the
+# gate and the reader disagree about what a determinate link looks like.
+SUBJECT_NONE = "none"
+SUBJECT_PRE_COLUMN = "not recorded (pre-column)"
+SUBJECT_WORK_UNIT_RE = re.compile(r"#\d+")
+
+
+# The `outcome` field's domain, named once (`docs/processes.md`: accepted · reworked ·
+# abandoned · failed). Anything outside it is not an outcome, it is a typo.
+OUTCOME_DOMAIN = ("accepted", "reworked", "abandoned", "failed")
+
+def declared_outcome(detail: str) -> tuple[str, str | None]:
+    """What the row DECLARES about its outcome: (bucket, problem).
+
+    The bucket is one of the four domain values, or `"unstated"` when the row
+    declares no outcome at all, or `"invalid:<value>"` when it declares one outside
+    the domain. `problem` is a readable report for the two non-domain cases.
+
+    Three rules. The first is #53 (ruling n=333 clause 4); the other two are its
+    consequences, and the third was not delivered until #498 conformed this reader.
+
+    * **Read the CANONICAL TRAILER, not `outcome=` in free prose.** The read is
+      `field_predicate.declared_outcome_values` — the same positional read
+      (`trailer_tokens` -> `keyed_value`) that `declared_rework`, `declared_duty` and
+      `declared_telemetry_provenance` compose. It was NOT always so: until #498 this
+      function hand-rolled a scan of the WHOLE detail and took the LAST `outcome=`
+      token, which equals the trailer read only while the trailer is intact AND
+      terminal. The DOMAIN stays here, beside `OUTCOME_DOMAIN`; only the READ moved,
+      because a bucket is a classification and not a read.
+    * **An earlier mention is prose, not a declaration.** `#53`'s live instance was a
+      close row whose prose read `outcome=accepted.`, and the sentence's full stop
+      travelled inside the value — which dropped a genuinely accepted work unit out of
+      the success set.
+    * **A token OUTSIDE the run is never a value at all.** The old reader cured the
+      `#53` direction and left its mirror: measured at 3435 rows (#498), 61 rows
+      diverged from the positional read, every one of them on a token outside its run,
+      and the fabrications run BOTH ways — `n=2028` declares `telemetry=unavailable`
+      and read as `failed` off prose quoting another row's trailer, `n=3275` declares
+      `duty=completed` and read as `accepted` off a quotation, `n=1062` states it
+      deliberately carries no `outcome=` and read as declaring `,`.
+
+    An EMPTY value is a MENTION, not a declaration: `keyed_value` refuses an empty value
+    by design, so `outcome=` states nothing even inside the run and the row reads
+    UNKNOWN. A malformed value must be IN the run to be reported at all.
+
+    An unstated outcome is UNKNOWN. It is never `accepted`: that default is the
+    defect this clause removes, and it is why the two headline rates could only
+    report success.
+    """
+    values = declared_outcome_values(detail)
+    if not values:
+        return "unstated", None
+    value = values[-1]
+    if value in OUTCOME_DOMAIN:
+        return value, None
+    return (
+        f"invalid:{value}",
+        f"outcome value {value!r} is outside the domain {OUTCOME_DOMAIN} — "
+        f"reported, never bucketed as a verdict",
+    )
+
+def rework_bucket(value: str) -> str:
+    """The FORM of a declared `rework` value — one bucket, never a verdict (#106).
+
+    `work_unit` — a reference to the entry this close produced (`#N`), tested with the
+    same `SUBJECT_WORK_UNIT_RE` the rework log's Subject column uses, so the count here
+    and the gate that RESOLVES those references agree by construction. `none` — the close
+    states it produced no entry. `unstated` — the row carries the absence token itself
+    (#53 clause 2: an unrecorded disposition is UNKNOWN, never a value). `invalid:<value>`
+    — anything else, reported by name rather than bucketed as a disposition.
+
+    Classification lives here and not in `field_predicate.py` because it needs this
+    module's vocabulary (`SUBJECT_WORK_UNIT_RE`, `SUBJECT_NONE`) and importing upward
+    would invert the dependency; the POSITIONAL read stays there, where it is shared.
+    `tests/test_rework_declared_landed.py` imports THIS function, so a value is never
+    classified two ways.
+    """
+    if SUBJECT_WORK_UNIT_RE.fullmatch(value):
+        return "work_unit"
+    if value == SUBJECT_NONE:
+        return "none"
+    if value == "unstated":
+        return "unstated"
+    return f"invalid:{value}"
+
+def format_yield_percent(value: float | None) -> str:
+    """The yield as a percentage — THE rounding site, so every surface states one number.
+
+    Origin (#143): one ratio was rendered two ways. The run row's `yield=` TRUNCATED
+    (`int(ratio * 100)`) while the report ROUNDED to 1 dp, so a single run published two
+    yields — and the divergence is not a large-denominator curiosity: modelled over all
+    `a/d` pairs for d in 1..399, **74,451 of 80,199** diverge, the first at `1/3` (row
+    `33%` against report `33.3%`). A fix scoped by denominator threshold would therefore
+    be scoped wrong.
+
+    The cure is to remove the SECOND rounding rather than trade truncation for a smaller
+    error: this function is the only place a ratio becomes a percentage, and every
+    renderer calls it. `None` means no run row stated an outcome, which is `n/a` and
+    never `0%` — an unstated yield is UNKNOWN, not a failure.
+    """
+    return "n/a" if value is None else f"{round(value * 100, 1)}%"
+
+def format_elapsed_seconds(elapsed_secs: float) -> str:
+    """The run row's `duration=` value, rendered from the run's OWN measured wall time.
+
+    `duration=` is a TELEMETRY key — `docs/instruments/ledger.md` names it among the
+    measurements the tool supplies — so a value in it must be one the emitting path
+    measured. This function is the ONE site that renders it, and it takes the number as
+    an argument precisely so no literal can live in the key: a constant here would be a
+    fabricated measurement, which is not repaired by being small (#276, the #130 class).
+
+    Integer seconds, matching every sibling run row's form (`duration=3s`, `duration=0s`).
+    A sub-second run renders `0s`, which is a MEASUREMENT and not a floor: the audit
+    stamps its row after the whole gate suite, so `0s` is a fact about a run that took
+    less than a second, never a default standing in for an unmeasured one.
+    """
+    return f"{int(elapsed_secs)}s"
+
+def format_run_row_detail(
+    stats: dict[str, Any], outcome: str, gate_summary: str, elapsed_secs: float
+) -> str:
+    """The self-audit run row's canonical detail — the ONE site that renders its `yield=`.
+
+    Factored out so the row is PROBEABLE (#143): the row and the report disagreed because
+    each rendered the ratio itself, and a probe that can only reach the report cannot catch
+    the row's arithmetic. This function and the report's renderers all call
+    `format_yield_percent`, so their agreement is an identity rather than a coincidence.
+
+    `duration=` is rendered from `elapsed_secs` — the caller's own measurement of the run
+    — and never from a literal (#276). `turns=0` is honest: a mechanical run takes no agent
+    turns, so it stays.
+    """
+    return (
+        f"duration={format_elapsed_seconds(elapsed_secs)} turns=0 outcome={outcome} "
+        f"gate={gate_summary} "
+        f"yield={format_yield_percent(stats.get('first_pass_yield'))}"
+    )
+
+def format_yield_rate(stats: dict[str, Any]) -> str:
+    """The yield as a percentage, or `n/a` when no run row states an outcome."""
+    return format_yield_percent(stats.get("first_pass_yield"))
+
+def format_yield_text(stats: dict[str, Any]) -> str:
+    """First-Pass Yield with its population and its coverage (clause 5).
+
+    A rate is never printed alone. The undeclared rows are excluded from the ratio
+    and COUNTED BESIDE IT, because counting them as accepted is the defect and
+    counting them as failures would be a second fabrication in the other direction.
+    The coverage is a printed disclosure, never a gate (clause 6): against
+    append-only historical rows a threshold would be permanently RED with no lawful
+    repair, which is the empty-repair-space defect ruled at n=328.
+    """
+    value = stats.get("first_pass_yield")
+    population = stats.get("first_pass_yield_population", 0)
+    total = stats.get("run_events", 0)
+    accepted = stats.get("runs_by_outcome", {}).get("accepted", 0)
+    rate = ("n/a — no run row states an outcome" if value is None
+            else format_yield_percent(value))
+    return (
+        f"{rate} ({accepted} accepted runs ÷ {population} runs stating an outcome "
+        f"— coverage: {population} of {total} run rows)"
+    )
+
 def hygiene_namespace(repo_root: Path) -> str:
     """The scratch namespace this factory OWNS, resolved from ANY worktree (#174).
 
@@ -101,8 +272,52 @@ def hygiene_namespace(repo_root: Path) -> str:
     return git_dir.resolve().parent.name
 
 
-def parse_ledger(ledger_path: Path) -> dict[str, Any]:
-    """Parse ledger.jsonl and calculate operational delivery metrics, including token/cost economics."""
+def tree_condition(repo_root: Path) -> dict[str, Any]:
+    """The tree condition this run READ, so a verdict carries its own provenance (#150).
+
+    The audit reads the WORKING TREE -- it must, since that is the only tree a run has --
+    so a peer lane's half-written file produces a verdict about the repository that the
+    repository does not have. Measured twice, on the 2026-09-23 and 09-24 runs: a DEGRADED
+    verdict naming one failure whose file was VALID at HEAD and invalid only in an
+    uncommitted working-tree edit, so a reader took a lane's mid-turn state for a defect
+    of the repository.
+
+    The value is computed ONCE and both surfaces print FROM it, never re-deriving it: a
+    reader that recomputes the condition can disagree with the run that experienced it
+    (HQ ruling n=1167).
+
+    A tree that is not a checkout, or a git that cannot answer, yields `None` for the sha
+    and an EMPTY list. An unreadable tree is not a clean one, and `head_sha: None` says so
+    rather than rendering as zero modifications.
+    """
+    head_sha: str | None = None
+    modified: list[str] = []
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root, capture_output=True, text=True, timeout=10,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            head_sha = proc.stdout.strip()
+        proc = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=repo_root, capture_output=True, text=True, timeout=10,
+        )
+        if proc.returncode == 0:
+            for line in proc.stdout.splitlines():
+                if len(line) > 3:
+                    modified.append(line[3:].strip())
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return {"head_sha": head_sha, "modified_count": len(modified), "modified_paths": modified}
+
+def parse_ledger(ledger_path: Path) -> tuple[dict[str, Any], set[str]]:
+    """Parse ledger.jsonl and calculate operational delivery metrics, including token/cost economics.
+
+    Returns the metrics payload *and* the set of distinct closed work units. The set
+    travels beside the numbers rather than being re-derived per consumer, because it
+    IS the denominator every per-task rate names: handing each rate its own copy of
+    the count is how two rates come to state different populations (#34)."""
     if not ledger_path.is_file():
         return {
             "exists": False,
@@ -120,9 +335,11 @@ def parse_ledger(ledger_path: Path) -> dict[str, Any]:
             "total_tokens_in": 0,
             "total_tokens_out": 0,
             "total_turns": 0,
+            "out_of_trailer_rows": [],
+            "out_of_trailer_count": 0,
             "latest_closed_subject": None,
             "spot_check": None,
-        }
+        }, set()
 
     events: list[dict[str, Any]] = []
     with open(ledger_path, "r", encoding="utf-8") as f:
@@ -151,6 +368,7 @@ def parse_ledger(ledger_path: Path) -> dict[str, Any]:
     total_tokens_in = 0
     total_tokens_out = 0
     total_turns = 0
+    out_of_trailer_rows: list[dict[str, Any]] = []
 
     for ev in events:
         ev_type = ev.get("event", "unknown")
@@ -159,30 +377,38 @@ def parse_ledger(ledger_path: Path) -> dict[str, Any]:
         ts = ev.get("ts", "")
         detail = ev.get("detail", "")
 
-        # Parse key-value metadata from detail
-        for part in detail.split():
-            if "=" in part:
-                k, v = part.split("=", 1)
-                if k in ("cost_usd", "cost"):
-                    try:
-                        total_cost_usd += float(v.rstrip("$"))
-                    except ValueError:
-                        pass
-                elif k in ("tokens_in", "in_tokens"):
-                    try:
-                        total_tokens_in += int(v)
-                    except ValueError:
-                        pass
-                elif k in ("tokens_out", "out_tokens"):
-                    try:
-                        total_tokens_out += int(v)
-                    except ValueError:
-                        pass
-                elif k == "turns":
-                    try:
-                        total_turns += int(v)
-                    except ValueError:
-                        pass
+        # THE TRAILER SCOPE (#498, #34). Telemetry is read from the CANONICAL TRAILER,
+        # never from the whole detail: a `cost_usd=` quoted in a sentence is a MENTION of
+        # another row's figure, and aggregating it double-counts a row that already
+        # declared it. This was the last field reader in the tree that scanned text
+        # itself rather than composing the shared predicate. Measured at 3435 rows, 61
+        # diverge from the trailer read -- in BOTH directions, including a row read as
+        # `failed` off prose quoting a different row's trailer.
+        declared = declared_telemetry(detail)
+        for key, value in declared:
+            try:
+                if key in ("cost_usd", "cost"):
+                    total_cost_usd += float(value.rstrip("$"))
+                elif key in ("tokens_in", "in_tokens"):
+                    total_tokens_in += int(value)
+                elif key in ("tokens_out", "out_tokens"):
+                    total_tokens_out += int(value)
+                elif key == "turns":
+                    total_turns += int(value)
+            except ValueError:
+                pass
+
+        # VISIBILITY ONLY: the rows whose telemetry-shaped tokens sit OUTSIDE the trailer.
+        # They are NOT aggregated -- that is the whole point -- but a reader must be able
+        # to see what the trailer scope set aside, and where. A multiset difference, so a
+        # token both declared and merely mentioned still reports the mention.
+        leftover = Counter(f"{k}={v}" for k, v in mentioned_telemetry(detail)) - Counter(
+            f"{k}={v}" for k, v in declared
+        )
+        if leftover:
+            out_of_trailer_rows.append(
+                {"n": ev.get("n"), "event": ev_type, "tokens": sorted(leftover)}
+            )
 
         if ev_type == "intake" and subj and subj not in subjects_intake:
             subjects_intake[subj] = ts
@@ -264,9 +490,11 @@ def parse_ledger(ledger_path: Path) -> dict[str, Any]:
         "total_tokens_in": total_tokens_in,
         "total_tokens_out": total_tokens_out,
         "total_turns": total_turns,
+        "out_of_trailer_rows": out_of_trailer_rows,
+        "out_of_trailer_count": len(out_of_trailer_rows),
         "latest_closed_subject": latest_closed,
         "spot_check": spot_check,
-    }
+    }, set(subjects_close)
 
 
 def parse_rework(rework_path: Path, closed_tasks: int) -> dict[str, Any]:
@@ -376,7 +604,53 @@ GATE_WALLS_SEC: dict[str, float] = {
     # The spread is load, not the guard: the fixed sleeps put a floor under the runtime and
     # a ceiling on how far contention can stretch it.
     "tests/test_audit_stamp_duration.py": 53.0,
+    # The questions-store selftest drives EVERY verb of tools/questions and finishes with a
+    # `node render.mjs` build, so it is minutes, not seconds -- the kit's own budget for this
+    # same gate is 3373.43s from an 843.17s basis (margin_x 4.001), which is the corroboration
+    # that a 10-minute wall here is the gate's NORMAL shape and not a hang. Measured on this
+    # box 2026-11-05 under /usr/bin/time, n=1, co-tenant loaded regime: WALL=633.89s, rc=0.
+    # Derivation: 633.89 * (4.0 + 0.75/633.89) = 2536.31, rounded UP to the whole second per
+    # the 12.83s->53.0 precedent above -> 2537.0 (a 4.0013x factor on the measurement).
+    # REGIME NOTE: n=1. This gate is registered only so an unregistered gate cannot hide; its
+    # wall is deliberately generous because a timeout here reports a PASSING gate as a
+    # failure, which is the exact defect the 100.12s entry above was corrected for.
+    "tests/test_questions.py": 2537.0,
 }
+
+# PYTEST-FORM WALLS (#107). These nine gates have no `__main__`, so they run ONLY under
+# `-m pytest` — and the interpreter + plugin startup dominates their wall by an order of
+# magnitude over their own work. Measured 2026-11-05 on this box, whole-command wall vs
+# pytest's own reported time, n=1 each, co-tenant loaded regime:
+#
+#   test_binding_mechanism_exists.py     37.5s wall /  7.42s work
+#   test_close_telemetry_provenance.py   30.6s wall /  0.39s work
+#   test_hygiene_inflight.py             40.6s wall /  4.89s work
+#   test_hygiene_namespace.py            37.5s wall /  5.35s work
+#   test_insights_gate_recorded.py       26.5s wall /  0.59s work
+#   test_ledger_close_preflight.py       35.4s wall /  7.09s work
+#   test_registry_attest.py              29.5s wall /  0.24s work
+#   test_registry_render.py              22.9s wall /  0.16s work
+#   test_score_gate_recorded.py          30.5s wall /  0.40s work
+#
+# The DEFAULT_GATE_WALL_SEC of 30.0 would have killed six of the nine on the FIRST run, and
+# killed them into the worst shape: run_gate reports a timeout with duration 0.0 and the
+# exception in stderr, which is indistinguishable from an instant logic error. The declared
+# wall is the house 4x-of-worst precedent applied to the slowest measurement (40.6s -> 162.4)
+# and rounded DOWN to a round 150.0, which is 3.69x that worst and 4.0x the next one. Stated
+# as arithmetic rather than picked by feel (ai-antispam#64, #72).
+PYTEST_FORM_GATES: tuple[str, ...] = (
+    "tests/test_binding_mechanism_exists.py",
+    "tests/test_close_telemetry_provenance.py",
+    "tests/test_hygiene_inflight.py",
+    "tests/test_hygiene_namespace.py",
+    "tests/test_insights_gate_recorded.py",
+    "tests/test_ledger_close_preflight.py",
+    "tests/test_registry_attest.py",
+    "tests/test_registry_render.py",
+    "tests/test_score_gate_recorded.py",
+)
+for _pytest_gate in PYTEST_FORM_GATES:
+    GATE_WALLS_SEC[_pytest_gate] = 150.0
 
 
 def _gate_wall_key(cmd: list[str]) -> str:
@@ -560,6 +834,72 @@ def reported_cause(text: str, limit: int = GATE_CAUSE_LIMIT) -> str:
         return last[:limit]
     return f"{counted} \u2014 {last}"[:limit]
 
+# How STRONGLY one stream DECLARES its cause, ranked (kit #533). The rank is a property of
+# what the text CONTAINS, never of its length or its position, so an advisory block printed
+# before the real summary cannot promote a stream.
+GATE_CAUSE_STREAM_EMPTY = -1
+GATE_CAUSE_STREAM_PROSE = 0
+GATE_CAUSE_STREAM_COUNT = 1
+GATE_CAUSE_STREAM_DECLARED = 2
+
+def gate_cause_stream_rank(text: str) -> int:
+    """How STRONGLY one stream DECLARES its cause: empty < prose < count line < marker."""
+    if not text or not text.strip():
+        return GATE_CAUSE_STREAM_EMPTY
+    rank = GATE_CAUSE_STREAM_PROSE
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        if declared_cause_count(line) is not None:
+            return GATE_CAUSE_STREAM_DECLARED
+        if _COUNT_FIRST_RE.search(line):
+            rank = GATE_CAUSE_STREAM_COUNT
+    return rank
+
+def gate_cause_from_streams(stdout: str | None, stderr: str | None) -> str:
+    """THE STREAM JOIN, ranked by what each stream declares (kit #533).
+
+    #205 settled WHICH line inside one text is the cause: the tool's own declared marker
+    first, the count-line heuristic next, the last line last. The join ACROSS the two
+    streams then threw that precedence away: `reported_cause(stdout) or reported_cause(stderr)`
+    returns a non-empty string for ANY non-empty text (its last line at minimum), so a
+    non-empty stdout always won and stderr was never read. A gate that prints prose to
+    stdout and declares its count on stderr therefore recorded an INFORMATIONAL line as the
+    cause — measured on `tools/hygiene.py --audit --require-committed`, which writes its
+    supersession advisories to stdout and `oc-cause-count: 1` to stderr, so the note named a
+    different evidence file and dropped the count.
+
+    So the rank travels ACROSS the boundary, which is #205's rule applied one layer up: take
+    the higher-ranked stream, fall back to the other when one is empty, and when NEITHER
+    declares (both prose, or one empty) keep `stdout or stderr` so a tool that has not
+    adopted the marker reads byte-identically to before.
+
+    A tie keeps stdout, deliberately: equal rank means neither stream has a better claim, and
+    preserving the historical winner is the additive half of the change — with ONE exception.
+
+    WHEN BOTH STREAMS DECLARE AND THE COUNTS DISAGREE, the note names BOTH (kit HQ ruling
+    2026-10-21T12). Two streams carrying different totals is itself the finding: silently
+    keeping stdout would report one gate's failure count as if it were the other's, and the
+    disagreement — the only thing that says the two halves of one gate disagree about what
+    happened — would be the single fact the note omitted. Both counts are named BEFORE the
+    specimen text, so the bound can truncate a specimen but never a count.
+    """
+    out_text = stdout or ""
+    err_text = stderr or ""
+    out_rank = gate_cause_stream_rank(out_text)
+    err_rank = gate_cause_stream_rank(err_text)
+    if out_rank == GATE_CAUSE_STREAM_DECLARED and err_rank == GATE_CAUSE_STREAM_DECLARED:
+        out_count = declared_cause_count(out_text)
+        err_count = declared_cause_count(err_text)
+        if out_count is not None and err_count is not None and out_count != err_count:
+            return (
+                f"counts DISAGREE -- stdout {out_count}, stderr {err_count}: "
+                f"{reported_cause(out_text)} | {reported_cause(err_text)}"
+            )[:GATE_CAUSE_LIMIT]
+    if err_rank > out_rank:
+        return reported_cause(err_text)
+    return reported_cause(out_text) or reported_cause(err_text)
+
 def attach_gate_causes(gate_results: list[dict[str, Any]]) -> None:
     """Set `note` on every gate that did not pass, from the ONE predicate above.
 
@@ -571,7 +911,7 @@ def attach_gate_causes(gate_results: list[dict[str, Any]]) -> None:
         if g.get("passed"):
             g.pop("note", None)
             continue
-        g["note"] = reported_cause(g.get("stdout") or "") or reported_cause(g.get("stderr") or "")
+        g["note"] = gate_cause_from_streams(g.get("stdout"), g.get("stderr"))
 
 @dataclass
 class GateVerdict:
@@ -710,6 +1050,32 @@ def format_stale_basis_mark(g: dict) -> str:
 def stale_killed_gates(gate_results: list[dict]) -> list[dict]:
     """The KILLED/UNKNOWN gates whose declared basis is stale -- the join's own population."""
     return [g for g in gate_results if g.get("unknown") and g.get("stale_basis")]
+
+def render_tree_line(tree: dict[str, Any]) -> str:
+    """The provenance line beside the verdict (#150 criterion 2).
+
+    `DEGRADED` must never be readable without the tree it was read on: the measured
+    instance was a verdict that named a peer's half-written file, which a reader took as
+    a statement about HEAD. The count comes FIRST because it is the fact that decides
+    whether the failure list describes the repository or a lane's mid-turn edit, and the
+    paths follow so the reader can attribute without a second `git status`.
+    """
+    sha = tree.get("head_sha")
+    sha_txt = sha[:9] if sha else "UNREADABLE"
+    count = tree.get("modified_count", 0)
+    if not sha:
+        # NO COUNT HERE, and the omission is the point: git could not answer, so the
+        # modification count is UNKNOWN rather than zero. Printing "0 modified tracked
+        # path(s)" would assert the strongest provenance claim -- a clean tree -- on the
+        # weakest evidence, which is the false clean this whole field exists to prevent.
+        return ("  - Tree read: HEAD UNREADABLE, modification count UNKNOWN "
+                "\u2014 the verdict names no revision, so it is not a claim about any")
+    if count:
+        return (f"  - Tree read: HEAD {sha_txt} with {count} modified tracked path(s) "
+                f"\u2014 the verdict describes THIS tree, not necessarily HEAD: "
+                + ", ".join(tree.get("modified_paths", [])))
+    return (f"  - Tree read: HEAD {sha_txt}, 0 modified tracked path(s) "
+            f"\u2014 the verdict describes HEAD")
 
 def render_gate_line(g: dict[str, Any]) -> str:
     """One gate's verdict line: the cause and the state co-located (#74 leg 7).
@@ -928,23 +1294,95 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     if (repo_root / "tests/test_ledger_commit_cites_no_rows.py").is_file():
         gates_to_run.append([sys.executable, "tests/test_ledger_commit_cites_no_rows.py"])
 
-    # tests/test_ledger_close_preflight.py is DELIBERATELY NOT registered here, and the reason is
-    # measured rather than a preference -- it is registered where it already runs.
+    # ---------------------------------------------------------------------------------
+    # THE DECLARED-GATE SET (#107). Before this block, 38 files declared themselves gates
+    # and 37 were never registered, so they never ran — and the registration gate could
+    # only report that as ONE truncated line (it truncates at 90 characters, the n=571
+    # exempt-by-silence class). Each entry below is guarded by `is_file()` so a
+    # bootstrapped factory runs the subset it ships, and each was run to a verdict BEFORE
+    # registration: a gate registered while red turns the daily audit red, which is why the
+    # set is the PASSING set and the rest are declared on their own surface.
     #
-    # (1) CI RUNS IT. deploy.yml:69 is `uv run pytest --ignore=tests/integration -x`, which collects
-    #     its 7 test functions. Registering it here would run the same gate twice per audit.
-    # (2) THE WALL DOES NOT FIT IT. run_gate hardcodes timeout=30; this gate measured 24.35s wall
-    #     on an unloaded box (its own pytest time is 4.66s -- the rest is interpreter+plugin
-    #     startup under a cold cache). That is a 1.23x factor, not a margin, so it flakes under
-    #     load -- and flakes into the WORST shape: the except branch reports duration_sec 0.0 with
-    #     the exception in stderr, so a timeout is indistinguishable from an instant logic error.
-    # (3) It is pytest-MODE only (no __main__), so a bare-script registration would exit 0 having
-    #     executed ZERO checks -- a decorative green, the class this file's own gate 10 exists for.
-    #
-    # The fork's real gap is that this audit hardcodes its wall where the kit's reads
-    # tools/gate_budget.py + registry/gates.json (9 refs there, 0 here). Tracked as ai-antispam#64;
-    # porting the budget reader is what would let this gate be registered honestly.
+    # THE FORM IS NOT COSMETIC. Nine of these have no `__main__`, so `[sys.executable, path]`
+    # would exit 0 having executed ZERO checks — a decorative green, the exact class gate 10
+    # exists for. They are registered under `-m pytest` with the wall measured above. This is
+    # also why `test_ledger_close_preflight.py` is now registered in pytest form: the note
+    # that stood here refused it on three grounds, and two of the three are gone — the wall
+    # is DECLARED (150.0s against 35.4s measured) rather than the hardcoded 30.0s, and
+    # running it twice (CI and here) is not a defect but the cost of a gate that actually
+    # runs in the surface that reports. The third ground stands and is why the form matters.
+    # ---------------------------------------------------------------------------------
+    # script form — each carries its own `__main__` and returns a real exit code
+    if (repo_root / "tests/test_audit_cadence_own_run.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_audit_cadence_own_run.py"])
+    if (repo_root / "tests/test_audit_tree_condition.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_audit_tree_condition.py"])
+    if (repo_root / "tests/test_board_intake_recorded.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_board_intake_recorded.py"])
+    if (repo_root / "tests/test_brain_metrics.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_brain_metrics.py"])
+    if (repo_root / "tests/test_close_row_revision.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_close_row_revision.py"])
+    if (repo_root / "tests/test_commit_pair_hook.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_commit_pair_hook.py"])
+    if (repo_root / "tests/test_commit_session_trailer.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_commit_session_trailer.py"])
+    if (repo_root / "tests/test_criteria_count.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_criteria_count.py"])
+    if (repo_root / "tests/test_docs_sync.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_docs_sync.py"])
+    if (repo_root / "tests/test_duplicate_prose.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_duplicate_prose.py"])
+    if (repo_root / "tests/test_gate_fixtures_closure.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_gate_fixtures_closure.py"])
+    if (repo_root / "tests/test_gate_invocation_mode.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_gate_invocation_mode.py"])
+    if (repo_root / "tests/test_gate_registration.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_gate_registration.py"])
+    if (repo_root / "tests/test_ledger_identity.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_ledger_identity.py"])
+    if (repo_root / "tests/test_ledger_index.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_ledger_index.py"])
+    if (repo_root / "tests/test_ledger_no_shrink.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_ledger_no_shrink.py"])
+    if (repo_root / "tests/test_publish.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_publish.py"])
+    # Registered under #107: the questions store's own selftest. It drives every verb and
+    # the renderer, so its wall is declared in GATE_WALLS_SEC from a MEASURED runtime —
+    # the 120s fallback would kill a healthy gate and report UNKNOWN.
+    if (repo_root / "tests/test_questions.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_questions.py"])
+    if (repo_root / "tests/test_registry.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_registry.py"])
+    if (repo_root / "tests/test_roadmap_transition.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_roadmap_transition.py"])
+    if (repo_root / "tests/test_skill_version_contract.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_skill_version_contract.py"])
+    if (repo_root / "tests/test_subject_anchor.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_subject_anchor.py"])
+    if (repo_root / "tests/test_template_integrity.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_template_integrity.py"])
 
+    # pytest form — no `__main__`, so a bare-script registration would execute
+    # ZERO checks and exit 0. The wall is declared in GATE_WALLS_SEC above.
+    if (repo_root / "tests/test_binding_mechanism_exists.py").is_file():
+        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_binding_mechanism_exists.py", "-q"])
+    if (repo_root / "tests/test_close_telemetry_provenance.py").is_file():
+        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_close_telemetry_provenance.py", "-q"])
+    if (repo_root / "tests/test_hygiene_inflight.py").is_file():
+        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_hygiene_inflight.py", "-q"])
+    if (repo_root / "tests/test_hygiene_namespace.py").is_file():
+        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_hygiene_namespace.py", "-q"])
+    if (repo_root / "tests/test_insights_gate_recorded.py").is_file():
+        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_insights_gate_recorded.py", "-q"])
+    if (repo_root / "tests/test_ledger_close_preflight.py").is_file():
+        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_ledger_close_preflight.py", "-q"])
+    if (repo_root / "tests/test_registry_attest.py").is_file():
+        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_registry_attest.py", "-q"])
+    if (repo_root / "tests/test_registry_render.py").is_file():
+        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_registry_render.py", "-q"])
+    if (repo_root / "tests/test_score_gate_recorded.py").is_file():
+        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_score_gate_recorded.py", "-q"])
     results = []
     for cmd in gates_to_run:
         wall = _gate_wall(cmd)
@@ -1327,6 +1765,11 @@ def main() -> int:
     parser.add_argument("--output", type=str, default="", help="Custom report output file path")
     parser.add_argument("--stamp", action="store_true", help="Record run row into evidence/ledger.jsonl")
     parser.add_argument("--actor", type=str, default="hq", help="Actor role for ledger stamp (default: hq)")
+    parser.add_argument(
+        "--no-gates",
+        action="store_true",
+        help="Emit metrics only, skipping the mechanical gate suite (used by tests/test_audit_rates.py and tests/test_audit_tree_condition.py to avoid gate recursion). The verdict fields report null, never a green.",
+    )
     args = parser.parse_args()
 
     ledger_file = REPO_ROOT / "evidence/ledger.jsonl"
@@ -1337,8 +1780,8 @@ def main() -> int:
     # implying they hold when the reader opens the file: this run's own row lands after this
     # line. Read, never composed -- it is a clock read at the point of the read.
     ledger_read_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    ledger_stats = parse_ledger(ledger_file)
-    rework_stats = parse_rework(rework_file, ledger_stats.get("closed_tasks", 0))
+    ledger_stats, closed_subject_set = parse_ledger(ledger_file)
+    rework_stats = parse_rework(rework_file, len(closed_subject_set))
     # This run's OWN date, read BEFORE cadence so the artifact this run writes (or wrote in an
     # earlier `--report` pass) is never counted as a hole against itself. Hoisted here from
     # below the gate loop, where it sat after the cadence call it is now an input to.
@@ -1353,8 +1796,21 @@ def main() -> int:
     # stable cost while the run itself takes minutes. The population is the SAME one the
     # gate table below reports (the loop that runs the gates), measured the same way
     # `run_gate` measures each gate, so the row and the table describe one run.
+    # THE TREE THIS RUN READ (#150), computed ONCE and printed FROM this value by both
+    # surfaces -- a reader that recomputes the condition can disagree with the run that
+    # experienced it (HQ ruling n=1167). It describes the WORKING TREE, which is the only
+    # tree a run has, so a peer lane's half-written file is named rather than silently
+    # attributed to HEAD.
+    tree = tree_condition(REPO_ROOT)
+
     t_gates0 = datetime.datetime.now()
-    gate_results = execute_mechanical_gates(REPO_ROOT)
+    if args.no_gates:
+        # SKIPPED, never silently GREEN: `judge_gates(gates_ran=False)` returns a null
+        # verdict, so `--no-gates` cannot be mistaken for a passing suite. The flag exists
+        # because a gate that runs `audit.py` would otherwise recurse into itself.
+        gate_results = []
+    else:
+        gate_results = execute_mechanical_gates(REPO_ROOT)
     gate_loop_sec = (datetime.datetime.now() - t_gates0).total_seconds()
 
     # THREE states, not two (#72 / #74 leg 7). A gate that exhausted its budget did not run
@@ -1366,12 +1822,19 @@ def main() -> int:
     # gate said.
     attach_gate_causes(gate_results)
     cadence_ok = cadence_stats.get("cadence_held", True)
-    verdict = judge_gates(gate_results, cadence_ok=cadence_ok)
-    healthy = bool(verdict.healthy)
+    gates_ran = not args.no_gates
+    verdict = judge_gates(gate_results, cadence_ok=cadence_ok, gates_ran=gates_ran)
+    # KEEPS THE bool/None SHAPE (#28): `bool(None)` is False, which turned a SKIPPED
+    # suite into a measured failure -- the same vacuous-verdict defect in the opposite
+    # direction. None means "no verdict was taken", and the three consumers below each
+    # say so in their own vocabulary rather than folding it into a red.
+    healthy = verdict.healthy
 
     if args.json:
         payload = {
             "date": today,
+            "tree": tree,
+            "gates_skipped": not gates_ran,
             "healthy": healthy,
             "status": verdict.status,
             "all_gates_pass": verdict.all_known_pass,
@@ -1382,7 +1845,10 @@ def main() -> int:
             "gates": gate_results,
         }
         print(json.dumps(payload, indent=2))
-        return 0 if healthy else 1
+        # `healthy is None` is the SKIPPED suite (--no-gates), not a failure: nothing was
+        # measured, so nothing failed. Folding it into the 1 a gate failure returns would
+        # make "did not run" indistinguishable from "ran and failed".
+        return 0 if (healthy is None or healthy) else 1
 
     # Stamp BEFORE reporting (#38) — a scorecard is a statement about the ledger it is
     # written into, so the run row must exist before the figures are taken. Reporting
@@ -1391,7 +1857,7 @@ def main() -> int:
     # being reported, and the error ran in the favourable direction — the run that just
     # failed was not yet in its own denominator. Order is stamp -> re-parse -> report.
     if args.stamp:
-        outcome = "accepted" if healthy else "failed"
+        outcome = "accepted" if (healthy is None or healthy) else "failed"
         # The gate summary is derived from the GATES, never from `healthy`: a cadence-only
         # failure leaves every gate passing, and calling that `gate-failure` would name the
         # wrong leg. `gate-unknown` is a THIRD token because a gate that exhausted its budget
@@ -1450,7 +1916,7 @@ def main() -> int:
         # Recomputing it after this row lands would read ~0h since the last run on EVERY
         # run, so the leg would report HELD by construction and a genuinely missed cadence
         # would become unobservable — a silent green in the one place built to go red.
-        ledger_stats = parse_ledger(ledger_file)
+        ledger_stats, _ = parse_ledger(ledger_file)
     # Text summary output
     print(f"=== Factory Operational Self-Audit ({today}) ===")
     # The THREE-state headline (#72). `render_status_line` is the one place the state is
@@ -1481,7 +1947,7 @@ def main() -> int:
         out_path.write_text(report_md, encoding="utf-8")
         print(f"\nAudit report written to: {out_path}")
 
-    return 0 if healthy else 1
+    return 0 if (healthy is None or healthy) else 1
 
 
 if __name__ == "__main__":
