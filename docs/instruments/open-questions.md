@@ -239,6 +239,20 @@ The register carried fields no consumer reads, and one of them produced a false 
 
 **Bound: the stamp covers the LIVE register.** A set that has been archived carries its questions in the archive, which is history and is not rewritten to record a delivery — rewriting history to close a gap is worse than the gap. A question in the archive therefore still reads without a delivery record, and that is a stated bound, not an oversight.
 
+### 5.9 The set never closes — TTL expires the QUESTION, never the SET (#613)
+
+The owner's order, verbatim: *"TTL expires the QUESTION, never the SET. A factory set stays open at 0..N so the page and its lane anchors remain permanent."* The set is the STANDING container a factory's lane anchors resolve against; closing it is not a tidy-up, it is the removal of the surface. So `apply_mechanical_closures` closes **questions** and returns: it touches no set status. The write that did — `entry["status"] = "answered"` plus `closed_at` on any set whose every question happened to be closed — is deleted, and its absence is pinned by the tool's own selftest (`# -- 8e. #613`), which asserts the set is still `open` after `gc` closes every question in it. That arm was previously INVERTED, asserting the defect; an arm that asserts a bug goes RED on the correct fix, so it is inverted rather than joined by a second arm.
+
+**`set_is_closed` STAYS.** It is the predicate `gc --archive-closed` consults, and explicit archiving remains the one lawful way a set leaves the live register. A positive control in the same block keeps it TRUE for an all-closed set, so the fix cannot be traded away for the archive path.
+
+**`reopen <factory>` is the exit, and it is not any of its neighbours.** It sets `status="open"`, clears `closed_at` and `closed_reason`, touches **no question row**, is idempotent, and prints what it changed. It is NOT `amend` — that clears an answer and puts a question the owner already dismissed back on his page. It is NOT `gc --archive-closed` — that moves the set to `archive.jsonl` and restarts `qid` numbering at `q1`, fragmenting exactly the lane anchors this order protects. **Archiving is refused as a remedy for a wrongly-closed set.**
+
+**The contradiction was INERT until #497 armed it.** Before #497 widened `CLOSED_STATUSES` to name `resolved_mechanically`, `set_is_closed` returned `False` for such a set, so the closing write could never fire. #497 was correct for its own subject and is not reverted; it armed this one. This is why the defect was invisible for as long as it was — an unreachable branch is not a behaviour, and the comment recording that interval is the evidence.
+
+**The live instance is SHARED, and it is not this factory's to repair** ***(adapted: this tree's own finding, not the kit's text)***. The stamp was written by the shared writer into the shared store, so the damage is fleet-wide: at `2026-11-02T08:02:48Z` the `inferhub-watch` (12 questions) and `meta-factory` (48) sets were stamped `status=answered`, and `miidas` (7) at `:49Z` — all three still inside `open.json`, never archived, every question closed. This factory's own `ai-antispam` set reads `open` and was never affected. Repairing a wrongly-closed set is the OWNING lane's duty, not a bystander's: the store is one file, so a repair run here would write another factory's register, and a set reopened by a lane that does not hold the claim duplicates the duty rather than discharging it. The verb this file ports is what those lanes need; running it for them is not this lane's act.
+
+**No backfill.** Nothing in the interval is reconstructed in code or in any row: the register records what it is asked from the fix forward.
+
 ## 6. Ownership, and the reload leg
 
 | who | what |
