@@ -58,11 +58,74 @@ SUM_TOLERANCE_SEC = 0.25
 CONTROL_FLOOR = 0.8
 
 
+def _code_only(src: str) -> str:
+    """`src` with every DOCSTRING and COMMENT blanked, so prose cannot read as a literal.
+
+    A MENTION IS NOT A DECLARATION. This module's own prose, and `tools/audit.py`'s, cite
+    the form the fix removed — `duration=4s` — to say what the defect WAS. A raw-text scan
+    reads that citation as the defect itself, so the guard fired on the docstring that
+    documents it (measured 2026-11-05, #107: `tools/audit.py`'s `format_run_row_detail`
+    docstring names `duration=3s` / `duration=0s` as the sibling form, and the audit went
+    RED on a file whose stamp site interpolates correctly).
+
+    Blanking docstrings and comments keeps the scan EXACT: the pre-fix expression was an
+    f-string, which is CODE and survives this, so a real regression is still caught. The
+    two controls below hold both directions.
+
+    Falls back to the raw source if it will not parse: an unreadable file must never read
+    as clean, and a syntax error is caught by its own gate.
+    """
+    import ast
+    import io
+    import tokenize
+
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return src
+
+    lines = src.splitlines(keepends=True)
+
+    # Docstrings: the first statement of a module/class/function when it is a bare string.
+    for node in ast.walk(tree):
+        if not isinstance(
+            node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        ):
+            continue
+        body = getattr(node, "body", None)
+        if not body:
+            continue
+        first = body[0]
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            end = first.end_lineno or first.lineno
+            for i in range(first.lineno - 1, min(end, len(lines))):
+                lines[i] = "\n"
+
+    # Comments are prose too, and a literal cannot live in one.
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+            if tok.type != tokenize.COMMENT:
+                continue
+            row, col = tok.start
+            if row - 1 < len(lines):
+                line = lines[row - 1]
+                keep = line[:col]
+                lines[row - 1] = keep + ("\n" if line.endswith("\n") else "")
+    except (tokenize.TokenError, IndentationError):
+        return src
+
+    return "".join(lines)
+
+
 def check_source_carries_no_literal() -> list[str]:
     """The stamp site interpolates the duration; no numeric literal survives there."""
     problems: list[str] = []
     src = (REPO / "tools" / "audit.py").read_text(encoding="utf-8")
-    hits = sorted(set(STAMP_LITERAL.findall(src)))
+    hits = sorted(set(STAMP_LITERAL.findall(_code_only(src))))
     if hits:
         problems.append(
             f"tools/audit.py declares a hardcoded duration literal ({', '.join(hits)}); "
@@ -74,6 +137,20 @@ def check_source_carries_no_literal() -> list[str]:
         problems.append(
             "the pre-fix literal is NOT caught by this scan -- the check cannot detect a "
             "regression and is decorative"
+        )
+    # ...and it must catch that literal AS CODE, through the same reducer the live scan
+    # uses, or the two halves are different instruments and the control proves nothing.
+    if not STAMP_LITERAL.search(_code_only('detail = f"duration=4s turns=0"')):
+        problems.append(
+            "CONTROL: a real f-string literal is NOT caught through _code_only -- the "
+            "reducer is swallowing code, so the live scan is decorative"
+        )
+    # ...while PROSE that cites the same form is not a declaration. Without this the guard
+    # fires on the docstring that documents the defect it exists to catch.
+    if STAMP_LITERAL.search(_code_only('"""prose cites duration=4s"""\nx = 1')):
+        problems.append(
+            "CONTROL: a docstring mentioning the form IS read as a literal -- prose is "
+            "being judged as a declaration, and the guard will fire on its own docs"
         )
     return problems
 
