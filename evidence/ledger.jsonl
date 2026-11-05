@@ -281,3 +281,4 @@
 {"n": 281, "ts": "2026-11-03T06:06:01Z", "event": "run", "actor": "hq", "subject": "internal-self-audit", "detail": "duration=66.42s turns=0 outcome=accepted gate=all-pass verdict=GREEN yield=81.4%"}
 {"n": 282, "ts": "2026-11-03T06:10:18Z", "event": "run", "actor": "hq", "subject": "internal-self-audit", "detail": "duration=78.22s turns=0 outcome=accepted gate=all-pass verdict=GREEN yield=81.6%"}
 {"n": 283, "ts": "2026-11-04T05:55:37Z", "event": "run", "actor": "hq", "subject": "internal-self-audit", "detail": "duration=53.62s turns=0 outcome=accepted gate=all-pass verdict=GREEN yield=81.8%"}
+{"n": 284, "ts": "2026-11-05T05:55:00Z", "event": "run", "actor": "hq", "subject": "internal-self-audit", "detail": "duration=46.72s turns=0 outcome=accepted gate=all-pass verdict=GREEN yield=82.0%"}
