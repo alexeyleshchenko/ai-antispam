@@ -60,6 +60,32 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 LEDGER = REPO / "evidence" / "ledger.jsonl"
 
+# The DECLARED renumber map and the ONE canonicaliser that walks it. Both live in
+# `tools/` because the ledger's own sequence and claim-lifecycle legs consult the same
+# declaration, and a second copy of this walk here would be a second definition of what a
+# renumber means -- which is how two legs start disagreeing about one item (measured
+# 2026-11-05: `verify` printed "sequences complete" and "open claim: n=148 #74 -- no close
+# after it" in one breath, because the claim leg keyed on the raw subject while the close
+# had been filed under `#107`).
+sys.path.insert(0, str(REPO / "tools"))
+from ledger import canonical_subject  # noqa: E402
+from ledger_declaration import load_renumbers  # noqa: E402
+
+def declared_renumbers() -> dict[str, tuple[str, str]]:
+    """The factory's declared subject renumbers, or none when it declares none.
+
+    Loaded by DEFAULT inside the predicates rather than handed to each call site, because
+    the alternative is a consumer that forgets: this gate and the host-side runner
+    (`tools/patrol_host_state.py`) are two callers of one predicate, and a third would be
+    added by someone who never learns this declaration exists.
+
+    A malformed file RAISES rather than falling back to "no renumbers". The sibling
+    loaders state the reason: a declaration that quietly fails to load is
+    indistinguishable from no declaration, so the failure would surface as a false defect
+    about a board item instead of a broken map.
+    """
+    return load_renumbers(REPO)
+
 # The day the intake requirement became mechanically gated — the day this gate
 # landed. Subjects whose ledger activity predates it are excused, because their
 # intake row cannot be written now without backfilling a record that never was.
@@ -87,22 +113,25 @@ def open_issue_numbers(issues: list[dict]) -> set[int]:
             numbers.add(number)
     return numbers
 
-def intaken_numbers(rows: list[dict]) -> dict[int, object]:
+def intaken_numbers(rows: list[dict], renumbers: dict | None = None) -> dict[int, object]:
     """Issue number -> the `n` of the intake row that records it.
 
     Numeric subjects only: a descriptive subject is not an issue reference, so it
     is not evidence about intake in either direction.
     """
+    if renumbers is None:
+        renumbers = declared_renumbers()
     intaken: dict[int, object] = {}
     for row in rows:
         if row.get("event") != "intake":
             continue
-        number = issue_reference(row.get("subject"))
+        subject, _evidence = canonical_subject(str(row.get("subject") or ""), renumbers)
+        number = issue_reference(subject)
         if number is not None and number not in intaken:
             intaken[number] = row.get("n")
     return intaken
 
-def subjects_acted_without_intake(rows: list[dict]) -> list[str]:
+def subjects_acted_without_intake(rows: list[dict], renumbers: dict | None = None) -> list[str]:
     """The OFFLINE leg's population: numeric subjects carrying a `claim` or a
     `close` with no `intake` row of their own.
 
@@ -115,7 +144,9 @@ def subjects_acted_without_intake(rows: list[dict]) -> list[str]:
     concern, owned by the host runner (`tools/patrol_host_state.py`), which reads
     the board whole.
     """
-    intaken = intaken_numbers(rows)
+    if renumbers is None:
+        renumbers = declared_renumbers()
+    intaken = intaken_numbers(rows, renumbers)
     acted: set[str] = set()
     for row in rows:
         subject = row.get("subject")
@@ -123,12 +154,49 @@ def subjects_acted_without_intake(rows: list[dict]) -> list[str]:
             continue
         if row.get("event") in ("claim", "close"):
             acted.add(subject)
-    return sorted(s for s in acted if issue_reference(s) not in intaken)
+    out: list[str] = []
+    for subject in sorted(acted):
+        canonical, _evidence = canonical_subject(subject, renumbers)
+        if issue_reference(canonical) not in intaken:
+            out.append(subject)
+    return out
+
+def renumber_resolutions(rows: list[dict], renumbers: dict | None = None) -> list[str]:
+    """Every subject whose legs are split across two declared numbers, with its intake.
+
+    PRINTED, never silent. A predicate that resolves a renumber and then reports a bare
+    clean is indistinguishable from one that simply stopped looking -- the hole the
+    printed-population law exists to close (the kit ledger's n=571). So each resolution
+    names the subject the ledger files it under, the number it carries today, and the
+    intake row that satisfies it.
+    """
+    if renumbers is None:
+        renumbers = declared_renumbers()
+    intaken = intaken_numbers(rows, renumbers)
+    subjects = {
+        row.get("subject") for row in rows if isinstance(row.get("subject"), str)
+    }
+    out: list[str] = []
+    for subject in sorted(subjects):
+        if issue_reference(subject) is None:
+            continue
+        canonical, _evidence = canonical_subject(subject, renumbers)
+        if canonical == subject:
+            continue
+        satisfied = intaken.get(issue_reference(canonical))
+        where = (
+            f"its intake is filed under {subject} (n={satisfied})"
+            if satisfied is not None
+            else "it carries no intake row under either number"
+        )
+        out.append(f"renumber: {subject} is {canonical} today; {where}")
+    return out
 
 def board_intake_coverage(
     issues: list[dict],
     rows: list[dict],
     complete_board: bool = True,
+    renumbers: dict | None = None,
 ) -> dict[str, object]:
     """What each leg actually examined, so neither can be read as the other.
 
@@ -147,10 +215,10 @@ def board_intake_coverage(
     """
     return {
         "forward_issues_examined": len(open_issue_numbers(issues)),
-        "reverse_intake_rows_examined": len(intaken_numbers(rows)),
+        "reverse_intake_rows_examined": len(intaken_numbers(rows, renumbers)),
         "reverse_leg": "asserted over the FULL board" if complete_board
         else "SKIPPED — partial board list, so the reverse direction is not sound",
-        "offline_subjects_examined": len(subjects_acted_without_intake(rows)),
+        "offline_subjects_examined": len(subjects_acted_without_intake(rows, renumbers)),
         "excused_boundary": INVARIANT_LANDED,
     }
 
@@ -159,6 +227,7 @@ def board_intake_problems(
     rows: list[dict],
     exempt_before: str = INVARIANT_LANDED,
     complete_board: bool = True,
+    renumbers: dict | None = None,
 ) -> tuple[list[str], list[str]]:
     """Return (problems, excused) for a board issue list against a ledger.
 
@@ -169,8 +238,10 @@ def board_intake_problems(
     boundary = _parse_ts(exempt_before)
     problems: list[str] = []
     excused: list[str] = []
+    if renumbers is None:
+        renumbers = declared_renumbers()
 
-    intaken = intaken_numbers(rows)
+    intaken = intaken_numbers(rows, renumbers)
 
     # 1. Forward: an open issue the ledger never recorded as filed.
     for number in sorted(open_issue_numbers(issues)):
@@ -203,7 +274,7 @@ def board_intake_problems(
             continue
         first_row.setdefault(subject, (row.get("n"), str(row.get("ts") or "")))
 
-    for subject in subjects_acted_without_intake(rows):
+    for subject in subjects_acted_without_intake(rows, renumbers):
         n, ts = first_row.get(subject, (None, ""))
         try:
             when = _parse_ts(ts)
@@ -235,6 +306,43 @@ def _row(event: str, subject: str, n: int, ts: str) -> dict:
 
 # --- live gate: the ledger's own leg, which needs no board -----------------------
 
+def test_a_renumbered_subject_is_satisfied_by_its_pre_migration_intake() -> None:
+    """A board renumber splits one item's legs across two numbers. Measured 2026-11-05.
+
+    The intake and the claim were filed under the number the item had BEFORE the board
+    migration; its close carries the number it has now. Keyed on the raw subject, the
+    judged leg reported that close as having "no intake row of its own" -- a false defect
+    against a correctly filed item, and the reason the declaration exists at all.
+    """
+    rows = [_row("intake", "#74", 1, "2026-10-01T00:47:48Z"),
+            _row("claim", "#74", 2, "2026-10-01T01:21:01Z"),
+            _row("close", "#107", 3, "2026-11-05T17:40:19Z")]
+    declared = {"#107": ("#74", "probe: the board renumbered 74 -> 107")}
+
+    problems, _excused = board_intake_problems(
+        [], rows, complete_board=False, renumbers=declared
+    )
+    assert not problems, problems
+
+    # CONTROL: the same rows with the declaration WITHHELD must still be reported, or the
+    # probe proves only that the leg stopped looking.
+    control, _ = board_intake_problems([], rows, complete_board=False, renumbers={})
+    assert len(control) == 1 and "#107" in control[0], control
+
+def test_the_renumber_resolution_is_printed_with_its_intake_row() -> None:
+    """A resolution the reader cannot see is indistinguishable from no resolution."""
+    rows = [_row("intake", "#74", 1, "2026-10-01T00:47:48Z"),
+            _row("close", "#107", 3, "2026-11-05T17:40:19Z")]
+    declared = {"#107": ("#74", "probe: the board renumbered 74 -> 107")}
+
+    lines = renumber_resolutions(rows, declared)
+    assert len(lines) == 1, lines
+    assert "#74 is #107 today" in lines[0], lines
+    assert "n=1" in lines[0], lines
+
+    # CONTROL: no declaration, no resolution claimed.
+    assert renumber_resolutions(rows, {}) == []
+
 def test_live_ledger_records_its_subjects_as_intakes() -> None:
     """The board directions need a board; this leg needs only the ledger.
 
@@ -243,7 +351,11 @@ def test_live_ledger_records_its_subjects_as_intakes() -> None:
     sound over an empty list. What remains is the leg the suite can settle offline.
     """
     rows = _load_rows()
-    problems, excused = board_intake_problems([], rows, complete_board=False)
+    renumbers = declared_renumbers()
+    for line in renumber_resolutions(rows, renumbers):
+        print(f"  {line}")
+    problems, excused = board_intake_problems([], rows, complete_board=False,
+                                              renumbers=renumbers)
     for line in excused:
         print(f"  excused: {line}")
     if problems:
@@ -251,7 +363,8 @@ def test_live_ledger_records_its_subjects_as_intakes() -> None:
             "a subject carrying a claim or a close with no intake row of its own:\n  "
             + "\n  ".join(problems)
         )
-    coverage = board_intake_coverage([], rows, complete_board=False)
+    coverage = board_intake_coverage([], rows, complete_board=False,
+                                     renumbers=renumbers)
     print(
         f"board-intake gate (ledger leg): "
         f"offline leg examined {coverage['offline_subjects_examined']} subject(s) "
