@@ -25,3 +25,7 @@ src/tg_ai_blocker.egg-info/
 # Derived ledger index — a rebuildable binary blob, never a source of truth (tests/test_ledger_index.py)
 evidence/.ledger-index.sqlite
 evidence/.ledger-index.sqlite-journal
+
+# In-flight guard lock (tests/test_audit_inflight_guard.py) — an advisory flock target,
+# created empty and left behind whenever the holding run is killed. Runtime state, never source.
+.audit.lock
