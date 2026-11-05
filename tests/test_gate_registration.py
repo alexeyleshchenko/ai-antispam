@@ -110,6 +110,7 @@ from gate_registry import (  # noqa: E402
     declared_splits,
     dual_form,
     load_gate_deferrals,
+    module_level_test_defs,
     manifest_drift_problems,
     optional_gate_lines,
     reads_a_docstring,
@@ -812,6 +813,61 @@ def probe_a_dead_reference_is_reported() -> None:
               report["unregistered"] == [] and len(report["dead_reference"]) == 1,
               str(report["dead_reference"]))
 
+def probe_a_nested_live_mechanism_is_not_called_absent() -> None:
+    """Direction 4 (b'): a law names a pytest suite that LIVES in a subdirectory.
+
+    Measured 2026-11-05 (#107 task 6): the rework log names `test_channel_management.py`
+    as the mechanism upholding a bot fix. The file is live at
+    `tests/handlers/test_channel_management.py` and was never at the top level, but the
+    resolver probed `tests/<name>` ONLY and reported "no such file under tests/" — a zero
+    from an instrument blind to the class it hunts (rule 7). The file is pytest-shaped
+    with no `__main__` guard, so it is not a candidate for the audit's script-gate list
+    either; the truthful answer is PRESENT, at its real path, out of that namespace.
+
+    TWO CONTROLS, because the fix is a bucket and a bucket is how a gate goes quiet:
+    the first proves the same tree still reports a genuinely absent name as dead, the
+    second proves a TOP-LEVEL pytest-shaped file still lands in `unregistered` — so no
+    gate escapes registration by being rewritten into the shape the bucket excuses.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        tests = root / "tests"
+        (tests / "handlers").mkdir(parents=True)
+        (tests / "handlers" / "test_nested.py").write_text(
+            "def test_something():\n    assert True\n", encoding="utf-8"
+        )
+        (tests / "test_toplevel_pytest.py").write_text(
+            "def test_something():\n    assert True\n", encoding="utf-8"
+        )
+        audit = root / "audit.py"
+        audit.write_text("# an audit that registers nothing\n", encoding="utf-8")
+        rework = root / "rework.md"
+        rework.write_text(
+            REWORK_HEADER
+            + "| 2026-01-01 | #1 | defect | cause | fix | test_nested.py | s |\n"
+            + "| 2026-01-02 | #2 | defect | cause | fix | test_toplevel_pytest.py | s |\n"
+            + "| 2026-01-03 | #3 | defect | cause | fix | test_nowhere.py | s |\n",
+            encoding="utf-8",
+        )
+        skill = root / "skill.md"
+        skill.write_text("no mechanism named here\n", encoding="utf-8")
+
+        problems, report = law_coverage_problems(tests, audit, rework, skill)
+
+        check("direction 4 — a nested live pytest suite is DECLARED present, not dead",
+              any("test_nested.py" in e and "handlers" in e
+                  for e in report["nested_not_a_gate"])
+              and not any("test_nested.py" in p and "dead reference" in p
+                          for p in problems),
+              str(report["nested_not_a_gate"]))
+        check("direction 4 — CONTROL: a name that exists nowhere is STILL a dead reference",
+              any("test_nowhere.py" in p and "dead reference" in p for p in problems),
+              str(report["dead_reference"]))
+        check("direction 4 — CONTROL: a TOP-LEVEL pytest-shaped gate is still UNREGISTERED, "
+              "so the nested bucket is not an escape hatch",
+              any("test_toplevel_pytest.py" in u for u in report["unregistered"]),
+              str(report["unregistered"]))
+
 def probe_a_declared_split_resolves_a_retired_name() -> None:
     """Direction 4 (c): a law names a file the tree SPLIT into legs that all run.
 
@@ -1024,8 +1080,16 @@ def probe_the_live_law_coverage_is_clean() -> None:
         f"{report['registered']} registered tests/ path(s) — "
         f"unregistered: {len(report['unregistered'])}, "
         f"dead references: {len(report['dead_reference'])}, "
+        f"nested pytest suites (out of the audit's script-gate namespace): "
+        f"{len(report['nested_not_a_gate'])}, "
         f"{len(problems)} problem(s)"
     )
+    # PRINTED AT ZERO TOO. The nested bucket is the one a reader would never know existed:
+    # it exists so a LIVE mechanism is not called absent, and a bucket that prints only
+    # when non-empty is indistinguishable from a bucket that was never computed. Each
+    # entry names the real path, so the claim "present" is checkable rather than trusted.
+    for entry in report["nested_not_a_gate"]:
+        print(f"    nested (not an audit gate): {entry}")
     check("every mechanism a recorded law names is registered", problems == [],
           "; ".join(problems)[:90])
 
@@ -1181,6 +1245,56 @@ def main() -> int:
 if __name__ == "__main__":
     raise SystemExit(main())
 """
+
+def probe_a_test_def_inside_a_string_is_NOT_a_definition() -> None:
+    """A `def test_*` inside a STRING is not a module-level definition (#107).
+
+    Measured 2026-11-05: the shape was read with a regex over the file's raw text, so the
+    DUAL-form fixtures BELOW — module-level string literals carrying `def test_one()` —
+    made the file that DEFINES direction 5 read as a pytest-form target, and the gate
+    reported ITSELF: "cannot run its target: every test leg is DEAD". The file has no
+    module-level test function. The message was wrong, and the repair it invites —
+    re-registering a gate that already runs — is the one thing #107 forbids, which is why
+    this is a probe and not a note.
+    """
+    wrapped = (
+        'FIXTURE = """\n'
+        'def test_one() -> None:\n'
+        '    assert True\n'
+        '"""\n'
+        '\n'
+        'def main() -> int:\n'
+        '    return 0\n'
+        '\n'
+        'if __name__ == "__main__":\n'
+        '    raise SystemExit(main())\n'
+    )
+    check("direction 5 — a `def test_*` inside a STRING is not a module-level definition",
+          target_form(wrapped) == SCRIPT_RUNNER, f"got {target_form(wrapped)}")
+    check("direction 5 — and it names NO module-level test def",
+          module_level_test_defs(wrapped) == (), f"got {module_level_test_defs(wrapped)}")
+    # CONTROL: the same declaration OUTSIDE a string is a real definition, so the clause
+    # above cannot be satisfied by a predicate that simply stopped reading.
+    outside = (
+        'def test_one() -> None:\n'
+        '    assert True\n'
+        '\n'
+        'def main() -> int:\n'
+        '    return 0\n'
+        '\n'
+        'if __name__ == "__main__":\n'
+        '    raise SystemExit(main())\n'
+    )
+    check("direction 5 — CONTROL: the same def OUTSIDE a string IS one",
+          target_form(outside) == PYTEST_RUNNER
+          and module_level_test_defs(outside) == ("test_one",),
+          f"got {target_form(outside)} / {module_level_test_defs(outside)}")
+    # THE LIVE LEG: the file carrying this probe reads script-form, so a regression here
+    # reds the gate that runs it rather than waiting for a reader to notice.
+    live = Path(__file__).read_text(encoding="utf-8")
+    check("direction 5 — this gate's OWN file reads script-form, not pytest-form",
+          target_form(live) == SCRIPT_RUNNER and module_level_test_defs(live) == (),
+          f"got {target_form(live)} / {module_level_test_defs(live)}")
 
 def probe_a_dual_form_target_is_NOT_a_mismatch() -> None:
     """A file whose `main()` runs the same checks the wrappers do CAN run under a script.
@@ -4642,6 +4756,7 @@ def main() -> int:
     probe_a_prose_mention_is_not_a_mechanism()
     probe_only_the_prevented_by_column_is_read()
     probe_a_dead_reference_is_reported()
+    probe_a_nested_live_mechanism_is_not_called_absent()
     print("  synthetic probes — #602: a declared SPLIT resolves a retired name")
     probe_a_declared_split_resolves_a_retired_name()
     probe_a_split_with_an_absent_successor_does_not_resolve()
@@ -4657,6 +4772,7 @@ def main() -> int:
     probe_the_same_target_under_the_pytest_runner_is_clean()
     probe_a_script_style_target_under_the_pytest_runner_is_not_reported()
     probe_a_file_with_a_main_guard_is_still_pytest_form()
+    probe_a_test_def_inside_a_string_is_NOT_a_definition()
     probe_a_dual_form_target_is_NOT_a_mismatch()
     probe_the_dual_form_gaps_reach_the_report()
     probe_the_runner_is_read_from_argv_not_guessed_from_the_target()

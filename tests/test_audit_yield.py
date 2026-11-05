@@ -1,4 +1,4 @@
-"""#38 guard: the run row and the scorecard state the SAME yield for ONE run.
+"""Gate: the run row and the scorecard state the SAME yield for ONE run (#38).
 
 Why this file exists
 --------------------

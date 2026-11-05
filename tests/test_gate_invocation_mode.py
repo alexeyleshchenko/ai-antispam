@@ -88,7 +88,13 @@ def invoked_gates(audit_path: Path = AUDIT) -> dict[str, str]:
         if path in found:
             # A path invoked twice is reported by the both-forms probe below; keeping the
             # FIRST form here would silently pick a winner, so the map holds the pair.
-            found[path] = f"{found[path]}+{mode}"
+            # DEDUPLICATED (measured 2026-11-05, #107): this tree invokes `tools/hygiene.py`
+            # twice, both times as a script, and the accumulate-as-you-go form wrote
+            # `script+script` — which `emit_modes` then refused as AMBIGUOUS because its
+            # predicate is `"+" in form`. Two call sites that AGREE are not a pair, and the
+            # refusal was the emitter firing on agreement, so the set is joined instead of
+            # the string being appended to.
+            found[path] = "+".join(sorted(set(found[path].split("+")) | {mode}))
         else:
             found[path] = mode
     return found
@@ -274,10 +280,23 @@ def probe_the_EMITTER_prints_the_map_the_gate_judges() -> None:
         rc = emit_modes()
     assert rc == 0, f"emit_modes returned {rc} on a tree whose call sites DO parse"
     emitted = json.loads(buf.getvalue())
+    assert emitted == invoked, (
+        "the emitted map and the call sites must be ONE map — "
+        f"emitted={len(emitted)}, invoked={len(invoked)}"
+    )
+    # The DECLARATION half is FACTORY DATA and a member ships none (#199), so on a member
+    # tree the manifest is ABSENT and this leg is a STATED SKIP — never a crash. Measured
+    # 2026-11-05 (#107): `declared_modes()` raised FileNotFoundError straight out of the
+    # probe, so the gate died with a traceback on the one tree shape it was meant to
+    # tolerate. The emitter/call-site agreement above still runs, which is the half that
+    # holds without a manifest.
+    if not MANIFEST.is_file():
+        print("  SKIP  the emitted-vs-declared leg — this tree declares no invocation modes")
+        return
     declared, _note = declared_modes()
-    assert emitted == invoked == declared, (
-        "the emitted map, the call sites and the declaration must be ONE map — "
-        f"emitted={len(emitted)}, invoked={len(invoked)}, declared={len(declared)}"
+    assert emitted == declared, (
+        "the emitted map and the declaration must be ONE map — "
+        f"emitted={len(emitted)}, declared={len(declared)}"
     )
 
 def probe_the_EMITTER_refuses_an_empty_map() -> None:
@@ -320,6 +339,16 @@ def main() -> int:
             "has not been adopted here, so there is nothing to assert against. This is a "
             "stated skip, never a silent pass."
         )
+        # A STATED SKIP SKIPS THE DECLARATION LEG, NOT THE PROBES (measured 2026-11-05,
+        # #107). This returned 0 unconditionally, so on any tree without the factory-data
+        # manifest — every member — a failing probe printed FAIL and the process still
+        # exited 0. A gate whose verdict is its exit code reported success while naming a
+        # failure, which is the one failure mode a registration cannot catch.
+        if failures:
+            print(f"\ngate-invocation-mode gate FAILED: {len(failures)} probe(s)")
+            for f in failures:
+                print(f"  - {f}")
+            return 1
         return 0
     except ManifestUnreadable as exc:
         print(f"  FAIL  the declaration exists and cannot be read: {exc}")

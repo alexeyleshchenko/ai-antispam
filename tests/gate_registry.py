@@ -226,11 +226,41 @@ SCRIPT_RUNNER = "script"
 # declaration-only predicate (direction 1, and the "Shape is deliberately NOT the
 # discriminator" note above), and this direction answers one narrower question.
 _TEST_FUNC = re.compile(r"^def test_[A-Za-z0-9_]*\(", re.M)
+# Kept ONLY as the fallback for a file `ast.parse` refuses: the live reading is
+# `module_level_test_defs` (#107), because this pattern matches a `def test_*` inside a
+# docstring or a string literal just as readily as a real definition.
 _MAIN_GUARD = re.compile(r"^if __name__ == ['\"]__main__['\"]:", re.M)
 
 # A DUAL-FORM target: module-level `def test_*` wrappers that delegate to named check
 # functions, AND a `main()` that calls those SAME functions behind the `__main__` guard.
 DUAL_FORM = "dual"
+
+def module_level_test_defs(text: str) -> tuple[str, ...]:
+    """Names of `def test_*` defined at MODULE level, read from the SYNTAX TREE.
+
+    The predicate this replaces was a regex over the file's raw bytes, so a `def test_*`
+    inside a docstring or a string literal counted as a definition. Measured 2026-11-05
+    (#107): this gate's OWN DUAL-form fixtures are module-level string literals carrying
+    `def test_one()`, so the file that DEFINES direction 5 was reported as a pytest-form
+    target — "every test leg is DEAD" — while it is a script gate with no module-level test
+    function at all. A predicate whose subject is "module-level" has to read the tree, not
+    the bytes. The false positive is not cosmetic: the repair it invites is to RE-REGISTER
+    a gate that already runs its target, which is the one thing #107 forbids.
+
+    An UNPARSEABLE file falls back to the regex and reads pytest-form when it matches. The
+    safe direction is the refusal — a script registration of a real pytest file runs nothing
+    and exits 0 — and a gate that will not parse is already broken.
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return ("<unparseable>",) if _TEST_FUNC.search(text) else ()
+    return tuple(
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name.startswith("test_")
+    )
 
 
 def _direct_callees(node: ast.AST) -> set[str]:
@@ -520,7 +550,35 @@ def registered_entries(audit_text: str) -> tuple[list[str], list[str]]:
             tool_entries.append(entry["argv"])
     return tests_entries, tool_entries
 
-def gate_registration_problems(tests_dir: Path, audit_path: Path) -> tuple[list[str], dict]:
+def load_gate_run_deferrals(path: Path) -> tuple[dict[str, str], bool]:
+    """(gate name -> reason, read) — declared direction-1 deferrals, {} when absent.
+
+    Kept with an EMPTY reason rather than dropped when malformed, for the reason
+    `load_gate_deferrals` gives: dropping it would make a broken declaration read as an
+    undeclared one, and the declaration is the thing that is broken.
+    """
+    if not path.is_file():
+        return {}, False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}, True
+    rows = data.get("deferrals") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        return {}, True
+    out: dict[str, str] = {}
+    for row in rows:
+        if isinstance(row, dict) and isinstance(row.get("path"), str):
+            reason = row.get("reason")
+            out[row["path"]] = reason if isinstance(reason, str) else ""
+    return out, True
+
+
+def gate_registration_problems(
+    tests_dir: Path,
+    audit_path: Path,
+    run_deferrals: dict[str, str] | None = None,
+) -> tuple[list[str], dict]:
     """Return (problems, report) for one tree.
 
     `report` carries the scan's coverage — modules scanned, both directions' findings, and
@@ -538,15 +596,33 @@ def gate_registration_problems(tests_dir: Path, audit_path: Path) -> tuple[list[
     declared_unregistered: list[str] = []
     registered_undeclared: list[str] = []
     non_canonical: list[str] = []
+    deferred: list[tuple[str, str]] = []
+
+    if run_deferrals is None:
+        # Anchored to the TREE, never the process cwd — the rule
+        # `GATE_DEFERRALS_PATH` and `MECHANISM_SPLITS_PATH` already follow.
+        run_deferrals, _read = load_gate_run_deferrals(
+            tests_dir.parent / GATE_RUN_DEFERRALS_PATH)
 
     # direction 1: declared -> registered, and declared -> canonical
     for path, first in declared:
         if path.name not in registered:
-            declared_unregistered.append(path.name)
-            problems.append(
-                f"tests/{path.name} declares itself a gate but is never registered in "
-                f"{audit_path.name} — an unregistered gate never runs (P29)"
-            )
+            reason = run_deferrals.get(path.name, "").strip() if path.name in run_deferrals else None
+            if reason is None:
+                declared_unregistered.append(path.name)
+                problems.append(
+                    f"tests/{path.name} declares itself a gate but is never registered in "
+                    f"{audit_path.name} — an unregistered gate never runs (P29)"
+                )
+            elif not reason:
+                declared_unregistered.append(path.name)
+                problems.append(
+                    f"deferral for tests/{path.name} carries NO REASON — a gate that declares "
+                    f"itself one and does not run must say why, or the surface is "
+                    f"exempt-by-silence (n=571)"
+                )
+            else:
+                deferred.append((path.name, reason))
         if not first.startswith(CANONICAL_OPENER):
             non_canonical.append(path.name)
             problems.append(
@@ -565,6 +641,22 @@ def gate_registration_problems(tests_dir: Path, audit_path: Path) -> tuple[list[
             f"declared->registered direction (P29)"
         )
 
+    # A deferral whose blocker is GONE is a stale entry: the gate now runs, so the entry
+    # declares a blocker that does not exist and would inflate the deferred count forever.
+    # A deferral naming a file that declares no gate at all resolves nothing and hides a
+    # typo — the same defect a glob matching no file carries.
+    for name in sorted(run_deferrals):
+        if name in registered:
+            problems.append(
+                f"deferral for tests/{name} is STALE — the gate IS registered, so the entry "
+                f"declares a blocker that no longer exists (#107)"
+            )
+        elif name not in declared_names:
+            problems.append(
+                f"deferral names tests/{name}, which declares no gate in this tree — a "
+                f"phantom entry resolves nothing (#107)"
+            )
+
     report = {
         "modules_scanned": len(list(tests_dir.glob("test_*.py"))),
         "declared": declared_names,
@@ -573,6 +665,8 @@ def gate_registration_problems(tests_dir: Path, audit_path: Path) -> tuple[list[
         "declared_unregistered": declared_unregistered,
         "registered_undeclared": registered_undeclared,
         "non_canonical": non_canonical,
+        "deferred": deferred,
+        "deferrals_read": sorted(run_deferrals),
     }
     return problems, report
 
@@ -1378,6 +1472,16 @@ REQUIRED_PREDICATE = (
 # exactly like one.
 GATE_DEFERRALS_PATH = "registry/gate-deferrals.json"
 
+# The SIBLING surface for direction 1 (#107). Direction 3 defers a gate the manifest REQUIRES
+# and this tree does not carry; this one defers a gate this tree DOES carry, that DECLARES
+# itself a gate, and that cannot yet be registered because it does not run green here. The
+# two are different facts and must not share a store: a direction-3 entry asserts ABSENCE,
+# a direction-1 entry asserts PRESENCE-with-a-blocker, and a single store would let one be
+# read as the other. Same three refusals, because it is the same exempt-by-silence class one
+# level down: an entry with no reason, an entry whose blocker is gone (STALE), and an entry
+# naming a file that declares no gate at all (PHANTOM).
+GATE_RUN_DEFERRALS_PATH = "registry/gate-run-deferrals.json"
+
 def load_gate_deferrals(path: Path) -> tuple[dict[str, str], bool]:
     """(gate name -> reason, read) — the declared deferrals, {} when the store is absent.
 
@@ -1602,6 +1706,15 @@ def declared_splits(path: Path) -> tuple[dict[str, list[str]], list[str], bool]:
         splits[retired] = list(successors)
     return splits, problems, True
 
+def _nested_mechanism(tests_dir: Path, name: str) -> Path | None:
+    """Where `name` lives UNDER `tests/` when it is not at the top level, else None.
+
+    Sorted so the answer is deterministic: a tree carrying two copies of one name is a
+    different finding, and it must not depend on filesystem order.
+    """
+    hits = sorted(tests_dir.rglob(name))
+    return hits[0] if hits else None
+
 def law_named_mechanisms(
     rework_path: Path, skill_path: Path | None
 ) -> tuple[dict[str, list[str]], dict]:
@@ -1711,6 +1824,7 @@ def law_coverage_problems(
 
     unregistered: list[str] = []
     dead_reference: list[str] = []
+    nested_not_a_gate: list[str] = []
     split_resolved: list[str] = []
     split_broken: list[str] = []
     for name in sorted(mechanisms):
@@ -1719,6 +1833,27 @@ def law_coverage_problems(
         where = "; ".join(mechanisms[name])
         if (tests_dir / name).is_file():
             unregistered.append(f"{name} — named by {where}")
+        elif name not in splits and _nested_mechanism(tests_dir, name) is not None:
+            # A FALSE ABSENCE, measured 2026-11-05 (#107 task 6). The rework log names
+            # `test_channel_management.py` as the mechanism upholding a bot fix; the file
+            # is LIVE at `tests/handlers/test_channel_management.py` and has never been at
+            # the top level (added there in 2e0e2ce). The resolver probed `tests/<name>`
+            # ONLY, so a real, running pytest suite was reported as "no such file under
+            # tests/" — a zero from an instrument that cannot see the failure class it is
+            # aimed at (rule 7). It is NOT registered either, because the audit's gate list
+            # runs `[sys.executable, <path>]` against SCRIPT-shaped files and this one is
+            # pytest-shaped with no `__main__` guard.
+            #
+            # The bucket is BOUNDED to nested paths, and the bound is what keeps this from
+            # being a weakening: a TOP-LEVEL `tests/<name>` still lands in `unregistered`
+            # above and still reds, so a gate cannot escape by being rewritten pytest-shape
+            # in place. What changes is only the CLAIM: the file is declared present at its
+            # real path instead of being called absent.
+            nested_not_a_gate.append(
+                f"{name} — named by {where}, present at "
+                f"{_nested_mechanism(tests_dir, name)} (a pytest suite outside the audit's "
+                f"script-gate namespace, so registration does not apply to it)"
+            )
         elif name in splits:
             # A declared split is a RESOLUTION only when the mechanism the law names is
             # actually running: every successor present AND registered. A split that
@@ -1775,6 +1910,7 @@ def law_coverage_problems(
             "named": len(mechanisms),
             "unregistered": unregistered,
             "dead_reference": dead_reference,
+            "nested_not_a_gate": nested_not_a_gate,
             "split_resolved": split_resolved,
             "split_broken": split_broken,
             "stale_splits": stale_splits,
@@ -1815,7 +1951,7 @@ def target_form(text: str) -> str:
     so the registration CAN run its target and is not a mismatch. Without this shape the
     direction reported four live gates as unable to run while they demonstrably ran.
     """
-    if _TEST_FUNC.search(text):
+    if module_level_test_defs(text):
         return DUAL_FORM if dual_form(text)[0] else PYTEST_RUNNER
     return SCRIPT_RUNNER
 
