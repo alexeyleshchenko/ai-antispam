@@ -57,7 +57,19 @@ PIN_VEHICLE_REL = "TEMPLATE/registry/kit.example.json"
 
 TEMPLATE_PREFIX = "TEMPLATE/"
 
-CLASSES = ("standalone", "closure", "seed")
+# The class vocabulary a pin may declare. `shared-surface` is a WRITE-TARGET class (#514):
+# the file writes a box-wide store, so a stale copy mutates another factory's state
+# rather than merely lagging -- a consumer must accept it rather than refuse the pin.
+CLASSES = ("standalone", "closure", "seed", "shared-surface")
+
+# THE PIN'S OWN VOCABULARY (#522). A pin declares the classes its WRITER knew, so a reader
+# can tell two facts apart that used to read as one refusal: "this class was added after
+# your reader" (a stale READER, whose remedy is to port this file) and "this class is
+# misspelt or invented" (whose remedy is to fix the pin). Without the field the vocabulary
+# is a function of the READER'S AGE, not of the facts -- measured on miidas, which had to
+# port this very file before it could say `shared-surface` about a file it already held.
+CLASS_VOCABULARY_KEY = "class_vocabulary"
+
 
 
 def member_path(manifest_path: str) -> str:
@@ -121,7 +133,33 @@ def load_pin(path: Path) -> tuple[dict | None, str | None]:
         )
     bad = sorted({classes[p] for p in files if classes[p] not in CLASSES})
     if bad:
-        return None, f"the pin {path} declares unknown class(es) {bad}; expected {list(CLASSES)}"
+        # THREE CASES, THREE FACTS (#522). A class outside this reader's tuple is not
+        # automatically a misspelling: when the pin's own `class_vocabulary` names it, the
+        # class is REAL and this READER predates it. Folding the two into one message sends
+        # a member to re-check spelling when the remedy is to port this file.
+        vocabulary = pin.get(CLASS_VOCABULARY_KEY)
+        writer_knew = (
+            {c for c in vocabulary if isinstance(c, str)}
+            if isinstance(vocabulary, list) else set()
+        )
+        stale = sorted(c for c in bad if c in writer_knew)
+        unknown = sorted(c for c in bad if c not in writer_knew)
+        if stale:
+            return None, (
+                f"the pin {path} declares class(es) {stale}, which THIS READER does not "
+                f"know: this reader knows {list(CLASSES)}, and your pin declares "
+                f"{sorted(writer_knew)}, so the class was added AFTER this reader — port "
+                f"`TEMPLATE/tools/kit_pin.py` and re-run. This is a READER problem, not a "
+                f"misspelling"
+            )
+        return None, (
+            f"the pin {path} declares unknown class(es) {unknown}; expected {list(CLASSES)}"
+            + (
+                f" — the pin's own {CLASS_VOCABULARY_KEY} names {sorted(writer_knew)}, so "
+                f"this is not a class this kit has ever shipped"
+                if writer_knew else ""
+            )
+        )
     return pin, None
 
 
@@ -205,6 +243,20 @@ def load_exemptions(root: Path) -> tuple[dict | None, str | None]:
     box's measurements. The declaration surface is FACTORY DATA, and the fact that it made
     the `commit-msg` port cheap for one factory (measured, miidas) is why the fork is a
     declaration rather than a source edit.
+
+    THIS IS A LOADER, NEVER A JUDGE. It returns the RAW `exempt` list and admits nothing:
+    the ADMISSION PREDICATE — the filter that keeps only entries carrying a `path` (or a
+    bare string) — lives inside `undeclared_divergence()`, which is where a declaration
+    becomes honoured. So a caller that wants the DECLARED COUNT must read it off that
+    judgement (`undeclared_divergence(pin, root)["declared"]`) and must NOT count this list
+    itself: the raw list and the admitted set are different populations, and a second count
+    is the divergence docs/instruments/kit.md §6.5 forbids (F5, issue #263 — `tools/kit_census.py`
+    reported the raw `len(exempt)` and counted an entry this predicate drops).
+
+    THE PROBLEM STRING IS NOT A VERDICT ON EMPTINESS. A MISSING file and an UNREADABLE one
+    both return a non-empty problem here, so "there is no exemptions file" cannot be
+    inferred from a problem alone — a caller that tried would misread the common
+    no-declarations case as a failure. Test the file's presence on the filesystem first.
     """
     p = root / EXEMPTIONS_REL
     if not p.is_file():
