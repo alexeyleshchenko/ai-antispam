@@ -1365,31 +1365,119 @@ REQUIRED_PREDICATE = (
     "cannot drift; that leg is meta-factory-only and skips where no TEMPLATE/ tree exists."
 )
 
+# Where a factory DECLARES a required gate it does not carry. Absent is the empty state — a
+# tree that carries every required gate declares nothing — so a missing store is a skip.
+#
+# WHY A DECLARATION AND NOT A NARROWED CONSTANT (#107, measured 2026-11-05). `REQUIRED_GATES`
+# is the KIT's inventory: the gates the template ships and asserts every bootstrapped factory
+# carries. This tree carries 44 of the 98. Narrowing the constant to what we carry would make
+# the leg compare the tree to itself — the force-matched-guard defect, where real drift reads
+# clean forever — so the inventory stays the kit's and every gap is DECLARED here, with a
+# reason, and PRINTED on every run. An unprinted population is the exempt-by-silence surface
+# ruled at n=571: the FAIL message truncates at 90 characters, so 54 undeclared absences read
+# exactly like one.
+GATE_DEFERRALS_PATH = "registry/gate-deferrals.json"
+
+def load_gate_deferrals(path: Path) -> tuple[dict[str, str], bool]:
+    """(gate name -> reason, read) — the declared deferrals, {} when the store is absent.
+
+    A row whose `reason` is missing or not a string is kept with an EMPTY reason rather than
+    dropped: dropping it would make a malformed declaration read as an undeclared absence,
+    which is the wrong repair — the declaration is the thing that is broken, and the caller
+    refuses it by name.
+    """
+    if not path.is_file():
+        return {}, False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}, True
+    rows = data.get("deferrals") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        return {}, True
+    out: dict[str, str] = {}
+    for row in rows:
+        if isinstance(row, dict) and isinstance(row.get("path"), str):
+            reason = row.get("reason")
+            out[row["path"]] = reason if isinstance(reason, str) else ""
+    return out, True
+
 def required_gate_problems(
-    tests_dir: Path, required: tuple[str, ...] = REQUIRED_GATES
+    tests_dir: Path,
+    required: tuple[str, ...] = REQUIRED_GATES,
+    deferrals: dict[str, str] | None = None,
 ) -> tuple[list[str], dict]:
-    """Direction 3: every gate in the manifest must be PRESENT in this tree.
+    """Direction 3: every gate in the manifest is PRESENT in this tree, or DECLARED absent.
 
     The audit is fail-soft by construction — it registers a gate only when its file exists,
     so an absent gate is invisible to it and the run reads HEALTHY over a shrunken suite
     (issue #68; measured at /root/inferhub-watch, where 2 gates ran and the verdict was
     still `rc=0 HEALTHY`). This predicate makes the absence LOUD, and it fails NAMING the
     file so the reader does not have to diff two inventories to find it.
+
+    A declared deferral is NOT a way to silence that. Three shapes are refused by name, and
+    each is the failure mode the surface would otherwise have:
+      (1) NO REASON — the entry would defer without saying why, which is the
+          exempt-by-silence class one level down;
+      (2) STALE — a deferral for a gate the tree DOES carry. The absence it declares does
+          not exist; left alone it inflates the deferred count forever and nothing flags it,
+          the same defect `registry/kit-exemptions.json` records for a false exemption;
+      (3) PHANTOM — a deferral naming a gate the manifest does not require. It resolves
+          nothing and hides a typo, exactly like a glob that matches no file.
     """
+    deferrals_read = True
+    if deferrals is None:
+        # Anchored to the TREE, never to the process cwd — the same rule
+        # `MECHANISM_SPLITS_PATH` follows at :1692. The audit runs gates with
+        # cwd=repo_root today, so a relative path would happen to work and would break
+        # silently the first time anything invoked this module from elsewhere.
+        deferrals, deferrals_read = load_gate_deferrals(
+            tests_dir.parent / GATE_DEFERRALS_PATH)
     problems: list[str] = []
     present: list[str] = []
     absent: list[str] = []
+    deferred: list[tuple[str, str]] = []
+    required_set = set(required)
     for name in required:
         if (tests_dir / name).is_file():
             present.append(name)
-        else:
-            absent.append(name)
+            if name in deferrals:
+                problems.append(
+                    f"deferral for tests/{name} is STALE — the gate is PRESENT, so the "
+                    f"entry declares an absence that does not exist and would inflate the "
+                    f"deferred count forever (#107)"
+                )
+            continue
+        absent.append(name)
+        if name not in deferrals:
             problems.append(
                 f"required gate tests/{name} is ABSENT — the template ships it, so every "
                 f"bootstrapped factory must carry it, and an absent gate is not a passing "
                 f"gate (P29, issue #68)"
             )
-    report = {"required": list(required), "present": present, "absent": absent}
+            continue
+        reason = deferrals[name].strip()
+        if not reason:
+            problems.append(
+                f"deferral for tests/{name} carries NO REASON — a deferral must say why "
+                f"the gate is not carried, or it is the exempt-by-silence surface (n=571)"
+            )
+            continue
+        deferred.append((name, reason))
+    for name in sorted(deferrals):
+        if name not in required_set:
+            problems.append(
+                f"deferral names tests/{name}, which the REQUIRED manifest does not list — "
+                f"a phantom entry resolves nothing (#107)"
+            )
+    report = {
+        "required": list(required),
+        "present": present,
+        "absent": absent,
+        "deferred": deferred,
+        "undeclared": [n for n in absent if n not in {d[0] for d in deferred}],
+        "deferrals_read": deferrals_read,
+    }
     return problems, report
 
 def manifest_drift_problems(

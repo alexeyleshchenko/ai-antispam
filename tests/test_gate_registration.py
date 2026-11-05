@@ -106,8 +106,10 @@ from gate_registry import (  # noqa: E402
     first_docstring_line,
     gate_registration_problems,
     law_coverage_problems,
+    GATE_DEFERRALS_PATH,
     declared_splits,
     dual_form,
+    load_gate_deferrals,
     manifest_drift_problems,
     optional_gate_lines,
     reads_a_docstring,
@@ -271,7 +273,8 @@ def probe_an_absent_required_gate_is_named() -> None:
     """Direction 3: a gate the manifest requires but the tree lacks must FAIL, NAMING it."""
     with tempfile.TemporaryDirectory() as tmp:
         tests, _ = _synthetic_tree(Path(tmp), {"test_present.py": CANONICAL_GATE}, "")
-        problems, report = required_gate_problems(tests, ("test_present.py", "test_absent.py"))
+        problems, report = required_gate_problems(
+            tests, ("test_present.py", "test_absent.py"), deferrals={})
         check("direction 3 — an absent required gate is NAMED",
               any("test_absent.py" in p for p in problems),
               problems[0][:80] if problems else "no problem reported")
@@ -285,10 +288,74 @@ def probe_a_complete_required_set_is_clean() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tests, _ = _synthetic_tree(
             Path(tmp), {"test_a.py": CANONICAL_GATE, "test_b.py": CANONICAL_GATE}, "")
-        problems, report = required_gate_problems(tests, ("test_a.py", "test_b.py"))
+        problems, report = required_gate_problems(
+            tests, ("test_a.py", "test_b.py"), deferrals={})
         check("direction 3 — a tree carrying every required gate raises nothing",
               problems == [] and report["absent"] == [] and report["present"] == ["test_a.py", "test_b.py"],
               "; ".join(problems)[:70])
+
+def probe_a_declared_deferral_is_printed_and_three_shapes_are_refused() -> None:
+    """#107: a required gate this tree does not carry may be DECLARED — never silenced.
+
+    `REQUIRED_GATES` is the kit's inventory (98) and this tree carries 44. Narrowing the
+    constant to what we carry would make the leg compare the tree to itself — the
+    force-matched-guard defect — so every gap is declared in `registry/gate-deferrals.json`
+    with a reason and printed on every run. Three shapes are refused, and each one is the
+    failure mode the surface would otherwise have: a deferral with NO REASON (silence), one
+    for a gate the tree DOES carry (a false absence, which inflates the count forever), and
+    one naming a gate the manifest does not list (a typo that resolves nothing).
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tests, _ = _synthetic_tree(Path(tmp), {"test_present.py": CANONICAL_GATE}, "")
+        required = ("test_present.py", "test_absent.py")
+
+        # THE LAWYER ARM. A declared absence with a reason is NOT a problem, and the reason
+        # is carried out in the report so the caller can print it.
+        problems, report = required_gate_problems(
+            tests, required, deferrals={"test_absent.py": "port owed, closure unread"})
+        check("direction 3 — a declared deferral is NOT a problem",
+              problems == [], "; ".join(problems)[:90] or "clean")
+        check("direction 3 — and it lands in the report WITH its reason",
+              report["deferred"] == [("test_absent.py", "port owed, closure unread")],
+              str(report["deferred"])[:90])
+        check("direction 3 — an undeclared absence is still separated out",
+              report["undeclared"] == [], str(report["undeclared"]))
+
+        # CONTROL 1: no reason. Deleting the reason must put it BACK in the problem list —
+        # without this, "declare everything with an empty string" would pass every leg above.
+        problems, report = required_gate_problems(
+            tests, required, deferrals={"test_absent.py": "   "})
+        check("direction 3 — CONTROL: a deferral with NO REASON is REFUSED",
+              any("NO REASON" in p for p in problems), "; ".join(problems)[:90] or "clean")
+        check("direction 3 — CONTROL: and it is NOT counted as deferred",
+              report["deferred"] == [] and report["undeclared"] == ["test_absent.py"],
+              f"deferred={report['deferred']} undeclared={report['undeclared']}")
+
+        # CONTROL 2: stale. The gate IS carried, so the declared absence does not exist.
+        problems, report = required_gate_problems(
+            tests, required, deferrals={"test_present.py": "port owed",
+                                        "test_absent.py": "port owed"})
+        check("direction 3 — CONTROL: a deferral for a gate the tree DOES carry is STALE",
+              any("STALE" in p and "test_present.py" in p for p in problems),
+              "; ".join(problems)[:90] or "clean")
+
+        # CONTROL 3: phantom. Not in the manifest at all, so it resolves nothing.
+        problems, report = required_gate_problems(
+            tests, required, deferrals={"test_absent.py": "port owed",
+                                        "test_typo.py": "port owed"})
+        check("direction 3 — CONTROL: a deferral the manifest does not list is a PHANTOM",
+              any("phantom" in p and "test_typo.py" in p for p in problems),
+              "; ".join(problems)[:90] or "clean")
+
+    # And the store this factory actually ships is readable and fully reasoned.
+    loaded, read = load_gate_deferrals(TESTS_DIR.parent / GATE_DEFERRALS_PATH)
+    check("direction 3 — the live deferral store is READ, not skipped", read is True, str(read))
+    check("direction 3 — every live deferral carries a non-blank reason",
+          bool(loaded) and all(r.strip() for r in loaded.values()),
+          f"{len(loaded)} entries, {sum(1 for r in loaded.values() if not r.strip())} blank")
+    check("direction 3 — a MISSING store is a skip, not a failure",
+          load_gate_deferrals(Path("/nonexistent/gate-deferrals.json")) == ({}, False),
+          "a missing store read as read=True")
 
 def probe_the_coupling_leg_skips_without_a_template() -> None:
     """Part 3: the coupling leg is meta-factory-only — no TEMPLATE tree means SKIP, not FAIL.
@@ -504,10 +571,22 @@ def probe_the_resolver_reads_the_live_declaration() -> None:
 def probe_the_live_required_set_is_present() -> None:
     """Direction 3 on the live tree, plus the coupling leg where a TEMPLATE tree exists."""
     problems, report = required_gate_problems(TESTS_DIR)
+    # The deferred population is PRINTED WITH ITS REASON on every run, never summarised as a
+    # count. An unprinted population is the exempt-by-silence surface ruled at n=571, and the
+    # FAIL message below truncates at 90 characters -- which is exactly how 54 undeclared
+    # absences came to read like one (#107, measured 2026-11-05).
+    for name, reason in report["deferred"]:
+        print(f"    deferred  tests/{name} — {reason}")
     for problem in problems:
         print(f"    {problem}")
-    check("every required gate is PRESENT in the live tree",
+    check("every required gate is PRESENT in the live tree, or DECLARED deferred with a reason",
           not problems, "; ".join(problems)[:90])
+    check("the deferred population is PRINTED with a reason for every entry",
+          len(report["deferred"]) == len(report["absent"]) - len(report["undeclared"]),
+          f"{len(report['deferred'])} printed of {len(report['absent'])} absent")
+    print(f"  live tree — direction 3: {len(report['required'])} required, "
+          f"{len(report['present'])} present, {len(report['deferred'])} declared deferred, "
+          f"{len(report['undeclared'])} undeclared absent")
     # Same class as the two legs above (#107): the count is the KIT'S inventory, and a member
     # that requires fewer gates is not thereby vacuous.
     check("the manifest is non-vacuous", len(report["required"]) > 0,
@@ -4553,6 +4632,7 @@ def main() -> int:
     print("  synthetic probes — direction 3, required -> present")
     probe_an_absent_required_gate_is_named()
     probe_a_complete_required_set_is_clean()
+    probe_a_declared_deferral_is_printed_and_three_shapes_are_refused()
     probe_the_coupling_leg_skips_without_a_template()
     probe_a_manifest_template_mismatch_fails_both_ways()
     print("  synthetic probes — direction 4, law -> registered")

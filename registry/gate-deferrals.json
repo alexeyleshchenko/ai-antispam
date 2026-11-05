@@ -1,0 +1,221 @@
+{
+  "_note": "Required gates the KIT's manifest ships that this tree does not carry, each with the reason it is not carried (#107, declared 2026-11-05). `REQUIRED_GATES` in tests/gate_registry.py is the kit's inventory of 98; this tree carries 44. Narrowing the constant to what we carry was REFUSED because the leg would then compare the tree to itself — the force-matched-guard defect, where real drift reads clean forever. Instead every gap is declared here and PRINTED on every run, so the population is visible rather than truncated: the gate's FAIL message caps at 90 characters, which made 54 undeclared absences read exactly like one. THREE SHAPES ARE REFUSED BY THE GATE, each named: a deferral with NO REASON (exempt-by-silence, n=571), a STALE deferral for a gate the tree DOES carry (the false-exemption defect registry/kit-exemptions.json records), and a PHANTOM deferral naming a gate the manifest does not list. This store is NOT an exemption surface: it records debt, and each entry is a port owed, not a decision that the gate does not matter.",
+  "deferrals": [
+    {
+      "path": "test_audit_rates.py",
+      "reason": "PORT OWED, and it is the one the #107 plan named by hand: the kit holds test_audit_rates.py in CI and this tree does not carry it, so the audit's own rate reporting has no observer here. test_audit_tree_condition.py and test_audit_undefined_names.py are the same class — they guard the audit tool this factory runs on every pacemaker tick."
+    },
+    {
+      "path": "test_audit_tree_condition.py",
+      "reason": "PORT OWED, and it is the one the #107 plan named by hand: the kit holds test_audit_rates.py in CI and this tree does not carry it, so the audit's own rate reporting has no observer here. test_audit_tree_condition.py and test_audit_undefined_names.py are the same class — they guard the audit tool this factory runs on every pacemaker tick."
+    },
+    {
+      "path": "test_audit_undefined_names.py",
+      "reason": "PORT OWED, and it is the one the #107 plan named by hand: the kit holds test_audit_rates.py in CI and this tree does not carry it, so the audit's own rate reporting has no observer here. test_audit_tree_condition.py and test_audit_undefined_names.py are the same class — they guard the audit tool this factory runs on every pacemaker tick."
+    },
+    {
+      "path": "test_binding_sync.py",
+      "reason": "PORT OWED. The kit ships this gate and this tree does not carry it. Not taken in the #107 pass: that pass was scoped to making the registration leg itself green, and each port needs its own closure read and its own discriminating control before it can be trusted green. The absence is declared here so the population is PRINTED, because the gate's own FAIL message truncates at 90 characters and 54 undeclared absences read exactly like one."
+    },
+    {
+      "path": "test_citation_published.py",
+      "reason": "PORT OWED. The kit ships this gate and this tree does not carry it. Not taken in the #107 pass: that pass was scoped to making the registration leg itself green, and each port needs its own closure read and its own discriminating control before it can be trusted green. The absence is declared here so the population is PRINTED, because the gate's own FAIL message truncates at 90 characters and 54 undeclared absences read exactly like one."
+    },
+    {
+      "path": "test_close_ruling_paired.py",
+      "reason": "PORT OWED. The kit ships this gate and this tree does not carry it. Not taken in the #107 pass: that pass was scoped to making the registration leg itself green, and each port needs its own closure read and its own discriminating control before it can be trusted green. The absence is declared here so the population is PRINTED, because the gate's own FAIL message truncates at 90 characters and 54 undeclared absences read exactly like one."
+    },
+    {
+      "path": "test_commit_subject_issue_refs.py",
+      "reason": "PORT OWED. The kit ships this gate and this tree does not carry it. Not taken in the #107 pass: that pass was scoped to making the registration leg itself green, and each port needs its own closure read and its own discriminating control before it can be trusted green. The absence is declared here so the population is PRINTED, because the gate's own FAIL message truncates at 90 characters and 54 undeclared absences read exactly like one."
+    },
+    {
+      "path": "test_criterion_path_exemptions.py",
+      "reason": "PORT OWED. The kit ships this gate and this tree does not carry it. Not taken in the #107 pass: that pass was scoped to making the registration leg itself green, and each port needs its own closure read and its own discriminating control before it can be trusted green. The absence is declared here so the population is PRINTED, because the gate's own FAIL message truncates at 90 characters and 54 undeclared absences read exactly like one."
+    },
+    {
+      "path": "test_cron_landing_route.py",
+      "reason": "PORT OWED. The kit ships this gate and this tree does not carry it. Not taken in the #107 pass: that pass was scoped to making the registration leg itself green, and each port needs its own closure read and its own discriminating control before it can be trusted green. The absence is declared here so the population is PRINTED, because the gate's own FAIL message truncates at 90 characters and 54 undeclared absences read exactly like one."
+    },
+    {
+      "path": "test_declaration_drift.py",
+      "reason": "PORT OWED. The kit ships this gate and this tree does not carry it. Not taken in the #107 pass: that pass was scoped to making the registration leg itself green, and each port needs its own closure read and its own discriminating control before it can be trusted green. The absence is declared here so the population is PRINTED, because the gate's own FAIL message truncates at 90 characters and 54 undeclared absences read exactly like one."
+    },
+    {
+      "path": "test_declared_boundary_census.py",
+      "reason": "PORT OWED. The kit ships this gate and this tree does not carry it. Not taken in the #107 pass: that pass was scoped to making the registration leg itself green, and each port needs its own closure read and its own discriminating control before it can be trusted green. The absence is declared here so the population is PRINTED, because the gate's own FAIL message truncates at 90 characters and 54 undeclared absences read exactly like one."
+    },
+    {
+      "path": "test_declared_event_population.py",
+      "reason": "PORT OWED. The kit ships this gate and this tree does not carry it. Not taken in the #107 pass: that pass was scoped to making the registration leg itself green, and each port needs its own closure read and its own discriminating control before it can be trusted green. The absence is declared here so the population is PRINTED, because the gate's own FAIL message truncates at 90 characters and 54 undeclared absences read exactly like one."
+    },
+    {
+      "path": "test_duty_receipt_exemptions.py",
+      "reason": "PORT OWED. The kit ships this gate and this tree does not carry it. Not taken in the #107 pass: that pass was scoped to making the registration leg itself green, and each port needs its own closure read and its own discriminating control before it can be trusted green. The absence is declared here so the population is PRINTED, because the gate's own FAIL message truncates at 90 characters and 54 undeclared absences read exactly like one."
+    },
+    {
+      "path": "test_gate_direct_invocation.py",
+      "reason": "PORT OWED. The kit ships this gate and this tree does not carry it. Not taken in the #107 pass: that pass was scoped to making the registration leg itself green, and each port needs its own closure read and its own discriminating control before it can be trusted green. The absence is declared here so the population is PRINTED, because the gate's own FAIL message truncates at 90 characters and 54 undeclared absences read exactly like one."
+    },
+    {
+      "path": "test_gate_triggers.py",
+      "reason": "PORT OWED. The kit ships this gate and this tree does not carry it. Not taken in the #107 pass: that pass was scoped to making the registration leg itself green, and each port needs its own closure read and its own discriminating control before it can be trusted green. The absence is declared here so the population is PRINTED, because the gate's own FAIL message truncates at 90 characters and 54 undeclared absences read exactly like one."
+    },
+    {
+      "path": "test_harness_bindings.py",
+      "reason": "PORT OWED. The kit ships this gate and this tree does not carry it. Not taken in the #107 pass: that pass was scoped to making the registration leg itself green, and each port needs its own closure read and its own discriminating control before it can be trusted green. The absence is declared here so the population is PRINTED, because the gate's own FAIL message truncates at 90 characters and 54 undeclared absences read exactly like one."
+    },
+    {
+      "path": "test_hq_delegation.py",
+      "reason": "PORT OWED. The kit ships this gate and this tree does not carry it. Not taken in the #107 pass: that pass was scoped to making the registration leg itself green, and each port needs its own closure read and its own discriminating control before it can be trusted green. The absence is declared here so the population is PRINTED, because the gate's own FAIL message truncates at 90 characters and 54 undeclared absences read exactly like one."
+    },
+    {
+      "path": "test_hygiene_branch_occupancy.py",
+      "reason": "PORT OWED. The gate's SUBJECT exists in this tree: tools/hygiene.py is carried and registered, and two sibling hygiene gates (test_hygiene_inflight.py, test_hygiene_namespace.py) are present and green. So this is a genuine coverage gap rather than a structural one. Not taken in the #107 pass because each port needs its own closure and its own control before it can be trusted green."
+    },
+    {
+      "path": "test_hygiene_build_residue.py",
+      "reason": "PORT OWED. The gate's SUBJECT exists in this tree: tools/hygiene.py is carried and registered, and two sibling hygiene gates (test_hygiene_inflight.py, test_hygiene_namespace.py) are present and green. So this is a genuine coverage gap rather than a structural one. Not taken in the #107 pass because each port needs its own closure and its own control before it can be trusted green."
+    },
+    {
+      "path": "test_hygiene_declaration_sweep.py",
+      "reason": "PORT OWED. The gate's SUBJECT exists in this tree: tools/hygiene.py is carried and registered, and two sibling hygiene gates (test_hygiene_inflight.py, test_hygiene_namespace.py) are present and green. So this is a genuine coverage gap rather than a structural one. Not taken in the #107 pass because each port needs its own closure and its own control before it can be trusted green."
+    },
+    {
+      "path": "test_hygiene_evidence_supersession.py",
+      "reason": "PORT OWED. The gate's SUBJECT exists in this tree: tools/hygiene.py is carried and registered, and two sibling hygiene gates (test_hygiene_inflight.py, test_hygiene_namespace.py) are present and green. So this is a genuine coverage gap rather than a structural one. Not taken in the #107 pass because each port needs its own closure and its own control before it can be trusted green."
+    },
+    {
+      "path": "test_hygiene_placement.py",
+      "reason": "PORT OWED. The gate's SUBJECT exists in this tree: tools/hygiene.py is carried and registered, and two sibling hygiene gates (test_hygiene_inflight.py, test_hygiene_namespace.py) are present and green. So this is a genuine coverage gap rather than a structural one. Not taken in the #107 pass because each port needs its own closure and its own control before it can be trusted green."
+    },
+    {
+      "path": "test_hygiene_stale_dirs.py",
+      "reason": "PORT OWED. The gate's SUBJECT exists in this tree: tools/hygiene.py is carried and registered, and two sibling hygiene gates (test_hygiene_inflight.py, test_hygiene_namespace.py) are present and green. So this is a genuine coverage gap rather than a structural one. Not taken in the #107 pass because each port needs its own closure and its own control before it can be trusted green."
+    },
+    {
+      "path": "test_issue_routing_surfaces.py",
+      "reason": "PORT OWED. The kit ships this gate and this tree does not carry it. Not taken in the #107 pass: that pass was scoped to making the registration leg itself green, and each port needs its own closure read and its own discriminating control before it can be trusted green. The absence is declared here so the population is PRINTED, because the gate's own FAIL message truncates at 90 characters and 54 undeclared absences read exactly like one."
+    },
+    {
+      "path": "test_law_mechanism_same_commit.py",
+      "reason": "PORT OWED AFTER PARAMETERISING. This factory's law lives in skills/ai-antispam/*.md and this router, not in the kit's AGENTS.md + roles/ layout, so the predicate would have to be pointed at our own surfaces before it could read anything. That is the same 'PARAMETERIZE FIRST' class the kit's own OPTIONAL_GATES records for test_law_coverage.py, and it is why the gate is not simply copied."
+    },
+    {
+      "path": "test_law_no_raw_session_uuid.py",
+      "reason": "PORT OWED AFTER PARAMETERISING. This factory's law lives in skills/ai-antispam/*.md and this router, not in the kit's AGENTS.md + roles/ layout, so the predicate would have to be pointed at our own surfaces before it could read anything. That is the same 'PARAMETERIZE FIRST' class the kit's own OPTIONAL_GATES records for test_law_coverage.py, and it is why the gate is not simply copied."
+    },
+    {
+      "path": "test_law_structure.py",
+      "reason": "PORT OWED AFTER PARAMETERISING. This factory's law lives in skills/ai-antispam/*.md and this router, not in the kit's AGENTS.md + roles/ layout, so the predicate would have to be pointed at our own surfaces before it could read anything. That is the same 'PARAMETERIZE FIRST' class the kit's own OPTIONAL_GATES records for test_law_coverage.py, and it is why the gate is not simply copied."
+    },
+    {
+      "path": "test_ledger_citation_declared.py",
+      "reason": "PORT OWED. Ours is the template basis for tools/ledger.py (migrated 2026-09-27), so the closure exists; what is missing is the gate file and its registration. Not taken in the #107 pass because each of these asserts a distinct ledger invariant, and this factory carries TWO subject namespaces (a service-board item is a bare `#N`; a campaign unit is a descriptive stem), so each predicate has to be read against that split before it can be trusted green."
+    },
+    {
+      "path": "test_ledger_claim_preflight.py",
+      "reason": "PORT OWED. Ours is the template basis for tools/ledger.py (migrated 2026-09-27), so the closure exists; what is missing is the gate file and its registration. Not taken in the #107 pass because each of these asserts a distinct ledger invariant, and this factory carries TWO subject namespaces (a service-board item is a bare `#N`; a campaign unit is a descriptive stem), so each predicate has to be read against that split before it can be trusted green."
+    },
+    {
+      "path": "test_ledger_factory_scope.py",
+      "reason": "PORT OWED. Ours is the template basis for tools/ledger.py (migrated 2026-09-27), so the closure exists; what is missing is the gate file and its registration. Not taken in the #107 pass because each of these asserts a distinct ledger invariant, and this factory carries TWO subject namespaces (a service-board item is a bare `#N`; a campaign unit is a descriptive stem), so each predicate has to be read against that split before it can be trusted green."
+    },
+    {
+      "path": "test_ledger_header_closure.py",
+      "reason": "PORT OWED. Ours is the template basis for tools/ledger.py (migrated 2026-09-27), so the closure exists; what is missing is the gate file and its registration. Not taken in the #107 pass because each of these asserts a distinct ledger invariant, and this factory carries TWO subject namespaces (a service-board item is a bare `#N`; a campaign unit is a descriptive stem), so each predicate has to be read against that split before it can be trusted green."
+    },
+    {
+      "path": "test_ledger_ref_roles.py",
+      "reason": "PORT OWED. Ours is the template basis for tools/ledger.py (migrated 2026-09-27), so the closure exists; what is missing is the gate file and its registration. Not taken in the #107 pass because each of these asserts a distinct ledger invariant, and this factory carries TWO subject namespaces (a service-board item is a bare `#N`; a campaign unit is a descriptive stem), so each predicate has to be read against that split before it can be trusted green."
+    },
+    {
+      "path": "test_ledger_refs_preflight.py",
+      "reason": "PORT OWED. Ours is the template basis for tools/ledger.py (migrated 2026-09-27), so the closure exists; what is missing is the gate file and its registration. Not taken in the #107 pass because each of these asserts a distinct ledger invariant, and this factory carries TWO subject namespaces (a service-board item is a bare `#N`; a campaign unit is a descriptive stem), so each predicate has to be read against that split before it can be trusted green."
+    },
+    {
+      "path": "test_patrol_board.py",
+      "reason": "PORT OWED, AND THE KIT'S OWN CLASSIFICATION IS THE THING TO FIX. `test_patrol_*` guards the meta-factory's patrol — its worktrees, its publish pusher, its round receipts, its census and its render. This factory has no patrol runner, no workers roster and no round receipts, so the subject does not exist here and the gate could not pass. The kit lists these as REQUIRED on the stated premise that every REQUIRED gate passes in a bootstrapped factory; measured 2026-11-05 that premise is FALSE for this class, so the repair is upstream — they belong in OPTIONAL_GATES with a reason, the pattern the kit already uses for test_shipped_mechanism_law.py — not twelve ports here."
+    },
+    {
+      "path": "test_patrol_census.py",
+      "reason": "PORT OWED, AND THE KIT'S OWN CLASSIFICATION IS THE THING TO FIX. `test_patrol_*` guards the meta-factory's patrol — its worktrees, its publish pusher, its round receipts, its census and its render. This factory has no patrol runner, no workers roster and no round receipts, so the subject does not exist here and the gate could not pass. The kit lists these as REQUIRED on the stated premise that every REQUIRED gate passes in a bootstrapped factory; measured 2026-11-05 that premise is FALSE for this class, so the repair is upstream — they belong in OPTIONAL_GATES with a reason, the pattern the kit already uses for test_shipped_mechanism_law.py — not twelve ports here."
+    },
+    {
+      "path": "test_patrol_criterion.py",
+      "reason": "PORT OWED, AND THE KIT'S OWN CLASSIFICATION IS THE THING TO FIX. `test_patrol_*` guards the meta-factory's patrol — its worktrees, its publish pusher, its round receipts, its census and its render. This factory has no patrol runner, no workers roster and no round receipts, so the subject does not exist here and the gate could not pass. The kit lists these as REQUIRED on the stated premise that every REQUIRED gate passes in a bootstrapped factory; measured 2026-11-05 that premise is FALSE for this class, so the repair is upstream — they belong in OPTIONAL_GATES with a reason, the pattern the kit already uses for test_shipped_mechanism_law.py — not twelve ports here."
+    },
+    {
+      "path": "test_patrol_cron_duty.py",
+      "reason": "PORT OWED, AND THE KIT'S OWN CLASSIFICATION IS THE THING TO FIX. `test_patrol_*` guards the meta-factory's patrol — its worktrees, its publish pusher, its round receipts, its census and its render. This factory has no patrol runner, no workers roster and no round receipts, so the subject does not exist here and the gate could not pass. The kit lists these as REQUIRED on the stated premise that every REQUIRED gate passes in a bootstrapped factory; measured 2026-11-05 that premise is FALSE for this class, so the repair is upstream — they belong in OPTIONAL_GATES with a reason, the pattern the kit already uses for test_shipped_mechanism_law.py — not twelve ports here."
+    },
+    {
+      "path": "test_patrol_preamble.py",
+      "reason": "PORT OWED, AND THE KIT'S OWN CLASSIFICATION IS THE THING TO FIX. `test_patrol_*` guards the meta-factory's patrol — its worktrees, its publish pusher, its round receipts, its census and its render. This factory has no patrol runner, no workers roster and no round receipts, so the subject does not exist here and the gate could not pass. The kit lists these as REQUIRED on the stated premise that every REQUIRED gate passes in a bootstrapped factory; measured 2026-11-05 that premise is FALSE for this class, so the repair is upstream — they belong in OPTIONAL_GATES with a reason, the pattern the kit already uses for test_shipped_mechanism_law.py — not twelve ports here."
+    },
+    {
+      "path": "test_patrol_publish.py",
+      "reason": "PORT OWED, AND THE KIT'S OWN CLASSIFICATION IS THE THING TO FIX. `test_patrol_*` guards the meta-factory's patrol — its worktrees, its publish pusher, its round receipts, its census and its render. This factory has no patrol runner, no workers roster and no round receipts, so the subject does not exist here and the gate could not pass. The kit lists these as REQUIRED on the stated premise that every REQUIRED gate passes in a bootstrapped factory; measured 2026-11-05 that premise is FALSE for this class, so the repair is upstream — they belong in OPTIONAL_GATES with a reason, the pattern the kit already uses for test_shipped_mechanism_law.py — not twelve ports here."
+    },
+    {
+      "path": "test_patrol_render.py",
+      "reason": "PORT OWED, AND THE KIT'S OWN CLASSIFICATION IS THE THING TO FIX. `test_patrol_*` guards the meta-factory's patrol — its worktrees, its publish pusher, its round receipts, its census and its render. This factory has no patrol runner, no workers roster and no round receipts, so the subject does not exist here and the gate could not pass. The kit lists these as REQUIRED on the stated premise that every REQUIRED gate passes in a bootstrapped factory; measured 2026-11-05 that premise is FALSE for this class, so the repair is upstream — they belong in OPTIONAL_GATES with a reason, the pattern the kit already uses for test_shipped_mechanism_law.py — not twelve ports here."
+    },
+    {
+      "path": "test_patrol_round_receipts.py",
+      "reason": "PORT OWED, AND THE KIT'S OWN CLASSIFICATION IS THE THING TO FIX. `test_patrol_*` guards the meta-factory's patrol — its worktrees, its publish pusher, its round receipts, its census and its render. This factory has no patrol runner, no workers roster and no round receipts, so the subject does not exist here and the gate could not pass. The kit lists these as REQUIRED on the stated premise that every REQUIRED gate passes in a bootstrapped factory; measured 2026-11-05 that premise is FALSE for this class, so the repair is upstream — they belong in OPTIONAL_GATES with a reason, the pattern the kit already uses for test_shipped_mechanism_law.py — not twelve ports here."
+    },
+    {
+      "path": "test_patrol_ruling.py",
+      "reason": "PORT OWED, AND THE KIT'S OWN CLASSIFICATION IS THE THING TO FIX. `test_patrol_*` guards the meta-factory's patrol — its worktrees, its publish pusher, its round receipts, its census and its render. This factory has no patrol runner, no workers roster and no round receipts, so the subject does not exist here and the gate could not pass. The kit lists these as REQUIRED on the stated premise that every REQUIRED gate passes in a bootstrapped factory; measured 2026-11-05 that premise is FALSE for this class, so the repair is upstream — they belong in OPTIONAL_GATES with a reason, the pattern the kit already uses for test_shipped_mechanism_law.py — not twelve ports here."
+    },
+    {
+      "path": "test_patrol_tree_instants.py",
+      "reason": "PORT OWED, AND THE KIT'S OWN CLASSIFICATION IS THE THING TO FIX. `test_patrol_*` guards the meta-factory's patrol — its worktrees, its publish pusher, its round receipts, its census and its render. This factory has no patrol runner, no workers roster and no round receipts, so the subject does not exist here and the gate could not pass. The kit lists these as REQUIRED on the stated premise that every REQUIRED gate passes in a bootstrapped factory; measured 2026-11-05 that premise is FALSE for this class, so the repair is upstream — they belong in OPTIONAL_GATES with a reason, the pattern the kit already uses for test_shipped_mechanism_law.py — not twelve ports here."
+    },
+    {
+      "path": "test_patrol_workspace.py",
+      "reason": "PORT OWED, AND THE KIT'S OWN CLASSIFICATION IS THE THING TO FIX. `test_patrol_*` guards the meta-factory's patrol — its worktrees, its publish pusher, its round receipts, its census and its render. This factory has no patrol runner, no workers roster and no round receipts, so the subject does not exist here and the gate could not pass. The kit lists these as REQUIRED on the stated premise that every REQUIRED gate passes in a bootstrapped factory; measured 2026-11-05 that premise is FALSE for this class, so the repair is upstream — they belong in OPTIONAL_GATES with a reason, the pattern the kit already uses for test_shipped_mechanism_law.py — not twelve ports here."
+    },
+    {
+      "path": "test_patrol_worktree.py",
+      "reason": "PORT OWED, AND THE KIT'S OWN CLASSIFICATION IS THE THING TO FIX. `test_patrol_*` guards the meta-factory's patrol — its worktrees, its publish pusher, its round receipts, its census and its render. This factory has no patrol runner, no workers roster and no round receipts, so the subject does not exist here and the gate could not pass. The kit lists these as REQUIRED on the stated premise that every REQUIRED gate passes in a bootstrapped factory; measured 2026-11-05 that premise is FALSE for this class, so the repair is upstream — they belong in OPTIONAL_GATES with a reason, the pattern the kit already uses for test_shipped_mechanism_law.py — not twelve ports here."
+    },
+    {
+      "path": "test_question_intake.py",
+      "reason": "DELIBERATELY NOT PORTED, measured 2026-11-05. test_question_intake.py depends on the intake-metric subsystem — a READER module plus its tools/audit.py wiring — which this factory does not carry. Porting the gate alone would red the audit against an absent dependency, so the port is owed as a SUBSYSTEM, not as a file."
+    },
+    {
+      "path": "test_reconstructed_claim_declared.py",
+      "reason": "PORT OWED. The kit ships this gate and this tree does not carry it. Not taken in the #107 pass: that pass was scoped to making the registration leg itself green, and each port needs its own closure read and its own discriminating control before it can be trusted green. The absence is declared here so the population is PRINTED, because the gate's own FAIL message truncates at 90 characters and 54 undeclared absences read exactly like one."
+    },
+    {
+      "path": "test_ruling_row_recorded.py",
+      "reason": "PORT OWED. The kit ships this gate and this tree does not carry it. Not taken in the #107 pass: that pass was scoped to making the registration leg itself green, and each port needs its own closure read and its own discriminating control before it can be trusted green. The absence is declared here so the population is PRINTED, because the gate's own FAIL message truncates at 90 characters and 54 undeclared absences read exactly like one."
+    },
+    {
+      "path": "test_score_artifact_citations.py",
+      "reason": "PORT OWED, with the subject possibly absent. The score-artifact gates assert the shape of `evidence/score-*.md`. This factory writes no score artifact, so a verbatim port would either red or need a declared skip — the pattern the kit itself uses where TEMPLATE ships no `evidence/` (BOOTSTRAP.md creates it). Declared here rather than guessed at: the disposition is a port with a skip, or an upstream reclassification."
+    },
+    {
+      "path": "test_score_artifact_measurable.py",
+      "reason": "PORT OWED, with the subject possibly absent. The score-artifact gates assert the shape of `evidence/score-*.md`. This factory writes no score artifact, so a verbatim port would either red or need a declared skip — the pattern the kit itself uses where TEMPLATE ships no `evidence/` (BOOTSTRAP.md creates it). Declared here rather than guessed at: the disposition is a port with a skip, or an upstream reclassification."
+    },
+    {
+      "path": "test_score_artifact_sections.py",
+      "reason": "PORT OWED, with the subject possibly absent. The score-artifact gates assert the shape of `evidence/score-*.md`. This factory writes no score artifact, so a verbatim port would either red or need a declared skip — the pattern the kit itself uses where TEMPLATE ships no `evidence/` (BOOTSTRAP.md creates it). Declared here rather than guessed at: the disposition is a port with a skip, or an upstream reclassification."
+    },
+    {
+      "path": "test_subject_form.py",
+      "reason": "PORT OWED. The kit ships this gate and this tree does not carry it. Not taken in the #107 pass: that pass was scoped to making the registration leg itself green, and each port needs its own closure read and its own discriminating control before it can be trusted green. The absence is declared here so the population is PRINTED, because the gate's own FAIL message truncates at 90 characters and 54 undeclared absences read exactly like one."
+    },
+    {
+      "path": "test_telemetry_reader_registry.py",
+      "reason": "PORT OWED. The kit ships this gate and this tree does not carry it. Not taken in the #107 pass: that pass was scoped to making the registration leg itself green, and each port needs its own closure read and its own discriminating control before it can be trusted green. The absence is declared here so the population is PRINTED, because the gate's own FAIL message truncates at 90 characters and 54 undeclared absences read exactly like one."
+    },
+    {
+      "path": "test_template_gate_pairing.py",
+      "reason": "PORT OWED. test_template_gate_pairing.py asserts the manifest grain between a gate and its TEMPLATE copy; this tree carries no TEMPLATE/ at all, so the comparison half is absent by construction and the gate would need the same declared-skip treatment as the pin's own fixture arms."
+    }
+  ]
+}
