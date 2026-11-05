@@ -1,0 +1,19 @@
+{
+  "_note": "DECLARED subject renumbers. Copy to docs/ledger-renumbers.json and declare your own.",
+  "_why": "The sequence predicate compares subjects as EXACT STRINGS and normalises nothing, deliberately: guessing at intent is how a gate starts agreeing with its author. A BOARD MIGRATION breaks that premise honestly -- an item's `intake` and `claim` carry the number it had when it was FILED while its `close` carries the number it has NOW -- so the close is refused for legs that exist three inches away under the old number. A declared map is the repair; the three derivations (arithmetic, reading the live number-map at gate time, fuzzy subject matching) were each refused on measurement. See resolved_sequence_problems in tools/ledger.py.",
+  "_rules": [
+    "Each entry maps the subject a row carries NOW to the subject it carried WHEN IT WAS FILED.",
+    "`was` and `evidence` are both required and both non-blank: a renumber names the subject it was AND the receipt that establishes the step.",
+    "A resolution only FINDS legs that already exist under the declared prior subject. It never manufactures one: an entry whose `was` carries no legs changes nothing and the close is still refused.",
+    "Positional semantics are preserved -- the prior subject's legs must still precede the close's own index.",
+    "Chains are followed (this factory's board was migrated twice), bounded at 8 hops with a visited set.",
+    "Every resolution is PRINTED with its evidence on every pass, and the count is printed at zero too, so 'none resolved' and 'the map was not consulted' cannot read alike.",
+    "ABSENT means none. A factory that has never renumbered a board has nothing to declare."
+  ],
+  "renumbers": {
+    "#999": {
+      "was": "#123",
+      "evidence": "docs/board-migration/number-map.json: \"123\": {\"new\": 999} -- the migration that moved every service item onto a new number"
+    }
+  }
+}

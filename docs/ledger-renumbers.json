@@ -1,0 +1,9 @@
+{
+  "_note": "This factory's DECLARED subject renumbers. Schema and rules: docs/ledger-renumbers.example.json.",
+  "renumbers": {
+    "#107": {
+      "was": "#74",
+      "evidence": "docs/board-migration/number-map.json: \"74\": {\"new\": 107, \"state\": \"OPEN\", \"comments\": 5} -- the 2026-10-04 board migration. The work-unit is #107 on the board today; its legs carry the pre-migration number: intake n=147 (2026-10-01T00:47:48Z, actor triage) and claim n=148 (2026-10-01T01:21:01Z, actor hq). Board #74 TODAY is a different, already-CLOSED item (\"[defect] re-adding the bot leaves moderation_enabled=false\"), which is why the close must NOT be filed under #74 -- appending there would write a false close onto an unrelated item that no gate can catch."
+    }
+  }
+}

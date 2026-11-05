@@ -181,6 +181,67 @@ def parse_ts(value: str) -> dt.datetime:
 EXEMPTIONS_REL = "docs/ledger-exemptions.json"
 EXEMPTIONS_EXAMPLE_REL = "docs/ledger-exemptions.example.json"
 
+RENUMBERS_REL = "docs/ledger-renumbers.json"
+
+def load_renumbers(repo: Path) -> dict[str, tuple[str, str]]:
+    """The DECLARED subject renumbers: new subject -> (the subject it was, evidence).
+
+    WHY THIS EXISTS, measured 2026-11-05. The sequence predicate compares subjects as
+    EXACT STRINGS and applies no normalisation -- deliberately, because guessing at
+    intent is how a gate starts agreeing with its author. A BOARD RENUMBER breaks that
+    premise without breaking the predicate's honesty: the 2026-10-04 board migration
+    moved every service item onto a new number, so an item's intake and claim carry the
+    number it had when it was FILED while its close carries the number it has NOW. On
+    this ledger that is 10 of the 11 held items, and the write path refused the close
+    for #107 with *"close for #107 has no intake before it"* while n=147 and n=148 --
+    that item's own intake and claim -- sat three inches away under `#74`.
+
+    SO THE ANSWER IS A DECLARATION, NEVER AN INFERENCE. The predicate cannot derive the
+    mapping: arithmetic (`N+33`) mis-resolves 8 of the 62 migrated items, and a scan of
+    the board would let the gate read its expectation from a live artifact that moves.
+    A declared map is the same shape the sibling surfaces use for exemptions,
+    retirements and authorizations, and it is PRINTED on every use.
+
+    WHAT THIS CANNOT DO, and the two refusals that keep it honest. A resolution only
+    ever FINDS legs that already exist under the named subject; it never manufactures
+    one. An entry whose `was` subject carries no legs changes nothing, and the close is
+    refused exactly as before. And a malformed file is a PROBLEM rather than a silent
+    pass, for the reason the exemptions loader states: *"an exemption list that quietly
+    fails to load is indistinguishable from no exemptions."*
+
+    ABSENT MEANS NONE -- a factory that has never renumbered a board has nothing to
+    declare, which is the shipped state of a new factory.
+    """
+    path = repo / RENUMBERS_REL
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise DeclarationUnreadable([f"{RENUMBERS_REL} exists but cannot be read: {exc}"]) from exc
+    except json.JSONDecodeError as exc:
+        raise DeclarationUnreadable([f"{RENUMBERS_REL} is not valid JSON: {exc}"]) from exc
+    if not isinstance(payload, dict):
+        raise DeclarationUnreadable([
+            f"{RENUMBERS_REL} must be a JSON object carrying `renumbers`"])
+    rows = payload.get("renumbers")
+    if not isinstance(rows, dict):
+        raise DeclarationUnreadable([
+            f"{RENUMBERS_REL} carries no `renumbers` object -- a map of the subject a row "
+            f"carries NOW to the subject it carried when it was filed"])
+    out: dict[str, tuple[str, str]] = {}
+    for subject, entry in rows.items():
+        if not isinstance(entry, dict):
+            raise DeclarationUnreadable([
+                f"{RENUMBERS_REL}: renumbers[{subject!r}] is not an object"])
+        missing = [k for k in ("was", "evidence") if not entry.get(k)]
+        if missing:
+            raise DeclarationUnreadable([
+                f"{RENUMBERS_REL}: renumbers[{subject!r}] is missing {', '.join(missing)} "
+                f"-- a renumber names the subject it was AND the receipt that establishes it"])
+        out[str(subject)] = (str(entry["was"]), str(entry["evidence"]))
+    return out
+
 
 def load_exemptions(repo: Path) -> list[tuple[str, str, str, str, str]]:
     """The declared sequence exemptions, or a typed failure naming the skeleton.

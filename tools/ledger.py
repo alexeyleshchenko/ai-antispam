@@ -126,6 +126,7 @@ from ledger_declaration import (
     boundary_for,
     load_authorizations,
     load_exemptions,
+    load_renumbers,
     parse_ts,
 )
 
@@ -768,6 +769,91 @@ def sequence_problems(
     # its close is still caught, because `claims` is read positionally.
     return problems
 
+def resolved_sequence_problems(
+    by_subject: dict[str, list[tuple[int, str]]], subject: str, index: int,
+    event: str = "close",
+    renumbers: dict[str, tuple[str, str]] | None = None,
+    notices: list[str] | None = None,
+) -> list[tuple[str, str, str]]:
+    """`sequence_problems`, with a DECLARED board renumber resolved first.
+
+    THE DEFECT THIS EXISTS FOR, measured 2026-11-05. The predicate above compares
+    subjects as EXACT STRINGS and normalises nothing -- deliberately, because
+    *"guessing at intent is how a gate starts agreeing with its author."* A BOARD
+    RENUMBER breaks that premise without the predicate being wrong: the 2026-10-04
+    migration moved every service item onto a new number, so an item's `intake` and
+    `claim` carry the number it had when it was FILED while its `close` carries the
+    number it has NOW. The write path refused this factory's own close with
+    *"close for #107 has no intake before it; ... no claim before it"* while `n=147`
+    and `n=148` -- that item's own intake and claim -- sat under `#74`. Ten of this
+    board's eleven held items are in the same hole, so the choice was between a
+    declaration and ten wrong closes.
+
+    WHY A DECLARATION AND NOT A DERIVATION. Three candidate derivations, all refused
+    on measurement: arithmetic (`N+33`) mis-resolves 8 of the 62 migrated items;
+    reading `docs/board-migration/number-map.json` at gate time makes the gate read
+    its expectation from a live artifact that moves (the `check 757` defect); and
+    accepting any subject whose rows merely look close enough is inference wearing a
+    resolver's clothes. A declared map is the shape the sibling surfaces already use
+    for exemptions, retirements and authorizations -- and it is PRINTED on every use,
+    because a resolution nobody sees is exempt-by-silence (n=571).
+
+    WHAT IT CANNOT DO. It only ever FINDS legs that already exist under a declared
+    prior subject; it never manufactures one. An entry whose `was` subject carries no
+    legs changes nothing and the close is refused exactly as before. Positional
+    semantics are preserved -- the prior subject's legs must still precede `index`,
+    so a close cannot reach back past itself for a claim that lands after it.
+
+    CHAINS ARE FOLLOWED, BOUNDED. This board has been renumbered twice (the 2026-09-11
+    chat migration and the 2026-10-04 board migration), so an item can legitimately
+    carry three numbers across its life. The walk follows up to eight hops with a
+    visited set, and a cycle stops the walk rather than spinning.
+    """
+    if not subject:
+        return []
+    problems = sequence_problems(by_subject, subject, index, event)
+    if not problems or not renumbers:
+        return problems
+
+    # Walk the declared chain. `hops` keeps each edge's own evidence, because a notice
+    # that names only the destination hides which receipt established the step.
+    hops: list[tuple[str, str]] = []
+    seen = {subject}
+    cursor = subject
+    while len(hops) < 8:
+        entry = renumbers.get(cursor)
+        if not entry:
+            break
+        prior, evidence = entry
+        if prior in seen:
+            break
+        seen.add(prior)
+        hops.append((prior, evidence))
+        cursor = prior
+    if not hops:
+        return problems
+
+    best = problems
+    for prior, evidence in hops:
+        remaining = sequence_problems(by_subject, prior, index, event)
+        if not remaining:
+            if notices is not None:
+                notices.append(
+                    f"renumber resolved: {subject} -> {prior} ({evidence})")
+            return []
+        # Keep the reading that got FURTHEST, so the refusal names as little as the
+        # ledger actually lacks rather than everything one wrong hop lacks.
+        if len(remaining) < len(best):
+            best = remaining
+
+    consulted = ", ".join(prior for prior, _e in hops)
+    missing_here = {leg for _s, leg, _m in best}
+    return [
+        (subject, leg,
+         f"{message} (also absent under the declared prior subject(s): {consulted})")
+        for _s, leg, message in problems if leg in missing_here
+    ]
+
 # --- the dispatch leg (#45, ruling n=255, refined n=524) ------------------------
 #
 # `verify` modelled a subject's life as intake -> claim -> close, and `dispatch` was not
@@ -1045,8 +1131,32 @@ def cmd_append(args: argparse.Namespace) -> int:
         # phrases the message for the event that triggered it — `claim` stays
         # `claim`.
         if args.event in ("close", "claim") and target_ledger == LEDGER:
-            problems = sequence_problems(
-                index_by_subject(rows), args.subject, len(rows), args.event)
+            # A DECLARED BOARD RENUMBER IS RESOLVED HERE (#107). The legs of an item
+            # filed before a board migration carry its OLD number while the close
+            # carries its current one, and this predicate compares subjects as exact
+            # strings -- so a lawful close was refused with "no intake before it"
+            # while its own intake sat three inches away under the old number. The
+            # map is a DECLARATION (`docs/ledger-renumbers.json`), never an
+            # inference: see resolved_sequence_problems for why every derivation was
+            # refused on measurement.
+            #
+            # A MALFORMED DECLARATION REFUSES THE WRITE rather than falling back to
+            # "no renumbers": at the write path the two readings are not equally
+            # safe, because the silent one refuses a lawful close and reads as a
+            # defect in the item. `verify` reports the same failure as a problem
+            # instead, where reporting is the whole job.
+            try:
+                renumbers = load_renumbers(REPO)
+            except (DeclarationUnavailable, DeclarationUnreadable) as exc:
+                sys.exit(
+                    "ledger append refused: the renumber declaration could not be "
+                    f"read, so a lawful close cannot be told from an unlawful one: {exc}")
+            renumber_notices: list[str] = []
+            problems = resolved_sequence_problems(
+                index_by_subject(rows), args.subject, len(rows), args.event,
+                renumbers=renumbers, notices=renumber_notices)
+            for _notice in renumber_notices:
+                print(_notice)
             if problems:
                 sys.exit("ledger append refused: "
                          + "; ".join(message for _subject, _leg, message in problems))
@@ -1775,6 +1885,18 @@ def cmd_verify(args: argparse.Namespace) -> int:
     # row; `append` asks the SAME predicate about the row it is about to write,
     # so a defect is named at the moment it would be created (#98, n=596).
     by_subject = index_by_subject(rows)
+    # The declared renumber map, loaded ONCE for the whole pass (#107). Read on the USED
+    # path for the module's own stated reason, and a file that EXISTS but cannot be read
+    # is a PROBLEM rather than a silent "no renumbers": the silent reading refuses lawful
+    # closes and blames the items for it.
+    renumber_notices: list[str] = []
+    try:
+        _renumbers = load_renumbers(REPO)
+    except (DeclarationUnavailable, DeclarationUnreadable) as exc:
+        problems.append(
+            f"the renumber declaration could not be read, so a close may be reported "
+            f"as missing legs that its prior subject supplies: {exc}")
+        _renumbers = {}
     seq_problems: list[tuple[str, str, str]] = []  # (subject, leg, message)
     for i, row in enumerate(rows):
         event = row.get("event")
@@ -1786,7 +1908,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
         if event not in ("close", "claim"):
             continue
         seq_problems.extend(
-            sequence_problems(by_subject, row.get("subject"), i, event))
+            resolved_sequence_problems(
+                by_subject, row.get("subject"), i, event,
+                renumbers=_renumbers, notices=renumber_notices))
 
     # The dispatch leg is INDEPENDENT of the close sequence above (n=524: the malformed
     # check "may land with it or before it"), and its two halves have different
@@ -1844,6 +1968,13 @@ def cmd_verify(args: argparse.Namespace) -> int:
     # The population is printed BESIDE the verdict, never implied by it: a leg that
     # examined nothing must not read as a leg that examined the ledger and found it
     # clean. Same convention as the patrol legs.
+    # A RESOLUTION NOBODY SEES IS EXEMPT-BY-SILENCE (n=571): every renumber the pass
+    # relied on is printed with the receipt that establishes it, and the count is
+    # printed at zero too, so "none resolved" and "the map was not consulted" cannot
+    # read alike.
+    for _notice in renumber_notices:
+        print(_notice)
+    print(f"renumber-resolved closes: {len(renumber_notices)}")
     print(f"refs examined: {refs_examined}")
     # The dispatch leg's population, printed BESIDE the verdict rather than implied by
     # it — a leg that examined nothing must not read as one that examined the ledger.
