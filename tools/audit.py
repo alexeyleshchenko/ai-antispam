@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import math
 import os
 import re
 import subprocess
@@ -2154,7 +2155,21 @@ def main() -> int:
         # read from `started` at the top of `main()`. `turns=0` stays a legitimate
         # declaration — the runner makes no agent turns. The three-state gate token is
         # carried by `gate=`, which names `gate-unknown` explicitly (#72).
-        elapsed_secs = time.monotonic() - started
+        #
+        # ROUNDED UP, and the direction is load-bearing. `format_elapsed_seconds` TRUNCATES
+        # to integer seconds — the kit's contract, asserted at
+        # tests/test_audit_rates.py:1327-1330 (`0.4 -> "0s"`, `59.9 -> "59s"`), so it is not
+        # ours to change. Handed a raw wall, a run of 1.29s stamps `duration=1s`, which sits
+        # BELOW the gate table that same run printed — the row under-reporting the work it
+        # describes, the exact defect tests/test_audit_stamp_duration.py exists to catch, and
+        # it fired on the first full audit after this port (`sleep=1.0s tree: the row says
+        # duration=1.0s while the gate table it printed in the SAME run sums to 1.29s`).
+        # Rounding DOWN was the pre-port form only because that site rendered 2 dp; the kit's
+        # integer renderer cannot carry the fraction, so the only direction that keeps the
+        # row at or above its own gate table is UP. The cost is at most one second of
+        # over-report on a run measured in minutes, and a duration that never under-states
+        # the work is the property the guard asserts.
+        elapsed_secs = math.ceil(time.monotonic() - started)
         detail = format_run_row_detail(ledger_stats, outcome, gate_summary, elapsed_secs)
         stamp_cmd = [
             sys.executable,
