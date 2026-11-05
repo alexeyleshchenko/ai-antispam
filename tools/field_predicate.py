@@ -155,6 +155,101 @@ def declared_cause_count(text: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+DEFECT_KEY_TOKEN = "defect-key"
+"""The DECLARED intersection key a filing carries about its OWN defect (#417, ruled n=2745).
+
+One line, anchored at the start, carrying a normalised slug:
+
+    defect-key: gate-select-drops-interpreter
+
+It is the key the intake-time non-duplication check intersects against the OPEN set. It is
+the DEFECT's slug and never the title's, because two titles for one defect differ in wording
+while the defect does not — a title-derived key would miss the very re-filings the check
+exists to catch (#319/#321/#416 are three titles for one defect).
+
+ANCHOR-FIRST, like `oc-cause-count` above and for the same reason: `detail` is free prose that
+QUOTES declarations as evidence, so a token mentioned mid-sentence must not read as a
+declaration. The reader is `declared_defect_key`; the write path calls it rather than
+re-deriving the pattern, so the refusal and the gate's own probe -- which drives that same
+write path -- cannot disagree about what a row declares.
+
+The VALUE is the whole rest of the line, and it is NOT pre-filtered to a single non-space
+run: a pattern that only matched a well-formed slug would let `defect-key: Gate Select` match
+NOTHING, so a malformed key would read as no key at all — silently outside the intersection,
+which is the exact hazard `defect_key_problem` exists to refuse. Reading the raw value and
+judging it in one predicate is what keeps a malformed key loud instead of invisible.
+"""
+
+DEFECT_KEY_RE = re.compile(rf"^[ \t]*{DEFECT_KEY_TOKEN}:[ \t]*(.*?)[ \t]*$", re.MULTILINE)
+
+# A normalised slug: lowercase alphanumerics in hyphen-separated groups. Stated as a class
+# rather than left to the reader because the check's whole value is EXACT comparison — a key
+# carrying an uppercase letter, a space or a trailing dot can never equal another row's key,
+# so a malformed key is not a near miss: it is a key that silently never matches, and the
+# check would read clean over a duplicate it was built to refuse.
+DEFECT_KEY_SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+def declared_defect_key(detail: str) -> str | None:
+    """The `defect-key:` slug `detail` DECLARES, or None when it declares none.
+
+    Read ANCHOR-FIRST and by declaration alone, exactly as `declared_cause_count` is: the
+    token, then `:`, then the RAW VALUE, on a line of its own. Nothing is inferred from the
+    surrounding prose, and the value is returned as written — judging it a lawful slug is
+    `defect_key_problem`'s job, so a malformed key cannot hide by failing to match here.
+
+    The bound is stated rather than implied: a row carrying NO key returns None, and its
+    caller treats it as OUTSIDE the intersection — a keyless filing cannot collide, because
+    there is nothing to compare. That is deliberate and forward-only: the historical intakes
+    carry no key, and backfilling one would be a fabricated declaration rather than a repair.
+    """
+    m = DEFECT_KEY_RE.search(str(detail))
+    return m.group(1) if m else None
+
+def defect_key_problem(value: str) -> str | None:
+    """Why `value` is not a lawful `defect-key` slug, or None when it is one.
+
+    ONE predicate, two call sites — the write path refuses a malformed key and the gate
+    reports one, and neither re-derives the class. Without it a key such as `Gate Select` is
+    admitted and then matches nothing, so the check passes over a duplicate: the refusal is
+    what keeps the silence from reading as a clean intersection.
+    """
+    if DEFECT_KEY_SLUG_RE.fullmatch(value):
+        return None
+    return (
+        f"{value!r} is not a normalised slug — lowercase alphanumerics in hyphen-separated "
+        f"groups (e.g. `gate-select-drops-interpreter`), because the intersection is an "
+        f"EXACT comparison and a key that cannot equal another row's key never matches"
+    )
+
+RECURRENCE_OF_TOKEN = "recurrence-of"
+"""The DECLARED recurrence a filing carries when it re-files a CLOSED defect (#417, q35).
+
+One line, anchored at the start, naming the closed work unit:
+
+    recurrence-of: #319
+
+The owner's answer to q35 is **require declaration**, not print-only and not unconditional
+refusal: a recurrence is LEGITIMATE — a defect can genuinely return — so it is admitted, but
+it must SAY SO, and the declaration is what makes the second filing distinguishable from a
+duplicate that nobody checked. A `defect-key` matching a CLOSED item without this line is
+refused for the same reason an OPEN match is: at intake the two are indistinguishable, and
+the cheaper error is the one that asks the filer to declare.
+"""
+
+RECURRENCE_OF_RE = re.compile(rf"^[ \t]*{RECURRENCE_OF_TOKEN}:[ \t]*(#\d+)[ \t]*$", re.MULTILINE)
+
+def declared_recurrence_of(detail: str) -> str | None:
+    """The `recurrence-of: #N` subject `detail` DECLARES, or None when it declares none.
+
+    Read ANCHOR-FIRST, by declaration alone, and VERBATIM as `#<digits>`: the subject form is
+    the ledger's own (`#N`), never a bare integer, so `recurrence-of: 319` declares nothing —
+    the same strictness the ledger's subject column carries, for the same reason, that a bare
+    integer names an issue to a human and nothing to a machine.
+    """
+    m = RECURRENCE_OF_RE.search(str(detail))
+    return m.group(1) if m else None
+
+
 def declares_field(detail: str, key: str) -> bool:
     """True when `detail` declares `key` with a value that PARSES for that key's type.
 
@@ -198,6 +293,71 @@ def declares_token(detail: str, key: str, value: str) -> bool:
             return True
     return False
 
+def own_voice_text(detail: str) -> str:
+    """`detail` with every PARENTHETICAL ASIDE removed — the row's own voice.
+
+    The THIRD scope, and the one a reader needs when a row QUOTES a token: the canonical
+    trailer is POSITIONAL and the lexical scan is ANYWHERE, so a token sitting inside a
+    parenthetical aside — `n=1990 (… declared claim=reconstructed with no BASIS: marker …)`
+    — reads as a declaration to every lexical reader while being, in fact, a CITATION of
+    another row's defect. Scoping to the trailer alone was refused for the opposite harm
+    (`declares_token` records it): a token written mid-detail would go silently invisible,
+    and a declaration no reader can see is worse than one a reader can check. So the scope
+    is neither positional nor unlimited — it is the text that speaks in the row's OWN VOICE.
+
+    The rule is the one a careful reader applies and can state: a token is a DECLARATION
+    when it stands at parenthetical depth 0 — in the canonical trailer or in the row's own
+    mid-detail prose — and a QUOTATION when it sits inside an aside. Measured on the live
+    ledger when this landed: it keeps every one of the genuine mid-detail declarations and
+    drops exactly the one quotation.
+
+    The parentheses are replaced by a SPACE, never deleted, so the tokens on either side
+    cannot FUSE: deleting `(x)` from `claim=(aside)reconstructed` would mint the declaration
+    `claim= reconstructed` -> `claim=reconstructed` out of nothing. An aside replaced by a
+    space leaves a token boundary exactly where the original had one.
+
+    UNBALANCED PARENTHESES FAIL OPEN, and the asymmetry is deliberate. Where the parentheses
+    cannot be paired the depth of any given token is undefined, so this returns the detail
+    UNCHANGED and the caller keeps the lexical reading it had before this function existed.
+    Fail-open means the worst outcome is the pre-existing over-inclusion, which a human sees
+    and which is the very defect this function narrows; fail-closed would mean a stray `(`
+    silently DROPPING a genuine declaration, which is the false-negative the caller's
+    population exists to catch and which no reader would see. Measured on the live ledger
+    when this landed: ten rows carry unbalanced parentheses and NONE of them is in the
+    reconstructed-claim population, so the asymmetry is unexercised on real rows and stated
+    rather than hidden.
+
+    ONE predicate, shared (`n=405` clause 5, `n=599`): the two readers that need the
+    own-voice scope — `reconstruction.reconstructed_claims` and `reconstruction.names_basis`
+    — import THIS function rather than each carrying a private parenthesis walk, which is
+    the drift class this module exists to close. It reads the WHOLE detail and never a
+    trailer: an aside removed from a trailer would be a fourth reading of the trailer, and
+    `trailer_tokens` is already the one positional reader.
+    """
+    text = str(detail)
+    if "(" not in text and ")" not in text:
+        # The common case, and it is not only an optimisation: with no parentheses to pair
+        # the depth is trivially zero everywhere, so the detail IS its own voice.
+        return text
+    out: list[str] = []
+    depth = 0
+    balanced = True
+    for char in text:
+        if char == "(":
+            depth += 1
+            out.append(" ")
+        elif char == ")":
+            if depth == 0:
+                balanced = False
+            else:
+                depth -= 1
+            out.append(" ")
+        elif depth == 0:
+            out.append(char)
+    if depth != 0 or not balanced:
+        return text
+    return "".join(out)
+
 def trailer_tokens(detail: str) -> list[str]:
     """The maximal run of `=`-carrying tokens at the END of `detail`, in order.
 
@@ -235,6 +395,46 @@ def declared_keys(detail: str) -> list[str]:
         if key is not None and key not in keys:
             keys.append(key)
     return keys
+
+# The `ruling` row's `comment=<id>` field — the BOARD COMMENT the ruling was paired with.
+#
+# ONE home for the key (#297). Three readers ask for it: the writer that puts it on the row
+# (`tools/rule.py`), the refuser that will not stamp a `ruling` row without it
+# (`tools/ledger.py append`) and the gate that judges history
+# (`tests/test_ruling_row_recorded.py`). A private `PAIRING_KEY = "comment"` in any of the
+# three is the defect section 11 names rather than a style preference: two copies drift in
+# silence, and the drift lands on exactly the rows the pairing exists to make readable. It
+# lives here because this module already owns both halves of the reader the three compose —
+# `trailer_tokens` (the run is POSITIONAL, so a token quoted in prose is not a declaration)
+# and `keyed_value` (a declaration carries a NON-EMPTY value).
+PAIRING_KEY = "comment"
+
+def declared_pairing(detail: str) -> str | None:
+    """The `comment=` value `detail`'s CANONICAL TRAILER declares, else None.
+
+    RAW, not filtered for well-formedness. The gate must be able to REPORT a token that is
+    declared and malformed (`comment=none`) rather than read it as absent — the two are
+    different defects with different remedies, and collapsing them would let a malformed
+    token read as a missing one. The well-formedness test is therefore the caller's, and
+    `declared_comment_id` is the filtered read the WRITE PATH asks.
+    """
+    for token in trailer_tokens(detail):
+        value = keyed_value(token, PAIRING_KEY)
+        if value:
+            return value
+    return None
+
+def declared_comment_id(detail: str) -> str | None:
+    """The WELL-FORMED `comment=<id>` `detail`'s canonical trailer declares, else None.
+
+    WELL-FORMED means a run of DIGITS: the value is a board comment id, and `comment=none`
+    or `comment=abc` OCCUPIES the key while naming no comment — the row is half-recorded
+    exactly as if the token were absent. This is the SAME test the gate applies
+    (`str.isdigit()`), asked here so the write path and the reader cannot disagree about
+    what a row declares (#297 clause 2, one predicate two call sites).
+    """
+    value = declared_pairing(detail)
+    return value if value and value.isdigit() else None
 
 # The close row's `head=<sha>` field — the revision its receipts describe. This is its
 # ONE canonical reader, shared by the gate that judges history and the write path that
@@ -274,6 +474,64 @@ def declared_revision(detail: str, min_chars: int = REVISION_MIN_CHARS) -> str |
         if len(sha) >= min_chars and all(c in _HEX_DIGITS for c in sha):
             return sha
     return None
+
+# The close row's `board=<state>` field — the BOARD state the settling lane recorded at
+# close time, ruled into the write path by #434 and built as #435.
+#
+# WHY IT EXISTS. `tests/test_close_board_recorded.py` demands this token on every close row
+# and is REQUIRED, so it ships to every factory. Until this refusal existed NOTHING at the
+# write path asked for it: `grep -n 'board=' tools/ledger.py` returned nothing, and three
+# post-boundary instances shipped — `n=2101` (#197), `n=2104` (#267) and `n=2811` (#431,
+# 2026-10-07T17:47:29Z). Each time the board close DID happen (`n=2811`: the board read
+# CLOSED at 2026-10-07T17:48:13Z, 44 s after the row), so each is a RECORDING miss whose
+# repair space is EMPTY — the row is pushed, and the ledger is append-only. The gate's own
+# doctrine bars a third exemption row and names the remedy instead: a mechanism that stops
+# the omission at the write path. This is that mechanism's reader.
+#
+# ONE HOME for the accepted value (#297, the `PAIRING_KEY` precedent). Three surfaces ask
+# for it — the writer that must put it on the row, the refuser that will not stamp a close
+# without it, and the gate that judges history. A private `"closed"` literal in any of the
+# three drifts in silence, and the drift lands on exactly the rows the token exists to make
+# readable.
+#
+# THE SCOPE SPLIT IS DELIBERATE, and it is the one thing a reader of the gate could get
+# wrong. The gate scans the WHOLE `detail` (its `_has_board_token`, measured 2026-10-03:
+# 26 post-invariant rows carry `board=closed` outside their terminal run — mid-prose, or
+# with punctuation attached — so a positional read would false-RED a quarter of its
+# population). That is correct THERE because the gate reads HISTORY. The WRITER is judged
+# on its OWN canonical run, exactly as `declared_revision` does for `head=`: a lane must
+# not satisfy this refusal by QUOTING the token in prose, and the three live `head=` rows
+# that split the two readings (`n=1077`, `n=1083`, `n=1091`) are the same hazard one field
+# over. So this function reads `trailer_tokens` and never the whole detail.
+BOARD_KEY = "board"
+BOARD_CLOSED = "closed"
+
+def declared_board(detail: str) -> str | None:
+    """The `board=<state>` value `detail`'s CANONICAL TRAILER declares, else None.
+
+    RAW, not filtered for the accepted value — the same split `declared_pairing` makes and
+    for the same reason: a token that is DECLARED and wrong (`board=open`) is a different
+    defect from one that is ABSENT, with a different remedy, and collapsing them would let a
+    self-contradicting row read as an unrecorded one. `declared_board_closed` is the filtered
+    read the WRITE PATH asks; callers judging history ask this one and classify the value
+    themselves against `BOARD_CLOSED`.
+    """
+    for token in trailer_tokens(detail):
+        value = keyed_value(token, BOARD_KEY)
+        if value:
+            return value
+    return None
+
+def declared_board_closed(detail: str) -> bool:
+    """True when `detail`'s canonical trailer declares `board=closed`.
+
+    The WRITE PATH's predicate, and the filtered half of the pair above: the refusal asks
+    whether the row DECLARED THE ACCEPTED VALUE, not merely whether the key is occupied.
+    `board=open` therefore does not satisfy it, which is the point — a close that records the
+    board as still open is the self-contradiction the gate already refuses, and a write path
+    that accepted the bare key would let it through.
+    """
+    return declared_board(detail) == BOARD_CLOSED
 
 # The close trailer's `rework` field — the disposition a close DECLARES. Its domain is
 # exactly two canonical values, ruled at ledger `n=386` clause 3 (reusing #53 clauses
@@ -417,27 +675,6 @@ def _value_parses(key: str, value: str) -> bool:
         return True
     return telemetry_value_problem(key, value) is None
 
-OUTCOME_KEY = "outcome"
-
-def declared_outcome_values(detail: str) -> list[str]:
-    """Every `outcome` value `detail`'s CANONICAL TRAILER declares, in order.
-
-    The positional leg of the read, published so `tools/audit.py::declared_outcome` can
-    COMPOSE it rather than scan the text itself (#498). Until then that function was the
-    last field reader in the tree that did not go through this module: it took the LAST
-    `outcome=` token ANYWHERE in the detail, which equals the trailer read only while the
-    trailer is intact AND terminal.
-
-    An EMPTY value is a MENTION, not a declaration — `keyed_value` refuses an empty value
-    by design, so `outcome=` contributes nothing even inside the run.
-
-    A LIST, not a single value, for `_declared_values`' reason: a resolving caller must
-    see every token it has to resolve. A caller reading a DISPOSITION takes the last,
-    which is the law's canonical token and the only one the run can carry — `append`
-    refuses a run that declares a key twice (#496).
-    """
-    return _declared_values(detail, OUTCOME_KEY)
-
 def _declared_values(detail: str, key: str) -> list[str]:
     """Every `key` value `detail`'s CANONICAL TRAILER declares, in order.
 
@@ -457,6 +694,43 @@ def _declared_values(detail: str, key: str) -> list[str]:
             values.append(value)
     return values
 
+# The `outcome` field. Its DOMAIN lives in `tools/audit.py` beside `OUTCOME_DOMAIN`
+# (`docs/processes.md`: accepted · reworked · abandoned · failed), because a bucket is a
+# classification and not a read; the READ lives here, because it is the same positional
+# read as every other word-valued field.
+OUTCOME_KEY = "outcome"
+
+def declared_outcome_values(detail: str) -> list[str]:
+    """Every `outcome` value `detail`'s CANONICAL TRAILER declares, in order.
+
+    The positional leg of the read, published so `tools/audit.py::declared_outcome` can
+    COMPOSE it rather than scan the text itself (#498). Until then that function was the
+    last field reader in the tree that did not go through this module: it took the LAST
+    `outcome=` token ANYWHERE in the detail, which equals the trailer read only while the
+    trailer is intact AND terminal. The module's own `declared_rework` docstring asserted
+    the parallelism while one half of it read the run and the other read the prose.
+
+    Measured at 3435 rows (#498, ruling `n=3436`): 61 rows diverge from this read and
+    every one of the 61 matches a token OUTSIDE its canonical run. The fabrications run
+    in BOTH directions — `n=2028` (close) declares `telemetry=unavailable` and was read
+    as `failed` off prose QUOTING another row's trailer; `n=3275` (run) declares
+    `duty=completed` and was read as `accepted` off a quotation; `n=1062` (run) states
+    it deliberately carries no `outcome=` and was read as declaring `,`. The `#53`
+    remedy (last-token-wins) cured the first direction and left the other, and this read
+    closes both: a token quoted mid-sentence is prose and never becomes a declaration.
+
+    An EMPTY value is a MENTION, not a declaration — `keyed_value` refuses an empty value
+    by design, so `outcome=` contributes nothing even inside the run. That is why the
+    empty shape is an ABSENCE rather than a malformed value (#498 correction, superseding
+    the ruling's Part 4 item 4 for that entry).
+
+    A LIST, not a single value, for `_declared_values`' reason: a resolving caller must
+    see every token it has to resolve. A caller reading a DISPOSITION takes the last,
+    which is the law's canonical token and the only one the run can carry — `append`
+    refuses a run that declares a key twice (#496).
+    """
+    return _declared_values(detail, OUTCOME_KEY)
+
 # The close trailer's `telemetry` field — the PROVENANCE of the measurement keys above,
 # and the field #129 introduced for the absence case. `#130` (HQ ruling, three parts)
 # made it the answer to a question no structural read of a row can settle: HQ measured
@@ -472,21 +746,33 @@ def _declared_values(detail: str, key: str) -> list[str]:
 # word — which is why the read below is positional and why `declares_token` exists where
 # a single named value is the question.
 #
-# Three values, and each names the WRITER:
-#   * `measured`    -- the tool TOOK the values: `tools/telemetry.py::format_detail_string`
-#                      emitted them, or `tools/ledger.py`'s close guard appended them.
-#   * `typed`       -- the values were NOT contributed by the tool. The guard's
-#                      contribution-free branch is exactly where a hand-typed row enters.
+# Three values, and each names the WRITER -- and the token is PER-ROW while the values it
+# describes are PER-KEY, so what it claims is stated here rather than left to the natural
+# (stronger) reading (#486):
+#   * `measured`    -- EVERY measurement key in the row was composed by the tool:
+#                      `tools/telemetry.py::format_detail_string` emitted them, or
+#                      `tools/ledger.py`'s close guard appended every one of them.
+#   * `typed`       -- AT LEAST ONE value in the row is the author's. This is the weaker
+#                      claim, and it is the honest one for a mixed row: one tool-composed
+#                      key beside four hand-typed numbers is still an author's row, and a
+#                      consumer must not read `measured` over those four (#486's case A,
+#                      where a single contributed key flipped the whole row's claim).
 #   * `unavailable` -- nothing was measured, STATED rather than silently absent (#129).
+#
+# AND IT IS TOOL-OWNED (#483): the close guard REFUSES an author-declared `telemetry=` at
+# the write path, because a token an author writes is testimony rather than evidence and
+# no reader can tell it from one the tool wrote. The guard composes it from the branch that
+# decided it; nothing else may write it.
 TELEMETRY_PROVENANCE_KEY = "telemetry"
 TELEMETRY_PROVENANCE_VALUES: tuple[str, ...] = ("measured", "typed", "unavailable")
 
 def declared_telemetry_provenance(detail: str) -> list[str]:
     """Every `telemetry` value `detail`'s CANONICAL TRAILER declares, in order.
 
-    The ONE positional read of this field, imported by both call sites — the close guard
-    in `tools/ledger.py`, which must not RESTATE a provenance the detail already carries
-    (two tokens for one field have no canonical reading, SKILL.md §Verdicts and claims), and
+    The ONE positional read of this field, imported by both call sites — the write path in
+    `tools/ledger.py`, which REFUSES a close detail that already declares one (#483: the
+    token is tool-owned, so an author-supplied value is refused rather than overwritten,
+    and a row therefore never carries two), and
     `tests/test_close_telemetry_provenance.py`, which asserts that a row declaring a
     measurement declares its provenance too. A private `token.split("=")` at either would
     be the class `n=405` PART 5 rules: one field, one predicate.
@@ -553,6 +839,45 @@ def declared_duty(detail: str) -> list[str]:
     return _declared_values(detail, DUTY_KEY)
 
 
+def mentions_duty(detail: str) -> bool:
+    """True when `detail` carries the `duty` KEY in the row's OWN VOICE, trailer or prose.
+
+    The LEXICAL half of the pair above, and it exists for ONE job: to let the patrol's
+    duty-receipt leg NAME a MALFORMED receipt instead of silently not seeing it (#281,
+    ruling n=2003). `declared_duty` reads the CANONICAL TRAILER, and a receipt whose
+    token sits in prose -- or whose trailer is terminated early by a `Session: <uuid>
+    (actor triage).` line carrying no `=` -- declares NOTHING to that reader while its
+    author is told to declare the very token they believe they declared. Measured on the
+    live ledger when this landed: n=1875, n=1880 and n=1966 all read
+    `declared_duty -> []` while carrying `duty=completed` in their own prose.
+
+    Deliberately NOT the declaration predicate: a LEXICAL test lets a row that merely
+    DISCUSSES a duty satisfy its own receipt, which is the #88 / `n=405` clause 5 damage
+    ("prose must not SATISFY a field"). The leg reads the positional form for the
+    VERDICT; this answers only "did the author write the token where a reader can point
+    at it?" so the finding can say WHY it is not being seen. The leg asks it only of a
+    row whose canonical trailer declares NO duty, so a token this finds is by
+    construction OUTSIDE the run.
+
+    THE SCOPE IS THE ROW'S OWN VOICE, and the shared discriminator is imported rather
+    than re-walked (`n=405` PART 5, `n=599`): a token inside a PARENTHETICAL ASIDE is a
+    CITATION of another row's token, not this row's declaration. A QUOTED token is
+    excluded by `keyed_value` itself, which requires a token to BEGIN with `key=`, so
+    `'duty=completed'` is a quotation of the field and never a mention of it.
+
+    WHAT THIS DOES NOT SEPARATE, stated rather than hidden: n=2000 is a repair record
+    that both quotes `'duty=completed'` and mentions the token UNQUOTED in its own prose
+    ("the receipt row declares duty=completed in its TEXT"). The unquoted mention is
+    indistinguishable from a declaration by any lexical reader, so n=2000 is kept out of
+    the leg's finding by its POPULATION and not by this predicate: the round it keys
+    (2026-10-03) also carries n=1999, which DECLARES, so no judged round ever asks this
+    question of it. A row that discusses a token in its own voice while its round has no
+    declaring row is reported -- and the finding is a POINTER ("make the token terminal"),
+    which is true of the row whether it declared or merely discussed.
+    """
+    return any(keyed_value(token, DUTY_KEY) is not None
+               for token in own_voice_text(detail).split())
+
 RECLOSE_KEY = "reclose"
 
 
@@ -586,6 +911,56 @@ def declared_reclose(detail: str) -> list[str]:
     return _declared_values(detail, RECLOSE_KEY)
 
 
+RECLAIM_KEY = "reclaim"
+
+def declared_reclaim(detail: str) -> list[str]:
+    """Every `reclaim` value `detail`'s CANONICAL TRAILER declares, in order.
+
+    The ONE read of this field, imported by the append path that refuses a SECOND
+    `claim` for a subject by the same actor (#246) — a private `token.split("=")` there
+    would be the class ruled at `n=405` PART 5: one field, one predicate.
+
+    IT MIRRORS `declared_reclose` DELIBERATELY, and the mirroring is the point: a claim
+    and a close are the two ends of one lifecycle, so a reader that learns the close's
+    declaration form should meet the claim's in the same shape. The measured population
+    is what makes the token a FORMALISATION rather than a new burden: three of the eight
+    multi-claim subjects already declare themselves in prose (`RE-CLAIM by the Worker
+    lane … after Triage's intake at n=480`, `CLAIM #113 (fresh) — a SECOND acceptance`,
+    `Re-claiming #161 after the intake leg landed`) — the convention existed and only
+    lacked a token.
+
+    WHY NOT `declares_field`: it serves a NUMERIC key and TYPE-TESTS the value it finds,
+    while `reclaim` carries a free-text REASON — the defect `declared_reclose`'s own
+    docstring records at length, where the escape hatch the refusal prescribed was
+    UNREACHABLE for every value it could hold.
+
+    The run is POSITIONAL (`trailer_tokens`), matching every other declared field:
+    section 11 puts a declaration in the canonical trailer, so a value quoted
+    mid-sentence is prose. Values are read VERBATIM.
+
+    A LIST, for the same reason: a row carries one token (a field with two values has no
+    canonical reading, SKILL.md section 8), and the caller must be able to SEE a second
+    rather than read the first silently.
+    """
+    return _declared_values(detail, RECLAIM_KEY)
+
+def mentions_reclaim(detail: str) -> bool:
+    """True when `detail` carries the `reclaim` KEY anywhere, trailer or prose.
+
+    The LEXICAL half of the pair above, for the ONE job `mentions_reclose` exists for: to
+    let the append path NAME a malformed declaration instead of silently not seeing it. A
+    `reclaim` value containing a SPACE terminates the canonical trailing run, so the row
+    declares nothing at all while its author is told to write the token they believe they
+    wrote.
+
+    Deliberately NOT the guard's predicate: a LEXICAL test lets a row that merely
+    DISCUSSES a re-claim satisfy its own guard, which is the #88 / `n=405` clause 5 damage
+    ("prose must not SATISFY a field"). The guard reads the positional form; this answers
+    only "did the author write the token somewhere I can point at?"
+    """
+    return any(keyed_value(token, RECLAIM_KEY) is not None
+               for token in str(detail).split())
+
 def mentions_reclose(detail: str) -> bool:
     """True when `detail` carries the `reclose` KEY anywhere, trailer or prose.
 
@@ -605,3 +980,219 @@ def mentions_reclose(detail: str) -> bool:
     """
     return any(keyed_value(token, RECLOSE_KEY) is not None
                for token in str(detail).split())
+
+CLAIM_KEY = "claim"
+
+def declared_claim(detail: str) -> list[str]:
+    """Every `claim` value `detail`'s CANONICAL TRAILER declares, in order.
+
+    The ONE positional read of this field, imported by the append path that refuses a
+    `claim` value outside the reconstruction vocabulary (#249) — a private
+    `token.split("=")` there would be the class ruled at `n=405` PART 5: one field, one
+    predicate.
+
+    IT MIRRORS `declared_reclaim` AND `declared_reclose` DELIBERATELY, and the mirroring
+    is the point: `claim` is the third of the three declarations on the claim/close
+    lifecycle, so a reader who has learned the other two meets this one in the same shape.
+
+    WHY NOT `declares_token`, WHICH THE GATE USES, and the defect that makes the
+    difference load-bearing: `declares_token` asks whether ONE named value is present, so
+    it answers True for a row declaring `reconstructed` and False for EVERY other value —
+    and a refusal built on it would have read `claim=#220` as "nothing declared here",
+    which is precisely the state it exists to refuse. The refusal must SEE the value, not
+    match it, so the read is positional and returns what is there.
+
+    The run is POSITIONAL (`trailer_tokens`), matching every other declared field: section
+    11 puts a declaration in the canonical trailer, so a value quoted mid-sentence is
+    prose — the `#99` class, where a private whitespace scan over the whole `detail` took
+    eight prose QUOTATIONS for eight declarations and put a false population into a close
+    row (`n=1785`, corrected at `n=1790`).
+
+    A LIST, for `declared_reclaim`'s reason: a row carries one token (a field with two
+    values has no canonical reading, SKILL.md section 8), and the caller must be able to
+    SEE a second rather than read the first silently.
+    """
+    return _declared_values(detail, CLAIM_KEY)
+
+# The `dispatch` row's `delivery=<verdict>` field — the verdict the row's author RECORDED
+# for the routing the row claims (#49 shape 1, ruled at ledger n=1893).
+#
+# A `dispatch` row is a claim that a lane was TOLD, and until this field it was a claim
+# with no receipt: the row and the `session_notify` that carries the brief are two
+# independent facts, either of which can exist without the other. Measured 2026-09-18 in
+# BOTH directions — `#41`/`#42` delivered with no row, `#48` a row (n=276) with no
+# delivery — and the sharpest instance is `#48`'s, appended and committed by a turn a
+# restart killed between the append and the notify, so the ledger reported a routing that
+# had not happened.
+#
+# THE FIELD'S PRESENCE IS NOT THE DELIVERY, AND THE RULING SAYS SO ITSELF: `tools/ledger.py`
+# can require the verdict be RECORDED; it cannot verify it is TRUE. So this read is the
+# write-path SEAM and nothing more — `tools/patrol_host_state.py`'s delivery leg is the
+# EVIDENCE, and a reader that takes this token as proof of delivery has re-derived the very
+# error the field exists to catch.
+#
+# The existing convention is PROSE — 78 live dispatch rows carry the phrase
+# `delivery turn-end` mid-sentence — and it is deliberately NOT the form read here. A
+# verdict outside the canonical trailing run is a quotation: measured 2026-09-19, `n=276`
+# (the phantom row this field exists to have caught) carries the WORDS but no token, so a
+# whole-detail scan would read its prose as a declaration and admit the very row the
+# refusal is aimed at. The run is POSITIONAL, matching every other declared field.
+#
+# A LIST, for `declared_reclaim`'s reason: a row carries one token (a field with two
+# values has no canonical reading, SKILL.md section 8), and the caller must be able to SEE
+# a second rather than read the first silently. The VALUE's vocabulary is NOT fixed here —
+# the author records the verdict they took (`turn-end`, `interrupt`, `deferred`, `none`),
+# and the leg judges it against the target's own message history.
+DELIVERY_KEY = "delivery"
+
+def declared_delivery(detail: str) -> list[str]:
+    """Every `delivery` value `detail`'s CANONICAL TRAILER declares, in order.
+
+    The ONE positional read of this field, imported by the append path that refuses a
+    `dispatch` row carrying no verdict (#49 shape 1) and by the patrol leg that seeks the
+    delivery each verdict claims — a private `token.split("=")` at either would be the
+    class ruled at `n=405` PART 5: one field, one predicate.
+
+    `keyed_value` carries the well-formedness half: a bare `delivery=` names no verdict,
+    so it is not a declaration and the row is refused exactly as if the token were absent.
+    """
+    return _declared_values(detail, DELIVERY_KEY)
+
+
+# The conversion row's `converted_from=<artifact>` field -- the pointer that makes the
+# score-regression duty MECHANICAL (issue #67, ruling `n=1599`).
+#
+# Section 6 declared the conversion "automatic" while no mechanism carried it, and the
+# filing's own remedy note said the factory-to-issue mapping "is not mechanical today".
+# It becomes mechanical the moment the conversion DECLARES its source: the declaration is
+# the reader's key, so the patrol's score-conversion leg joins a regression in a score
+# artifact to the row that answered it without reading any lane's prose. Same shape as the
+# duty receipt (`declared_duty`), one surface over.
+#
+# WELL-FORMED IS THE ARTIFACT PATH ITSELF, not merely a non-empty value: the ruling names
+# the literal `converted_from=evidence/scores/<date>.md`, and a token naming anything else
+# attributes the conversion to NO artifact -- which is the state being repaired. So
+# `converted_from=none`, a bare `converted_from=`, and a path outside `evidence/scores/`
+# all OCCUPY the key while naming no artifact, and the write path refuses them exactly as
+# if the token were absent (#297 clause 2's shape: one predicate, two call sites).
+#
+# POSITIONAL, through `trailer_tokens`, for the reason every field here is: `detail` is
+# free prose that QUOTES trailers as evidence, so a whole-detail scan would let a writer
+# satisfy the refusal by quoting an artifact path while the row's own run declares none.
+CONVERSION_KEY = "converted_from"
+
+CONVERSION_SOURCE_RE = re.compile(r"^evidence/scores/\d{4}-\d{2}-\d{2}\.md$")
+
+def declared_conversion_source(detail: str) -> str | None:
+    """The WELL-FORMED `converted_from=<artifact>` `detail`'s CANONICAL RUN declares.
+
+    `None` means the run declares no conversion source -- the state the write path refuses
+    for a `conversion` row and the leg reports as unattributed. The well-formedness test is
+    the artifact-path SHAPE, so a token that occupies the key while naming no artifact is
+    read as absent rather than as a source.
+    """
+    for token in trailer_tokens(detail):
+        value = keyed_value(token, CONVERSION_KEY)
+        if value and CONVERSION_SOURCE_RE.match(value):
+            return value
+    return None
+
+#
+# THE ROUTING REF (#580, ruling `n=4448`). The conversion's SECOND field, and it is a REF
+# rather than a detail token because #535 measured what a prose token buys: `park:owner:qN`
+# was grepped out of free prose and two rows falsified the scan -- `n=3339` names a park in
+# the prose of the row that ENDED it, and `n=2884` names three parks in a ruling whose
+# subject is a fourth unit. A state is a TRANSITION carried by a typed pointer, never a
+# string present in prose, so the item a conversion routed its round into travels as
+# `board:#<n>`.
+#
+# WELL-FORMED IS THE `#<digits>` FORM ITSELF, for the reason the artifact path is one block
+# up: `board:463` (no hash) and a bare `board:` OCCUPY the kind while naming no tracker
+# item, and the reader that resolves them would be resolving nothing. So the write path
+# refuses them exactly as if the ref were absent, and the leg reads them as absent -- one
+# predicate, two call sites (#297 clause 2's shape, one field over).
+BOARD_REF_KEY = "board"
+
+BOARD_REF_VALUE_RE = re.compile(r"^#\d+$")
+
+def declared_board_routings(refs) -> list[str]:
+    """EVERY well-formed `board:#<n>` ref a row declares, in ROW ORDER.
+
+    The PLURAL home, and the singular below is defined through it so the two cannot
+    disagree about what a lawful board ref is (#585, ruling n=4493). The conversion path
+    needs exactly one -- a round routes into one item -- while a ruling that ORDERS several
+    mechanisms names several, and the resolver that reads it must not be capped at one:
+    the arity was the defect. A `board` value that is not the `#<digits>` form names no
+    tracker item, so it is dropped here rather than carried as a name.
+    """
+    found: list[str] = []
+    for ref in refs or []:
+        if not isinstance(ref, dict):
+            continue
+        value = ref.get(BOARD_REF_KEY)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if BOARD_REF_VALUE_RE.match(text):
+            found.append(text)
+    return found
+
+def declared_board_routing(refs) -> str | None:
+    """The FIRST WELL-FORMED `board:#<n>` ref a row declares, or `None`.
+
+    `None` means the row declares no routing act: either it carries no `board` ref at all
+    or the value it carries is not the `#<digits>` form. The write path refuses that state
+    for a `conversion` row stamped at or after the routing epoch, and the patrol's
+    score-conversion leg reports it as UNANSWERED -- the same two call sites, and the same
+    predicate, as the artifact token above.
+
+    THE PLURAL IS THE PREDICATE and this is its first element (#585, ruling n=4493). Written
+    as a delegation rather than a second loop, because a copy of the well-formedness test
+    one function down is the drift class this file exists to prevent: the reader that
+    resolves a ruling's named mechanisms and the writer that refuses a malformed conversion
+    routing must agree on which values are names at all.
+    """
+    found = declared_board_routings(refs)
+    return found[0] if found else None
+
+# THE REPOSITORY REF (#592, ruling `n=4551`). A `ruling` row's `subject` is a bare `#NNN`
+# with NO repo qualifier, and this ledger carries rulings about other repositories' issues,
+# so `n=433` -- a ruling on `opencrabs#366` -- satisfied `agent-factories#366` for 26 days
+# while the item had never been ruled in this repo's life. The discriminator cannot be read
+# from the row's TEXT: `n=433` and `n=4279` are structurally identical prose and one is
+# foreign while the other is ours, and a `--repo` substring test flagged 40 rows of which 39
+# were false positives. So the WRITER declares it, because the lane that stamps the row is
+# the only place the fact exists.
+#
+# ABSENT MEANS THIS FACTORY. That default is what preserves the meaning of all 702
+# historical ruling rows and needs no backfill, and it is why this reader returns only the
+# WELL-FORMED values: a malformed value names no repository, so it cannot be evidence of a
+# foreign one.
+REPO_REF_KEY = "repo"
+
+REPO_REF_VALUE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+$")
+
+def declared_repo_refs(refs) -> list[str]:
+    """EVERY well-formed `repo:<owner>/<name>` ref a row declares, in ROW ORDER.
+
+    Plural for the same reason `declared_board_routings` is: a row may name more than one,
+    and a reader capped at one would silently drop the rest. The leg that consumes this
+    treats a value OTHER than this factory's own as a foreign row, so a dropped value would
+    be a foreign row read as ours -- the exact defect the ref exists to remove.
+
+    WELL-FORMED IS `owner/name` AND NOTHING ELSE, on the `board` precedent one field over:
+    `repo:opencrabs` and a bare `repo:` OCCUPY the kind while naming no repository, so they
+    are dropped here rather than carried as a name -- and the write path refuses them for
+    this kind, so the two sites cannot disagree about what a name is.
+    """
+    found: list[str] = []
+    for ref in refs or []:
+        if not isinstance(ref, dict):
+            continue
+        value = ref.get(REPO_REF_KEY)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if REPO_REF_VALUE_RE.match(text):
+            found.append(text)
+    return found
