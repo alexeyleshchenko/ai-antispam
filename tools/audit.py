@@ -1397,6 +1397,19 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     if (repo_root / "tests/test_rework_relative_revision.py").is_file():
         gates_to_run.append([sys.executable, "tests/test_rework_relative_revision.py"])
 
+    # 3c. Rework declared-to-landed gate (#129). Its deferral named an EXPIRED blocker —
+    # "the evidence format this tree uses has no `Subject` column" — which #126 removed on
+    # 2026-11-05. Behind it sat a second, real reason the entry never said: the gate's
+    # vacuity leg refuses to report green while NO close row declares `rework=#N`, so
+    # registering it before such a row existed would have turned the daily audit red with
+    # "the gate examined nothing". The write path now PRODUCES and REQUIRES that
+    # declaration (05766a4), and close n=309 is the first row appended under it, resolving
+    # to the #129 entry in `evidence/rework.md`. Registered only after a measured green:
+    # 1 declaration in scope, resolved, exit 0. SCRIPT form — a `check(...)` script, so
+    # pytest would report "no tests ran" and exit 0, a green that measured nothing.
+    if (repo_root / "tests/test_rework_declared_landed.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_rework_declared_landed.py"])
+
     # 4. Single-writer gate
     if (repo_root / "tests/test_single_writer.py").is_file():
         gates_to_run.append([sys.executable, "tests/test_single_writer.py"])
