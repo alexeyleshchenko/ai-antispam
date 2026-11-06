@@ -83,6 +83,16 @@ BANNED_MODELS = (
     "inclusionai/ling-3.0-flash-sante:free",
 )
 
+# Provider PREFIXES the owner has excluded outright. Distinct from DEAD_MODELS
+# (unreachable) and BANNED_MODELS (reachable, but writes an unusable reason):
+# these serve fine and still must not occupy a slot.
+#
+# A prefix, not a model id, because the ag/ slot has already been re-pointed
+# once - ag/gemini-3.7-flash-high was withdrawn on 2026-10-14 and the slot went
+# to ag/gemini-3.8-flash-high. A model-id ban would have let the next alias in
+# through the same door.
+EXCLUDED_PROVIDER_PREFIXES = ("ag/",)
+
 
 def test_classifier_does_not_route_through_the_gateway():
     """The classification path must not traverse the gateway (2026-10-01).
@@ -186,6 +196,32 @@ def test_no_banned_model_occupies_a_fallback_attempt():
         assert banned not in configured, (
             f"{banned} is banned for reason-language defects and must not occupy "
             "a fallback attempt"
+        )
+
+
+def test_pool_excludes_owner_excluded_providers():
+    """Owner directive 2026-11-06: "We need to exclude ag provider endpoints -
+    they are extremely flaky."
+
+    Measured basis, the week to 2026-11-05: the ag/ lead produced 27 lead
+    timeouts on 11-03 (2 terminal pool exhaustions, one message at 206.3s),
+    2 on 11-04 and 3 on 11-05, while cb/ served 28 fallbacks without a terminal
+    failure. The slot was not simply deleted: a one-model pool is refused by
+    test_pool_spans_more_than_one_provider below, and the replacement
+    (cmc/z-ai/glm-5.3-flash) was probed for reachability and for Russian
+    structured output before it took the slot - cp/zai/glm-5.3-flash was 503
+    "no available provider" despite being listed, which is how a dead id gets
+    into a pool.
+    """
+    reset_llm_config_validation()
+    validate_llm_config()
+
+    configured = get_openrouter_models()
+    for prefix in EXCLUDED_PROVIDER_PREFIXES:
+        offenders = [m for m in configured if m.startswith(prefix)]
+        assert not offenders, (
+            f"{offenders} use the owner-excluded provider prefix {prefix!r}; "
+            "that provider is flaky by measurement and must not hold a slot"
         )
 
 

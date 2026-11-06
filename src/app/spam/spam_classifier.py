@@ -46,6 +46,11 @@ def _openrouter_attempt_wall() -> float:
     cancelled mid-flight and the fallback paid for the same work again from
     zero.
 
+    Historical, not current: ``ag/`` left the pool entirely on 2026-11-06 by
+    owner directive ("exclude ag provider endpoints - they are extremely
+    flaky"), so the measurements above explain where the wall came from, not
+    what the pair is today. See ``config.yaml`` for the shipped pair.
+
     No fixed slice can be right, because the provider regime itself moves - the
     same model on the same production-parity prompt measured a ~3x swing across
     two consecutive days (``ag/gemini-3.7-flash-high`` p50 11,272 ms on

@@ -112,9 +112,29 @@ llm:
   # not a missing instruction. Both are pinned in BANNED_MODELS so a later
   # config edit cannot quietly re-add them.
   # See docs/memos/2026-09-25-fallback-pool-language-and-accuracy.md
+  #
+  # OWNER DIRECTIVE 2026-11-06: "We need to exclude ag provider endpoints -
+  # they are extremely flaky." ag/gemini-3.8-flash-high is OUT. The slot went
+  # to cmc/z-ai/glm-5.3-flash, picked by probing the live endpoint rather than
+  # by reading the catalogue (2026-11-06, from inside the production container,
+  # 2-3 calls each):
+  #   cb/deepseek-v4.1-flash  200  1.85-2.17s  lead, unchanged in behaviour
+  #   cmc/z-ai/glm-5.3-flash  200  1.13-3.56s  structured tool_call OK; reason
+  #                                            stayed Russian on CJK input
+  #   cp/zai/glm-5.3-flash    503  "no available provider for
+  #                                cp/zai/glm-5.3-flash (all offers exhausted
+  #                                or in cooldown)" - DEAD, do not add
+  # That last one is the whole point of probing: it is listed by /models and
+  # would have been a guaranteed wasted attempt, which is how the 10-14 dead id
+  # cost a live message (row 2779).
+  #
+  # The pair keeps TWO provider prefixes (cb, cmc). That is enforced, not just
+  # intended: tests/test_classifier_fallback_budget.py::test_pool_spans_more_than_one_provider
+  # refuses a pool that spans one provider, so dropping ag/ without a
+  # replacement fails CI rather than silently leaving a single point of failure.
   openrouter_models:
-    - ag/gemini-3.8-flash-high
     - cb/deepseek-v4.1-flash
+    - cmc/z-ai/glm-5.3-flash
 
 spam:
   high_confidence_threshold: 90
