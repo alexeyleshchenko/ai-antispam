@@ -69,7 +69,7 @@ LEDGER = REPO / "evidence" / "ledger.jsonl"
 # had been filed under `#107`).
 sys.path.insert(0, str(REPO / "tools"))
 from ledger import canonical_subject  # noqa: E402
-from ledger_declaration import load_renumbers  # noqa: E402
+from ledger_declaration import Renumber, load_renumbers  # noqa: E402
 
 def declared_renumbers() -> dict[str, tuple[str, str]]:
     """The factory's declared subject renumbers, or none when it declares none.
@@ -317,7 +317,8 @@ def test_a_renumbered_subject_is_satisfied_by_its_pre_migration_intake() -> None
     rows = [_row("intake", "#74", 1, "2026-10-01T00:47:48Z"),
             _row("claim", "#74", 2, "2026-10-01T01:21:01Z"),
             _row("close", "#107", 3, "2026-11-05T17:40:19Z")]
-    declared = {"#107": ("#74", "probe: the board renumbered 74 -> 107")}
+    declared = {"#107": Renumber(was="#74",
+                               evidence="probe: the board renumbered 74 -> 107")}
 
     problems, _excused = board_intake_problems(
         [], rows, complete_board=False, renumbers=declared
@@ -333,7 +334,8 @@ def test_the_renumber_resolution_is_printed_with_its_intake_row() -> None:
     """A resolution the reader cannot see is indistinguishable from no resolution."""
     rows = [_row("intake", "#74", 1, "2026-10-01T00:47:48Z"),
             _row("close", "#107", 3, "2026-11-05T17:40:19Z")]
-    declared = {"#107": ("#74", "probe: the board renumbered 74 -> 107")}
+    declared = {"#107": Renumber(was="#74",
+                               evidence="probe: the board renumbered 74 -> 107")}
 
     lines = renumber_resolutions(rows, declared)
     assert len(lines) == 1, lines
