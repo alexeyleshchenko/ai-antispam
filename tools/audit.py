@@ -1384,6 +1384,19 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     if (repo_root / "tests/test_rework.py").is_file():
         gates_to_run.append([sys.executable, "tests/test_rework.py"])
 
+    # 3b. Rework relative-revision gate (#129). It was DEFERRED in
+    # `registry/gate-run-deferrals.json` behind one reason shared with its sibling —
+    # "the evidence format this tree uses has no `Subject` column" — and that blocker
+    # died on 2026-11-05 when #126 added the column. Behind the stale reason the gate
+    # was not merely unregistered, it CRASHED: it read the Subject cell through
+    # `COLUMNS.index("Subject")`, and `COLUMNS` deliberately omits that field, so the
+    # live table raised `ValueError: list.index(x): x not in list`. Registered here only
+    # after it ran to a verdict (exit 0) on the repaired read, because a registration
+    # while red turns the daily audit red. SCRIPT form: it is a `check(...)` script, so
+    # pytest would report "no tests ran" and exit 0 — a green that measured nothing.
+    if (repo_root / "tests/test_rework_relative_revision.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_rework_relative_revision.py"])
+
     # 4. Single-writer gate
     if (repo_root / "tests/test_single_writer.py").is_file():
         gates_to_run.append([sys.executable, "tests/test_single_writer.py"])

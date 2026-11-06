@@ -26,17 +26,25 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 REWORK = REPO / "evidence" / "rework.md"
 
-COLUMNS = ["Date", "Source", "Defect", "Root cause", "Resolution", "Prevented by"]
-# The Subject column is NOT one of COLUMNS: `none` is a DEFINED answer here, while the
-# six above refuse `none` as a placeholder. Adding it to that list would make the one
-# lawful non-link value fail the completeness rule it is meant to satisfy.
+COLUMNS = ["Date", "Source", "Defect", "Root cause", "Resolution", "Prevented by", "Subject"]
+# `Subject` IS a named column, so `COLUMNS.index("Subject")` resolves for every reader
+# that wants the cell BY NAME — `tests/test_rework_relative_revision.py` reads it exactly
+# that way, and it is the only way that reader can work without a second copy of the
+# column order. Naming it here is what lets that file stay byte-identical to the kit's.
+#
+# It is EXEMPT from the placeholder rule below, because `none` is a DEFINED answer for
+# Subject while the six columns before it refuse `none` as a placeholder. It has its own
+# validation immediately after that loop, which admits exactly two forms — a work unit
+# (`#<n>`) or the declared `none` — so exempting it from the generic rule loses nothing
+# and keeps the one lawful non-link value from failing the rule it exists to satisfy.
 SUBJECT_NONE = "none"
 SUBJECT_WORK_UNIT_RE = re.compile(r"#\d+")
 PLACEHOLDERS = {"tbd", "todo", "n/a", "-", "?", "unknown", "none"}
+PLACEHOLDER_EXEMPT = {"Subject"}
 
 HEADER = "| Date | Source | Defect | Root cause | Resolution | Prevented by | Subject |"
 SEPARATOR = "|---|---|---|---|---|---|---|"
-EXPECTED_CELLS = len(COLUMNS) + 1
+EXPECTED_CELLS = len(COLUMNS)
 
 def section_body(text: str) -> str | None:
     """The body of the `## Entries` section, or None when it is absent."""
@@ -102,6 +110,8 @@ def check_text(text: str) -> tuple[list[str], int]:
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
             problems.append(f"row {n}: date {date!r} is not YYYY-MM-DD")
         for label, value in zip(COLUMNS[1:], cells[1:]):
+            if label in PLACEHOLDER_EXEMPT:
+                continue  # Subject owns its own two-form rule below
             if not value:
                 problems.append(f"row {n} ({date}): '{label}' is empty")
             elif value.strip("`").strip().lower() in PLACEHOLDERS:
@@ -112,7 +122,7 @@ def check_text(text: str) -> tuple[list[str], int]:
         # The change-fail numerator reads this cell and nothing else, so an empty or
         # free-form value is a row the rate cannot see. Two forms are lawful: a work
         # unit that closed, or the DECLARED answer that this defect belongs to none.
-        subject = cells[-1]
+        subject = cells[COLUMNS.index("Subject")]
         if not subject:
             problems.append(
                 f"row {n} ({date}): 'Subject' is empty — name the work unit as #<n>, "
