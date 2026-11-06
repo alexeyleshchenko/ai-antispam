@@ -95,9 +95,9 @@ def run(ledger: Path, *args: str) -> subprocess.CompletedProcess:
     )
 
 
-def append(ledger: Path, event: str, actor: str, detail: str) -> subprocess.CompletedProcess:
+def append(ledger: Path, event: str, actor: str, detail: str, *extra: str) -> subprocess.CompletedProcess:
     return run(ledger, "append", "--event", event, "--actor", actor,
-               "--subject", SUBJECT, "--detail", detail)
+               "--subject", SUBJECT, "--detail", detail, *extra)
 
 
 def rows(ledger: Path) -> list[dict]:
@@ -196,7 +196,14 @@ def test_a_close_with_both_legs_preceding_is_accepted() -> None:
         # still refused by the SEQUENCE leg, which is checked first, so each fails for
         # the reason it names and not for this one.
         closed = append(ledger, "close", "worker",
-                        "close probe head=0123456789abcdef0123456789abcdef01234567")
+                        "close probe head=0123456789abcdef0123456789abcdef01234567",
+                        # #129 added a second trailer requirement: a close row must
+                        # declare its rework disposition, read from the TRAILING RUN,
+                        # so prose does not satisfy it. This probe produced no rework,
+                        # which is the `none` token. The three refusal probes above
+                        # stay bare on purpose: the SEQUENCE leg is checked first, so
+                        # each still fails for the reason it names.
+                        "--rework", "none")
         assert closed.returncode == 0, f"a lawful close must land: {closed.stdout}{closed.stderr}"
         # A lawful close writes TWO rows: the close, then the SETTLEMENT RECEIPT recording
         # the verified population the sequence check covered. Both halves are asserted --
