@@ -305,9 +305,12 @@ async def process_spam_or_approve(
                 message_context_result,
                 skip_auto_delete=skip_auto_delete,
             )
-            if result == "spam_delete_failed":
+            if result in ("spam_delete_failed", "spam_target_is_admin"):
                 # The delete was charged but Telegram refused it (no rights,
-                # group gone): return the credit instead of billing for nothing.
+                # group gone) — or the ban proved the sender is a group admin
+                # and the message was deliberately left in place (#130). Either
+                # way nothing was deleted: return the credit instead of billing
+                # for nothing.
                 await refund_credits(paying_admin_id, DELETE_PRICE)
             return result, False
 

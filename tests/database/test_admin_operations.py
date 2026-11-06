@@ -398,3 +398,109 @@ async def test_count_groups_awaiting_moderation_restore(patched_db_conn, clean_d
         )
 
     assert await count_groups_awaiting_moderation_restore(admin_id) == 0
+
+
+# --- #130: activation is keyed on activated_at, never on row existence --------
+#
+# The admin roster prefill creates an `administrators` row (0 credits,
+# `activated_at` NULL) for every Telegram admin it discovers. Keying the
+# welcome on "does a row exist" would have denied the welcome and the initial
+# credits to every prefilled admin — silently, and only for the 48 users the
+# prefill exists to serve.
+
+
+async def _seed_prefilled_admin(clean_db, admin_id: int) -> None:
+    """The exact shape the roster prefill writes: row present, never active."""
+    from app.database.group_operations import seed_administrator_row
+
+    async with clean_db.acquire() as conn:
+        await seed_administrator_row(conn, admin_id)
+
+
+async def _activation_state(clean_db, admin_id: int):
+    async with clean_db.acquire() as conn:
+        activated_at = await conn.fetchval(
+            "SELECT activated_at FROM administrators WHERE admin_id = $1", admin_id
+        )
+        credits = await conn.fetchval(
+            "SELECT credits FROM administrators WHERE admin_id = $1", admin_id
+        )
+        initials = await conn.fetchval(
+            "SELECT COUNT(*) FROM transactions "
+            "WHERE admin_id = $1 AND type = 'initial'",
+            admin_id,
+        )
+    return activated_at, credits, initials
+
+
+@pytest.mark.asyncio
+async def test_initialize_new_admin_grants_prefilled_roster_row(patched_db_conn, clean_db):
+    """A row created by the roster prefill still gets its welcome."""
+    admin_id = 789101
+    await _seed_prefilled_admin(clean_db, admin_id)
+
+    activated_at, credits, initials = await _activation_state(clean_db, admin_id)
+    assert activated_at is None, "prefill must not activate"
+    assert credits == 0
+    assert initials == 0
+
+    async with clean_db.acquire() as conn:
+        assert await initialize_new_admin(admin_id) is True
+
+    activated_at, credits, initials = await _activation_state(clean_db, admin_id)
+    assert activated_at is not None, "the welcome must stamp activation"
+    assert credits == INITIAL_CREDITS
+    assert initials == 1
+
+
+@pytest.mark.asyncio
+async def test_initialize_new_admin_second_start_is_noop(patched_db_conn, clean_db):
+    """`/start` twice grants once — no second 100 credits, no second row."""
+    admin_id = 789102
+    await _seed_prefilled_admin(clean_db, admin_id)
+
+    async with clean_db.acquire() as conn:
+        assert await initialize_new_admin(admin_id) is True
+        assert await initialize_new_admin(admin_id) is False
+
+    _, credits, initials = await _activation_state(clean_db, admin_id)
+    assert credits == INITIAL_CREDITS
+    assert initials == 1
+
+
+@pytest.mark.asyncio
+async def test_initialize_new_admin_activated_row_grants_nothing(patched_db_conn, clean_db):
+    """An already-activated admin who `/start`s again gets nothing."""
+    admin_id = 789103
+    await _seed_prefilled_admin(clean_db, admin_id)
+
+    async with clean_db.acquire() as conn:
+        await initialize_new_admin(admin_id)
+        # Simulate a balance they bought; a later /start must not touch it.
+        await conn.execute(
+            "UPDATE administrators SET credits = 55 WHERE admin_id = $1", admin_id
+        )
+
+    async with clean_db.acquire() as conn:
+        assert await initialize_new_admin(admin_id) is False
+
+    _, credits, initials = await _activation_state(clean_db, admin_id)
+    assert credits == 55, "a repeat /start must not reset or top up a balance"
+    assert initials == 1
+
+
+@pytest.mark.asyncio
+async def test_initialize_new_admin_preserves_existing_balance(patched_db_conn, clean_db):
+    """Activation is additive: a row that somehow carries credits keeps them."""
+    admin_id = 789104
+    await _seed_prefilled_admin(clean_db, admin_id)
+
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            "UPDATE administrators SET credits = 7 WHERE admin_id = $1", admin_id
+        )
+        assert await initialize_new_admin(admin_id) is True
+
+    _, credits, initials = await _activation_state(clean_db, admin_id)
+    assert credits == 7 + INITIAL_CREDITS
+    assert initials == 1

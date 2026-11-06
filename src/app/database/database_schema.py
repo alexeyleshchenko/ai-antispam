@@ -64,6 +64,7 @@ async def create_schema(conn: asyncpg.Connection):
                 is_active BOOLEAN DEFAULT true,
                 language_code VARCHAR(10),
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                activated_at TIMESTAMPTZ,
                 last_active TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 credits_depleted_at TIMESTAMPTZ,
                 low_balance_warned_at TIMESTAMPTZ,
@@ -97,10 +98,15 @@ async def create_schema(conn: asyncpg.Connection):
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
 
-            -- Group administrators mapping
+            -- Group administrators mapping. The admin roster: every Telegram
+            -- admin of a moderated group has a row, and two flags keep the
+            -- jobs apart — is_registered carries billing + notifications
+            -- (bot-add, payment restore), is_admin_now is the moderation skip.
             CREATE TABLE IF NOT EXISTS group_administrators (
                 group_id BIGINT REFERENCES groups(group_id) ON DELETE CASCADE,
                 admin_id BIGINT REFERENCES administrators(admin_id) ON DELETE CASCADE,
+                is_registered BOOLEAN NOT NULL DEFAULT TRUE,
+                is_admin_now BOOLEAN NOT NULL DEFAULT TRUE,
                 PRIMARY KEY (group_id, admin_id)
             );
 
@@ -298,6 +304,14 @@ async def create_procedures(conn: asyncpg.Connection):
         await conn.execute(
             """
             -- Update group administrators
+            --
+            -- DEAD CODE: nothing in the codebase CALLs this procedure (the
+            -- Python `group_operations.update_group_admins` is what runs).
+            -- Do NOT revive it as-is: it DELETEs the group's rows and
+            -- re-inserts them, and since #130 those rows carry is_registered
+            -- (billing rights) and is_admin_now (the moderation skip) — a
+            -- revive would silently wipe both. Use
+            -- upsert_group_admin / mark_admins_not_admin instead.
             CREATE OR REPLACE PROCEDURE update_group_admins(
                 p_group_id BIGINT,
                 p_admin_ids BIGINT[],
@@ -387,7 +401,8 @@ async def create_procedures(conn: asyncpg.Connection):
                 last_active = NOW()
                 FROM group_administrators ga
                 WHERE g.group_id = ga.group_id
-                AND ga.admin_id = p_admin_id;
+                AND ga.admin_id = p_admin_id
+                AND ga.is_registered = TRUE;
             END;
             $$;
             """

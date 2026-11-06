@@ -19,7 +19,7 @@ async def test_probation_member_not_skipped():
     mock_group = type(
         "Group",
         (),
-        {"admin_ids": [999], "moderation_enabled": True},
+        {"admin_ids": [999], "telegram_admin_ids": [999], "moderation_enabled": True},
     )()
 
     with (
@@ -51,7 +51,7 @@ async def test_trusted_member_skipped():
     mock_group = type(
         "Group",
         (),
-        {"admin_ids": [999], "moderation_enabled": True},
+        {"admin_ids": [999], "telegram_admin_ids": [999], "moderation_enabled": True},
     )()
 
     with (

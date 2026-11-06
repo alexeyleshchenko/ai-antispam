@@ -304,6 +304,40 @@ class TestSpamDeleteChargeGuards:
             mock_refund.assert_awaited_once_with(777, DELETE_PRICE)
 
     @pytest.mark.asyncio
+    async def test_refunds_when_target_is_an_admin(
+        self, mock_message, mock_message_context_result
+    ):
+        """#130: the ban proved the sender is an admin, so nothing was deleted."""
+        with (
+            patch(
+                "src.app.handlers.message.pipeline.try_deduct_credits",
+                new_callable=AsyncMock,
+            ) as mock_deduct,
+            patch(
+                "src.app.handlers.message.pipeline.handle_spam",
+                new_callable=AsyncMock,
+            ) as mock_handle_spam,
+            patch(
+                "src.app.handlers.message.pipeline.refund_credits",
+                new_callable=AsyncMock,
+            ) as mock_refund,
+            patch(
+                "src.app.handlers.message.pipeline.load_config",
+            ) as mock_load_config,
+        ):
+            mock_deduct.return_value = 777
+            mock_handle_spam.return_value = "spam_target_is_admin"
+            mock_load_config.return_value = DEFAULT_SPAM_CONFIG
+
+            result, _ = await process_spam_or_approve(
+                mock_message, True, 95, [123], "reason",
+                mock_message_context_result,
+            )
+
+            assert result == "spam_target_is_admin"
+            mock_refund.assert_awaited_once_with(777, DELETE_PRICE)
+
+    @pytest.mark.asyncio
     async def test_no_refund_on_successful_delete(
         self, mock_message, mock_message_context_result
     ):

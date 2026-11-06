@@ -58,7 +58,12 @@ class Group(BaseModel):
     """Enhanced Group model with validation"""
 
     group_id: int
+    # Billing + notification recipients (`is_registered`). Never the moderation
+    # skip: a roster-only Telegram admin must not be billed or DM'd.
     admin_ids: list[int]
+    # Everyone Telegram currently lists as an admin (`is_admin_now`). This is
+    # the moderation skip, and the only predicate that may skip a message.
+    telegram_admin_ids: list[int] = []
     moderation_enabled: bool = True
     status: GroupStatus = GroupStatus.ACTIVE
     member_ids: list[int] = []

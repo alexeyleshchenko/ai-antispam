@@ -1,6 +1,5 @@
 """Spam message handling: notifications, deletion, banning."""
 
-import asyncio
 import html
 import logging
 from collections.abc import Awaitable, Callable, Sequence
@@ -17,6 +16,7 @@ from ..common.telegram_errors import (
     is_group_inaccessible_error,
     is_message_not_found_error,
     is_permission_error,
+    is_target_admin_error,
 )
 from ..common.utils import (
     determine_effective_user_id,
@@ -33,8 +33,10 @@ from ..database import get_admin, get_admins_map
 from ..database.group_operations import (
     remove_member_from_group,
     set_no_rights_detected_at,
+    upsert_group_admin,
 )
 from ..database.models import Administrator
+from ..database.postgres_connection import get_pool
 from ..database.spam_examples import insert_pending_spam_example
 from ..i18n import normalize_lang, resolve_lang, t
 from ..spam.account_signals import build_account_signals_body
@@ -48,16 +50,24 @@ def telegram_action(
     *,
     extra_checks: Sequence[Callable[[Exception], bool]] = (),
     on_permission_error: Callable[[Exception], Awaitable[None]] | None = None,
+    on_target_admin: Callable[[Exception], Awaitable[None]] | None = None,
+    on_group_inaccessible: Callable[[Exception], Awaitable[None]] | None = None,
 ) -> Callable:
     """Decorator: standardizes exception handling for Telegram moderator API calls.
 
     Catches:
     - (TelegramBadRequest, TelegramForbiddenError):
-        * group_inaccessible → no-op (group is gone)
+        * group_inaccessible → no-op (group is gone), `on_group_inaccessible` hook
         * extra_checks match → no-op (e.g. message already deleted)
+        * target is an admin → INFO, no traceback, `on_target_admin` hook
         * on_permission_error → call async callback (for UI feedback)
         * else → log warning
     - Exception → log warning (NEVER crashes)
+
+    The "target is an admin" case is checked BEFORE the permission case because
+    both are `TelegramBadRequest` refusals of the same call and the messages are
+    near-identical; `_PERMISSION_MESSAGE_MARKERS` does not carry this string, so
+    ordering is belt-and-braces rather than the only guard (#130).
 
     Note: retry is NOT here — handled by session middleware (bot.py:setup_session_retry).
     """
@@ -81,6 +91,8 @@ def telegram_action(
                         action_name,
                         e,
                     )
+                    if on_group_inaccessible is not None:
+                        await on_group_inaccessible(e)
                     return
                 for check in extra_checks:
                     if check(e):
@@ -90,6 +102,19 @@ def telegram_action(
                             e,
                         )
                         return
+                if is_target_admin_error(e):
+                    # Expected, not a failure: the target is an admin of this
+                    # group, so nobody can ban them. INFO with no traceback —
+                    # this used to arrive as a full traceback on a warning line
+                    # the owner had to decode himself.
+                    logger.info(
+                        "%s skipped (target is an admin): %s",
+                        action_name,
+                        e,
+                    )
+                    if on_target_admin is not None:
+                        await on_target_admin(e)
+                    return
                 if is_permission_error(e):
                     if on_permission_error is not None:
                         await on_permission_error(e)
@@ -188,21 +213,48 @@ async def handle_spam(
         if effective_user_id is None:
             logger.warning("Message without effective user info, skipping ban")
             return "spam_no_user_info"
-        results = await asyncio.gather(
-            handle_spam_message_deletion(message, admin_ids),
-            ban_user_for_spam(
+        # Ban FIRST, delete second (#130). These used to run concurrently, so
+        # the message was already gone before Telegram could answer the ban —
+        # and when the answer was "user is an administrator of the chat", the
+        # deletion could not be undone: an admin's message was destroyed and
+        # the group was billed for it. Sequenced, the ban's verdict decides
+        # whether the delete may run at all.
+        try:
+            ban_outcome = await ban_user_for_spam(
                 message.chat.id,
                 effective_user_id,
                 admin_ids,
                 message.chat.title,
                 group_username=getattr(message.chat, "username", None),
-            ),
-            return_exceptions=True,
-        )
-        for r in results:
-            if isinstance(r, Exception):
-                logger.warning("auto-delete+ban partial failure: %s", r)
-        if results[0] is not True:
+            )
+        except Exception as e:
+            # Safety net: the ban path swallows its own errors, but a caller
+            # must never lose the delete to an exception here.
+            logger.warning(
+                "auto-delete+ban partial failure (ban): %s", e, exc_info=True
+            )
+            ban_outcome = BAN_FAILED
+
+        if ban_outcome == BAN_TARGET_ADMIN:
+            # Telegram refused the ban because the sender is an admin of this
+            # group. Leaving the message alone is the whole point: it is not
+            # spam, it cannot be moderated, and a delete here is irreversible.
+            logger.info(
+                "Target is an admin of chat=%s: leaving message %s in place",
+                message.chat.id,
+                message.message_id,
+            )
+            return "spam_target_is_admin"
+
+        try:
+            deleted = await handle_spam_message_deletion(message, admin_ids)
+        except Exception as e:
+            logger.warning(
+                "auto-delete+ban partial failure (delete): %s", e, exc_info=True
+            )
+            deleted = False
+
+        if deleted is not True:
             # Telegram refused the deletion (permission error, group gone, or
             # any other failure): never report a deletion that did not happen.
             # The caller reads this to skip charging the delete credit (#48).
@@ -598,16 +650,66 @@ async def handle_spam_message_deletion(
     return deleted
 
 
+async def _record_target_is_admin(chat_id: int, user_id: int) -> None:
+    """Writer 5 (#130): a refused ban is proof the target is a group admin.
+
+    Telegram answering "user is an administrator of the chat" to a ban is the
+    most authoritative statement available about that seat — better than any
+    list, because it is the API refusing the operation on it. Recording it
+    means the SAME admin is skipped on their next message instead of being
+    classified, charged and failed again.
+
+    Never raises: it runs inside a decorator's `except` block, so an exception
+    here would escape the handler that exists to never crash. A negative id is
+    a sender CHAT, not a person — no seat to record.
+    """
+    if user_id <= 0:
+        return
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn, conn.transaction():
+            await upsert_group_admin(conn, chat_id, user_id, True)
+        logger.info(
+            f"Recorded {format_user_log(user_id)} as an admin of "
+            f"{format_chat_log(chat_id)} after Telegram refused the ban"
+        )
+    except Exception:
+        logger.warning(
+            f"Failed to record {format_user_log(user_id)} as an admin of "
+            f"{format_chat_log(chat_id)} — the daily sweep will retry",
+            exc_info=True,
+        )
+
+BAN_BANNED = "banned"
+BAN_TARGET_ADMIN = "target_admin"
+BAN_INACCESSIBLE = "inaccessible"
+BAN_PERMISSION = "permission"
+BAN_FAILED = "failed"
+
 async def ban_user_for_spam(
     chat_id: int,
     user_id: int,
     admin_ids: list[int] | None = None,
     group_title: str | None = None,
     group_username: str | None = None,
-) -> None:
-    """Ban user/channel in chat and remove from approved_members."""
+) -> str:
+    """Ban user/channel in chat and remove from approved_members.
+
+    Returns what actually happened, because the caller has to decide whether
+    deleting the message is still safe (#130): Telegram refusing a ban means
+    the target is an admin, and deleting an admin's message cannot be undone.
+
+    One of BAN_BANNED / BAN_TARGET_ADMIN / BAN_INACCESSIBLE / BAN_PERMISSION /
+    BAN_FAILED. The outcome is captured inside the decorator's own callbacks —
+    `telegram_action` swallows the exception, so the closure is the only place
+    the reason is still visible. A call that returns without setting it (a
+    patched `_ban`, say) reads as BAN_FAILED: silence is not success.
+    """
+    outcome = BAN_FAILED
 
     async def _notify_ban_permission_error(_e: Exception) -> None:
+        nonlocal outcome
+        outcome = BAN_PERMISSION
         lang = await _get_notification_lang(admin_ids or [])
         perm_name = t(lang, "spam.permission_ban")
         await handle_permission_error(
@@ -621,15 +723,28 @@ async def ban_user_for_spam(
             lang=lang,
         )
 
+    async def _on_target_admin(_e: Exception) -> None:
+        nonlocal outcome
+        outcome = BAN_TARGET_ADMIN
+        await _record_target_is_admin(chat_id, user_id)
+
+    async def _on_group_inaccessible(_e: Exception) -> None:
+        nonlocal outcome
+        outcome = BAN_INACCESSIBLE
+
     @telegram_action(
         "ban user",
         on_permission_error=_notify_ban_permission_error,
+        on_target_admin=_on_target_admin,
+        on_group_inaccessible=_on_group_inaccessible,
     )
     async def _ban() -> None:
+        nonlocal outcome
         if user_id < 0:
             await bot.ban_chat_sender_chat(chat_id, sender_chat_id=user_id)
         else:
             await bot.ban_chat_member(chat_id, user_id)
+        outcome = BAN_BANNED
 
     await _ban()
 
@@ -640,6 +755,8 @@ async def ban_user_for_spam(
             f"Failed to remove user {format_user_log(user_id)} from approved_members: {e}",
             exc_info=True,
         )
+
+    return outcome
 
 
 def build_spam_block_notification_message(

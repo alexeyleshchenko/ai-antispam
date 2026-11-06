@@ -808,3 +808,438 @@ class TestHandleSpamDeleteVerdict:
             result = await handle_spam(mock_message, [123], reason="test")
 
             assert result == "spam_auto_deleted"
+
+
+# --- #130: "user is an administrator of the chat" is NOT a permission error ---
+#
+# The owner forwarded this traceback: a group admin was classified as spam at
+# 0.90, his message was DELETED (irreversible), the ban was refused by Telegram
+# with this exact string, and the refusal arrived as a full traceback on a
+# WARNING line. The bot had every right it needed; the target was simply immune.
+# So the two refusals must be told apart in BOTH directions: conflating them
+# either tells the owner the bot lacks rights when it has them, or reports a
+# genuine rights problem as a harmless admin skip.
+
+TARGET_IS_ADMIN_TEXT = (
+    "Telegram server says - Bad Request: user is an administrator of the chat"
+)
+
+
+class TestTargetAdminErrorClass:
+    """`is_target_admin_error` and `is_permission_error` are disjoint."""
+
+    def test_target_admin_error_is_recognised(self):
+        from src.app.common.telegram_errors import is_target_admin_error
+
+        assert is_target_admin_error(MockTelegramBadRequest(TARGET_IS_ADMIN_TEXT))
+
+    def test_target_admin_error_is_not_a_permission_error(self):
+        from src.app.common.telegram_errors import is_permission_error
+
+        assert not is_permission_error(MockTelegramBadRequest(TARGET_IS_ADMIN_TEXT)), (
+            "conflating the two drives the owner-facing permission notification "
+            "for a bot that has every right it needs"
+        )
+
+    def test_a_permission_error_is_not_a_target_admin_error(self):
+        from src.app.common.telegram_errors import (
+            is_permission_error,
+            is_target_admin_error,
+        )
+
+        error = MockTelegramBadRequest(
+            "Telegram server says - Bad Request: not enough rights to restrict"
+        )
+        assert is_permission_error(error)
+        assert not is_target_admin_error(error)
+
+    def test_a_forbidden_error_is_not_a_target_admin_error(self):
+        from aiogram.exceptions import TelegramForbiddenError
+
+        from src.app.common.telegram_errors import is_target_admin_error
+
+        error = TelegramForbiddenError(MagicMock(), TARGET_IS_ADMIN_TEXT)
+        assert not is_target_admin_error(error)
+
+
+class TestBanRefusalIsInfoNotTraceback:
+    """The refused ban: one INFO line, no traceback, and writer 5 runs."""
+
+    @pytest.mark.asyncio
+    async def test_refused_ban_logs_info_without_traceback(self, caplog):
+        import logging
+
+        from src.app.handlers.handle_spam import ban_user_for_spam
+
+        caplog.set_level(logging.DEBUG)
+        with (
+            patch("src.app.handlers.handle_spam.bot") as mock_bot,
+            patch(
+                "src.app.handlers.handle_spam.remove_member_from_group",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "src.app.handlers.handle_spam._record_target_is_admin",
+                new_callable=AsyncMock,
+            ) as mock_record,
+        ):
+            mock_bot.ban_chat_member = AsyncMock(
+                side_effect=MockTelegramBadRequest(TARGET_IS_ADMIN_TEXT)
+            )
+
+            outcome = await ban_user_for_spam(
+                chat_id=-1001234567890, user_id=67890, admin_ids=[123456789]
+            )
+
+        assert outcome == "target_admin"
+        refused = [
+            rec
+            for rec in caplog.records
+            if "target is an admin" in rec.message
+        ]
+        assert len(refused) == 1, [r.message for r in caplog.records]
+        assert refused[0].levelno == logging.INFO
+        assert refused[0].exc_info is None, (
+            "the traceback the owner had to decode himself"
+        )
+
+        mock_record.assert_awaited_once_with(-1001234567890, 67890)
+
+    @pytest.mark.asyncio
+    async def test_a_genuine_permission_error_still_notifies(self):
+        """The other direction: a real rights problem must not be swallowed."""
+        from src.app.handlers.handle_spam import ban_user_for_spam
+
+        with (
+            patch("src.app.handlers.handle_spam.bot") as mock_bot,
+            patch(
+                "src.app.handlers.handle_spam.remove_member_from_group",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "src.app.handlers.handle_spam.handle_permission_error",
+                new_callable=AsyncMock,
+            ) as mock_notify,
+            patch(
+                "src.app.handlers.handle_spam._record_target_is_admin",
+                new_callable=AsyncMock,
+            ) as mock_record,
+            # The language resolver reads the DB; this test is about the error
+            # class, not about the admin row behind the message text.
+            patch(
+                "src.app.handlers.handle_spam._get_notification_lang",
+                new_callable=AsyncMock,
+                return_value="en",
+            ),
+        ):
+            mock_bot.ban_chat_member = AsyncMock(
+                side_effect=MockTelegramBadRequest(
+                    "Telegram server says - Bad Request: not enough rights to "
+                    "restrict a member"
+                )
+            )
+
+            outcome = await ban_user_for_spam(
+                chat_id=-1001234567890, user_id=67890, admin_ids=[123456789]
+            )
+
+        assert outcome == "permission"
+        mock_notify.assert_awaited_once()
+        assert not mock_record.await_count, (
+            "a rights failure says nothing about the target's admin status"
+        )
+
+
+class TestTargetAdminRosterWrite:
+    """Writer 5: the refusal itself is the proof, and it is persisted."""
+
+    def _sync_pool(self):
+        import app.database.postgres_connection as app_pc
+        import src.app.database.postgres_connection as src_pc
+
+        src_pc._pool = app_pc._pool
+
+    def _clear_pool(self):
+        import src.app.database.postgres_connection as src_pc
+
+        src_pc._pool = None
+
+    @pytest.mark.asyncio
+    async def test_refused_ban_writes_the_seat(self, patched_db_conn, clean_db):
+        from src.app.handlers.handle_spam import _record_target_is_admin
+
+        chat_id, user_id = -1001500001, 60001
+        async with clean_db.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO groups (group_id, title) VALUES ($1, 'g') "
+                "ON CONFLICT DO NOTHING",
+                chat_id,
+            )
+
+        self._sync_pool()
+        try:
+            await _record_target_is_admin(chat_id, user_id)
+            async with clean_db.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT is_registered, is_admin_now FROM group_administrators "
+                    "WHERE group_id = $1 AND admin_id = $2",
+                    chat_id,
+                    user_id,
+                )
+                credits = await conn.fetchval(
+                    "SELECT credits FROM administrators WHERE admin_id = $1", user_id
+                )
+        finally:
+            self._clear_pool()
+
+        assert row is not None
+        assert bool(row["is_admin_now"]) is True
+        assert bool(row["is_registered"]) is False, (
+            "being an admin of a group must not make anyone a billing contact"
+        )
+        assert credits == 0
+
+    @pytest.mark.asyncio
+    async def test_a_sender_chat_writes_no_seat(self, patched_db_conn, clean_db):
+        """A negative id is a channel, not a person — there is no seat to write."""
+        from src.app.handlers.handle_spam import _record_target_is_admin
+
+        self._sync_pool()
+        try:
+            await _record_target_is_admin(-1001500002, -1001500003)
+            async with clean_db.acquire() as conn:
+                count = await conn.fetchval(
+                    "SELECT COUNT(*) FROM group_administrators WHERE group_id = $1",
+                    -1001500002,
+                )
+        finally:
+            self._clear_pool()
+
+        assert count == 0
+
+    @pytest.mark.asyncio
+    async def test_a_store_failure_does_not_escape(self):
+        """It runs inside a decorator's except block — it must never raise."""
+        from src.app.handlers.handle_spam import _record_target_is_admin
+
+        with patch(
+            "src.app.handlers.handle_spam.get_pool",
+            side_effect=RuntimeError("db down"),
+        ):
+            await _record_target_is_admin(-1001500004, 60002)
+
+# --- #130: ban BEFORE delete, and the ban's verdict decides the delete -------
+#
+# The incident: a group admin's message was classified as spam, the delete and
+# the ban ran CONCURRENTLY, the message was gone before Telegram answered the
+# ban — and the answer was "user is an administrator of the chat". An
+# irreversible deletion of an admin's message, plus a delete credit charged to
+# the group. Sequenced, the ban answers first and its verdict decides.
+
+class TestBanOutcomeVocabulary:
+    """ban_user_for_spam reports what happened instead of returning nothing."""
+
+    async def _call(self, error=None, *, ban_attr="ban_chat_member"):
+        """Run the ban INSIDE the patches — a coroutine awaited after the
+        `with` block would run against the real bot and read as `failed`."""
+        from src.app.handlers.handle_spam import ban_user_for_spam
+
+        with (
+            patch("src.app.handlers.handle_spam.bot") as mock_bot,
+            patch(
+                "src.app.handlers.handle_spam.remove_member_from_group",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "src.app.handlers.handle_spam.handle_permission_error",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "src.app.handlers.handle_spam._record_target_is_admin",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "src.app.handlers.handle_spam._get_notification_lang",
+                new_callable=AsyncMock,
+                return_value="en",
+            ),
+        ):
+            setattr(
+                mock_bot,
+                ban_attr,
+                AsyncMock(side_effect=error) if error else AsyncMock(),
+            )
+            return await ban_user_for_spam(
+                chat_id=-1001234567890, user_id=67890, admin_ids=[123456789]
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_successful_ban_reports_banned(self):
+        assert await self._call() == "banned"
+
+    @pytest.mark.asyncio
+    async def test_a_refused_ban_on_an_admin_reports_target_admin(self):
+        assert (
+            await self._call(MockTelegramBadRequest(TARGET_IS_ADMIN_TEXT))
+            == "target_admin"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_rights_failure_reports_permission(self):
+        assert (
+            await self._call(
+                MockTelegramBadRequest(
+                    "Telegram server says - Bad Request: not enough rights to "
+                    "restrict a member"
+                )
+            )
+            == "permission"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_gone_group_reports_inaccessible(self):
+        assert (
+            await self._call(
+                MockTelegramBadRequest("Telegram server says - Bad Request: bot "
+                                       "is not a member of the group")
+            )
+            == "inaccessible"
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_unexpected_error_reports_failed(self):
+        assert await self._call(RuntimeError("network timeout")) == "failed"
+
+    @pytest.mark.asyncio
+    async def test_a_sender_chat_ban_also_reports_banned(self):
+        """Channels take the other API call and must report the same way."""
+        from src.app.handlers.handle_spam import ban_user_for_spam
+
+        with (
+            patch("src.app.handlers.handle_spam.bot") as mock_bot,
+            patch(
+                "src.app.handlers.handle_spam.remove_member_from_group",
+                new_callable=AsyncMock,
+            ),
+        ):
+            mock_bot.ban_chat_sender_chat = AsyncMock()
+            outcome = await ban_user_for_spam(
+                chat_id=-1001234567890, user_id=-1002916411724, admin_ids=[123]
+            )
+            mock_bot.ban_chat_sender_chat.assert_awaited_once()
+
+        assert outcome == "banned"
+
+class TestBanBeforeDelete:
+    """handle_spam sequences ban → delete and skips the delete on target_admin."""
+
+    def _patches(self, calls, *, ban_result="banned", ban_error=None,
+                 delete_result=True):
+        async def _ban(*_a, **_kw):
+            calls.append("ban")
+            if ban_error is not None:
+                raise ban_error
+            return ban_result
+
+        async def _delete(*_a, **_kw):
+            calls.append("delete")
+            return delete_result
+
+        return (
+            patch(
+                "src.app.handlers.handle_spam.check_admin_delete_preferences",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "src.app.handlers.handle_spam.notify_admins",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch("src.app.handlers.handle_spam.ban_user_for_spam",
+                  side_effect=_ban),
+            patch(
+                "src.app.handlers.handle_spam.handle_spam_message_deletion",
+                side_effect=_delete,
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_ban_runs_before_the_delete(self, mock_message):
+        calls = []
+        p1, p2, p3, p4 = self._patches(calls)
+        with p1, p2, p3, p4:
+            await handle_spam(mock_message, [123], reason="test")
+
+        assert calls == ["ban", "delete"], (
+            "concurrency is what destroyed the admin's message before the ban "
+            "could answer (#130)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_refused_ban_leaves_the_message_in_place(
+        self, mock_message, caplog
+    ):
+        import logging
+
+        caplog.set_level(logging.DEBUG)
+        calls = []
+        p1, p2, p3, p4 = self._patches(calls, ban_result="target_admin")
+        with p1, p2, p3, p4:
+            result = await handle_spam(mock_message, [123], reason="test")
+
+        assert result == "spam_target_is_admin"
+        assert calls == ["ban"], "the delete must not run at all"
+        kept = [r for r in caplog.records if "leaving message" in r.message]
+        assert len(kept) == 1, [r.message for r in caplog.records]
+        assert kept[0].levelno == logging.INFO
+        assert kept[0].exc_info is None
+
+    @pytest.mark.asyncio
+    async def test_a_successful_ban_still_deletes(self, mock_message):
+        calls = []
+        p1, p2, p3, p4 = self._patches(calls)
+        with p1, p2, p3, p4:
+            result = await handle_spam(mock_message, [123], reason="test")
+
+        assert result == "spam_auto_deleted"
+        assert calls == ["ban", "delete"]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_delete_still_reports_spam_delete_failed(
+        self, mock_message
+    ):
+        """#48 contract: the delete verdict, not the ban's, decides the credit."""
+        calls = []
+        p1, p2, p3, p4 = self._patches(calls, delete_result=False)
+        with p1, p2, p3, p4:
+            result = await handle_spam(mock_message, [123], reason="test")
+
+        assert result == "spam_delete_failed"
+
+    @pytest.mark.asyncio
+    async def test_a_ban_exception_does_not_skip_the_delete(
+        self, mock_message, caplog
+    ):
+        """The safety net: an escaping ban error must not cost us the delete."""
+        calls = []
+        p1, p2, p3, p4 = self._patches(calls, ban_error=RuntimeError("boom"))
+        with p1, p2, p3, p4:
+            result = await handle_spam(mock_message, [123], reason="test")
+
+        assert calls == ["ban", "delete"]
+        assert result == "spam_auto_deleted"
+        assert any(
+            "partial failure (ban)" in r.message for r in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_permission_failure_still_deletes(self, mock_message):
+        """A rights failure on the ban says nothing about the delete right."""
+        calls = []
+        p1, p2, p3, p4 = self._patches(calls, ban_result="permission")
+        with p1, p2, p3, p4:
+            result = await handle_spam(mock_message, [123], reason="test")
+
+        assert result == "spam_auto_deleted"
+        assert calls == ["ban", "delete"]

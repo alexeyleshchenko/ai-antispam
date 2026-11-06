@@ -20,6 +20,22 @@ from src.app.handlers.status_handlers import (
     handle_bot_status_update,
 )
 
+
+@pytest.fixture(autouse=True)
+def roster_sync(monkeypatch):
+    """`_handle_bot_added` refreshes the admin roster (#130).
+
+    Autouse because a unit test must never reach Telegram for it: the real
+    `sync_group_administrators` calls `getChatAdministrators`, and the tests
+    that drive the real handler would otherwise make a live API call inside a
+    swallowed `except`. The dedicated class below asserts the call shape.
+    """
+    from src.app.handlers import status_handlers
+
+    mock = AsyncMock()
+    monkeypatch.setattr(status_handlers, "sync_group_administrators", mock)
+    return mock
+
 BOT_ID = 7574715711
 HUMAN_ID = 123456789
 DISCUSSION_ID = -1001800163907  # linked discussion supergroup (Valeri trace shape)
@@ -1358,3 +1374,76 @@ class TestBotAddRemoveInstants:
             assert after["bot_added_at"] is not None
         finally:
             self._clear_pool()
+
+
+class TestRosterSyncOnBotAdd:
+    """#130 writer 1: the add event refreshes the WHOLE roster, not one seat.
+
+    `update_group_admins` above it records exactly one admin — whoever added
+    the bot — which is how a group reached 18 admins against 1 roster row.
+    """
+
+    @pytest.mark.asyncio
+    async def test_bot_add_syncs_the_roster(self, roster_sync):
+        from src.app.handlers.status_handlers import _handle_bot_added
+
+        event = _real_event(from_id=HUMAN_ID, new_status="administrator")
+
+        with (
+            patch("src.app.handlers.status_handlers.update_group_admins", AsyncMock()),
+            patch("src.app.handlers.status_handlers.record_bot_added", AsyncMock()),
+            patch(
+                "src.app.handlers.status_handlers.activate_discussion_group",
+                AsyncMock(return_value=False),
+            ),
+            patch("src.app.handlers.status_handlers.clear_no_rights_detected_at", AsyncMock()),
+            patch("src.app.handlers.status_handlers._send_promo_message", AsyncMock()),
+            patch(
+                "src.app.handlers.status_handlers._resolve_lang",
+                AsyncMock(return_value="en"),
+            ),
+            patch(
+                "src.app.handlers.status_handlers.format_chat_or_channel_display",
+                return_value="Discussion",
+            ),
+            patch("src.app.handlers.status_handlers.bot.send_message", AsyncMock()),
+        ):
+            await _handle_bot_added(
+                event, DISCUSSION_ID, HUMAN_ID, "Discussion", "administrator"
+            )
+
+        roster_sync.assert_awaited_once_with(DISCUSSION_ID, apply=True)
+
+    @pytest.mark.asyncio
+    async def test_roster_sync_failure_does_not_fail_the_add(self, roster_sync):
+        """Log-and-continue: the daily sweep retries, the add must not die."""
+        from src.app.handlers.status_handlers import _handle_bot_added
+
+        roster_sync.side_effect = RuntimeError("telegram down")
+        event = _real_event(from_id=HUMAN_ID, new_status="administrator")
+
+        with (
+            patch("src.app.handlers.status_handlers.update_group_admins", AsyncMock()),
+            patch("src.app.handlers.status_handlers.record_bot_added", AsyncMock()),
+            patch(
+                "src.app.handlers.status_handlers.activate_discussion_group",
+                AsyncMock(return_value=False),
+            ),
+            patch("src.app.handlers.status_handlers.clear_no_rights_detected_at", AsyncMock()),
+            patch("src.app.handlers.status_handlers._send_promo_message", AsyncMock()),
+            patch(
+                "src.app.handlers.status_handlers._resolve_lang",
+                AsyncMock(return_value="en"),
+            ),
+            patch(
+                "src.app.handlers.status_handlers.format_chat_or_channel_display",
+                return_value="Discussion",
+            ),
+            patch("src.app.handlers.status_handlers.bot.send_message", AsyncMock()),
+        ):
+            # Must not raise.
+            await _handle_bot_added(
+                event, DISCUSSION_ID, HUMAN_ID, "Discussion", "administrator"
+            )
+
+        roster_sync.assert_awaited_once()

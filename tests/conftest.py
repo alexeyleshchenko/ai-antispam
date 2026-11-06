@@ -354,6 +354,7 @@ async def create_sqlite_schema(conn):
             is_active BOOLEAN DEFAULT 1,
             language_code TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            activated_at TIMESTAMP,
             last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             credits_depleted_at TIMESTAMP,
             low_balance_warned_at TIMESTAMP,
@@ -385,6 +386,8 @@ async def create_sqlite_schema(conn):
         CREATE TABLE IF NOT EXISTS group_administrators (
             group_id INTEGER,
             admin_id INTEGER,
+            is_registered BOOLEAN NOT NULL DEFAULT 1,
+            is_admin_now BOOLEAN NOT NULL DEFAULT 1,
             PRIMARY KEY (group_id, admin_id),
             FOREIGN KEY (group_id) REFERENCES groups(group_id),
             FOREIGN KEY (admin_id) REFERENCES administrators(admin_id)

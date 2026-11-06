@@ -64,6 +64,7 @@ async def get_weekly_stats(chat_ids: Sequence[int]) -> dict[int, dict[str, int]]
         "spam_admins_notified",
         "spam_delete_failed",
         "spam_delete_expired",
+        "spam_target_is_admin",
     }
     processed_tags = {
         "message_user_approved",

@@ -83,6 +83,38 @@ APPROVED_MEMBERS_TRUSTED_UNTIL_DDL = """
 ALTER TABLE approved_members ADD COLUMN IF NOT EXISTS trusted_until TIMESTAMPTZ
 """
 
+# The admin roster (#130). `group_administrators` becomes the roster its name
+# claims — every Telegram admin of every moderated group — with two flags that
+# keep its three jobs apart, so no existing reader changes meaning:
+#   is_registered  the link carries billing + notification rights (bot-add,
+#                  payment restore). FALSE = roster-only: never billed, never
+#                  DM'd, not one of the user's groups.
+#   is_admin_now   Telegram currently lists this user as an admin. This is the
+#                  moderation skip, and the only predicate that may skip.
+# Defaults are the safe values, so the migration alone changes nothing.
+GROUP_ADMIN_IS_REGISTERED_DDL = """
+ALTER TABLE group_administrators ADD COLUMN IF NOT EXISTS is_registered BOOLEAN NOT NULL DEFAULT TRUE
+"""
+
+GROUP_ADMIN_IS_ADMIN_NOW_DDL = """
+ALTER TABLE group_administrators ADD COLUMN IF NOT EXISTS is_admin_now BOOLEAN NOT NULL DEFAULT TRUE
+"""
+
+# Has the user ever talked to the bot. NULL = never. `initialize_new_admin`
+# keys the welcome + initial credits on this, not on row existence, because
+# the roster prefill creates `administrators` rows for people who have never
+# opened the bot — without it they would be silently denied both.
+ADMINISTRATORS_ACTIVATED_AT_DDL = """
+ALTER TABLE administrators ADD COLUMN IF NOT EXISTS activated_at TIMESTAMPTZ
+"""
+
+# Backfill: everyone already registered activated the bot by definition, or
+# their credits ran to zero and a NULL would read as "never activated" and
+# grant a second 100 credits on their next /start. Idempotent by predicate.
+ADMINISTRATORS_ACTIVATED_AT_BACKFILL = """
+UPDATE administrators SET activated_at = created_at WHERE activated_at IS NULL
+"""
+
 def _utcnow() -> datetime:
     return datetime.now(UTC)
 
@@ -139,6 +171,10 @@ async def ensure_trust_tables(conn) -> None:
     await conn.execute(GROUPS_BOT_REMOVED_AT_DDL)
     await conn.execute(APPROVED_MEMBERS_TRUST_SOURCE_DDL)
     await conn.execute(APPROVED_MEMBERS_TRUSTED_UNTIL_DDL)
+    await conn.execute(GROUP_ADMIN_IS_REGISTERED_DDL)
+    await conn.execute(GROUP_ADMIN_IS_ADMIN_NOW_DDL)
+    await conn.execute(ADMINISTRATORS_ACTIVATED_AT_DDL)
+    await conn.execute(ADMINISTRATORS_ACTIVATED_AT_BACKFILL)
 
 async def record_join(
     group_id: int, member_id: int, source: str = JOIN_SOURCE_SERVICE_MESSAGE

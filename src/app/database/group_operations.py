@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 from datetime import UTC, datetime
-from typing import cast
+from typing import NamedTuple, cast
 
 from aiogram.exceptions import (
     TelegramAPIError,
@@ -20,6 +20,17 @@ from .models import Group, GroupStatus
 from .postgres_connection import get_pool
 
 logger = logging.getLogger(__name__)
+
+
+def _flag(value) -> bool:
+    """A DB boolean as a Python bool; NULL reads as TRUE.
+
+    Both flags default TRUE, so NULL can only mean a row written before the
+    column existed or by a path that omitted it. Reading it as TRUE preserves
+    the pre-#130 behaviour in both directions: nobody loses their billing link,
+    and nobody starts being moderated because a flag was unset.
+    """
+    return True if value is None else bool(value)
 
 
 async def get_group(group_id: int) -> Group | None:
@@ -40,14 +51,18 @@ async def get_group(group_id: int) -> Group | None:
         # support dict(), giving a uniform interface for the .get() calls below.
         group_data = dict(group_data)
 
-        admin_ids = [
-            row["admin_id"]
-            for row in await conn.fetch(
-                """
-            SELECT admin_id FROM group_administrators WHERE group_id = $1
-        """,
-                group_id,
-            )
+        # One query, partitioned in Python: `get_group` runs on every message,
+        # so a second round trip for the roster would be a per-message cost.
+        admin_rows = await conn.fetch(
+            """
+            SELECT admin_id, is_registered, is_admin_now
+            FROM group_administrators WHERE group_id = $1
+            """,
+            group_id,
+        )
+        admin_ids = [r["admin_id"] for r in admin_rows if _flag(r["is_registered"])]
+        telegram_admin_ids = [
+            r["admin_id"] for r in admin_rows if _flag(r["is_admin_now"])
         ]
 
         member_ids = [
@@ -63,6 +78,7 @@ async def get_group(group_id: int) -> Group | None:
         return Group(
             group_id=group_id,
             admin_ids=admin_ids,
+            telegram_admin_ids=telegram_admin_ids,
             moderation_enabled=group_data["moderation_enabled"],
             member_ids=member_ids,
             status=GroupStatus(group_data.get("status", GroupStatus.ACTIVE.value)),
@@ -130,6 +146,7 @@ async def get_paying_admins(group_id: int) -> list[int]:
             FROM administrators a
             JOIN group_administrators ga ON a.admin_id = ga.admin_id
             WHERE ga.group_id = $1 AND a.credits > 0
+              AND ga.is_registered = TRUE
         """,
             group_id,
         )
@@ -150,7 +167,7 @@ async def deduct_credits_from_admins(group_id: int, amount: int) -> int:
                 SELECT a.admin_id, a.credits
                 FROM administrators a
                 JOIN group_administrators ga ON a.admin_id = ga.admin_id
-                WHERE ga.group_id = $1
+                WHERE ga.group_id = $1 AND ga.is_registered = TRUE
                 ORDER BY a.credits DESC
                 LIMIT 1
             """,
@@ -364,7 +381,8 @@ async def get_admin_group_ids(admin_id: int) -> list[int]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT group_id FROM group_administrators WHERE admin_id = $1
+            SELECT group_id FROM group_administrators
+            WHERE admin_id = $1 AND is_registered = TRUE
             """,
             admin_id,
         )
@@ -382,7 +400,7 @@ async def get_admin_groups(admin_id: int) -> list[dict]:
                    g.status
             FROM groups g
             JOIN group_administrators ga ON g.group_id = ga.group_id
-            WHERE ga.admin_id = $1
+            WHERE ga.admin_id = $1 AND ga.is_registered = TRUE
         """,
             admin_id,
         )
@@ -960,6 +978,310 @@ async def heal_bare_group_rows(
     return {"healed": healed, "skipped": skipped, "total": len(rows)}
 
 
+def _affected_rows(result: str | None) -> int:
+    """Row count from a driver's status string ("UPDATE 3"), 0 when absent."""
+    if not result:
+        return 0
+    parts = result.split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        return 0
+    return int(parts[1])
+
+
+async def upsert_group_admin(
+    conn, group_id: int, admin_id: int, is_admin_now: bool = True
+) -> None:
+    """Add a Telegram admin to the roster, or flip their current-admin flag.
+
+    Two statements on purpose — never `ON CONFLICT ... DO UPDATE`. The test
+    harness rewrites a `DO UPDATE` upsert into `INSERT OR REPLACE`, and REPLACE
+    deletes the row and re-inserts it, resetting every column the INSERT list
+    does not name. With `is_registered` unnamed, that silently turned a
+    roster-only row into a billing row (FALSE → TRUE) in tests only, while
+    Postgres did the right thing. `DO NOTHING` + a one-column UPDATE is immune
+    to the rewrite: IGNORE never fires on an existing row, and the UPDATE
+    touches exactly one column.
+
+    The insert seeds `is_registered = FALSE`: a Telegram admin we discovered is
+    roster-only — skipped from moderation, never billed, never DM'd — until a
+    billing writer (bot-add, payment restore) says otherwise.
+
+    The `administrators` row is seeded FIRST, here rather than at each call
+    site, because `group_administrators.admin_id` carries a foreign key to it:
+    a seat for an unknown user is refused by Postgres, and the SQLite harness
+    does not enforce foreign keys, so the wrong order passes every test and
+    fails on the first real promotion.
+    """
+    await seed_administrator_row(conn, admin_id)
+    await conn.execute(
+        """
+        INSERT INTO group_administrators
+            (group_id, admin_id, is_registered, is_admin_now)
+        VALUES ($1, $2, FALSE, $3)
+        ON CONFLICT DO NOTHING
+        """,
+        group_id,
+        admin_id,
+        is_admin_now,
+    )
+    await conn.execute(
+        """
+        UPDATE group_administrators SET is_admin_now = $1
+        WHERE group_id = $2 AND admin_id = $3
+        """,
+        is_admin_now,
+        group_id,
+        admin_id,
+    )
+
+
+async def seed_administrator_row(conn, admin_id: int) -> None:
+    """Give a Telegram admin an `administrators` row with 0 credits, if absent.
+
+    Roster prefill must never go through `admin_operations.save_admin` or
+    `update_group_admins`'s creation branch: both hand out `INITIAL_CREDITS`,
+    which would pay 100 credits to every stranger we enumerate. 0 credits is
+    the honest state — they have not registered, and `initialize_new_admin`
+    grants on `activated_at`, not on row existence.
+
+    An existing row is untouched, so a paying admin keeps their balance.
+    """
+    await conn.execute(
+        """
+        INSERT INTO administrators (admin_id, credits) VALUES ($1, 0)
+        ON CONFLICT DO NOTHING
+        """,
+        admin_id,
+    )
+
+
+async def mark_admins_not_admin(conn, group_id: int, keep_ids: list[int]) -> int:
+    """Flip `is_admin_now = FALSE` for roster rows Telegram no longer lists.
+
+    Demotion is a FLAG, never a delete: the row may still carry billing rights
+    (`is_registered`), and deleting it would silently stop charging the payer.
+
+    An EMPTY `keep_ids` is refused, not executed. The predicate is
+    `admin_id NOT IN (...)`, which SQLite accepts with an empty list and
+    evaluates as true for every row — one failed or empty `getChatAdministrators`
+    read would demote the whole group. Returns the number of rows flipped.
+    """
+    if not keep_ids:
+        logger.warning(
+            f"mark_admins_not_admin: refusing an empty admin list for "
+            f"{format_chat_log(group_id)} — nothing demoted"
+        )
+        return 0
+    placeholders = ", ".join(f"${i}" for i in range(2, len(keep_ids) + 2))
+    result = await conn.execute(
+        f"""
+        UPDATE group_administrators SET is_admin_now = FALSE
+        WHERE group_id = $1 AND admin_id NOT IN ({placeholders})
+        """,
+        group_id,
+        *keep_ids,
+    )
+    return _affected_rows(result)
+
+
+class SyncReport(NamedTuple):
+    """What one roster sync saw, and (when applied) what it wrote.
+
+    The counts are computed from the read, not from the driver's affected-row
+    totals, so a dry run and the `--apply` that follows it report the SAME
+    numbers. That is the point of a dry run: a preview that counts differently
+    from the write is a preview of a different operation.
+    """
+
+    chat_id: int
+    title: str | None
+    telegram: int  # human admins Telegram listed, after filtering
+    known: int  # seats already on the roster as current admins
+    new: int  # seats the roster had never seen
+    demoted: int  # roster rows Telegram no longer lists as admins
+    applied: bool
+
+    def as_line(self) -> str:
+        return (
+            f"telegram={self.telegram} known={self.known} new={self.new} "
+            f"demoted={self.demoted}"
+        )
+
+async def sync_group_administrators(chat_id: int, *, apply: bool = False) -> SyncReport:
+    """Reconcile one group's admin roster against Telegram's own list.
+
+    Telegram is the authority on who is an admin right now; the roster is our
+    memory of it, and until #130 nothing refreshed that memory except the
+    moment the bot was added. The measured result: 84 admin seats across 72
+    users against 39 roster rows, 45 seats invisible in 13 groups — so
+    `validation` skipped 39 of the 72 humans it was supposed to skip, and
+    charged paying admins for their own messages.
+
+    Filtering is the same predicate the notify paths already use: bots cannot
+    be moderated or billed, and GROUP_ANONYMOUS_BOT_ID is the sender id of
+    "anonymous admin" posts — not a person, and not a user who can receive a
+    DM.
+
+    `apply=False` is a pure read. Writes go through the #130 primitives only —
+    `upsert_group_admin` seeds the `administrators` row itself, which is what
+    keeps the foreign key satisfied in one place instead of at each call site.
+
+    Nothing here touches `is_registered`: discovering a stranger as a Telegram
+    admin must never make them a billing contact.
+    """
+    admins = await bot.get_chat_administrators(chat_id)
+
+    seen: list[int] = []
+    for admin in admins:
+        user = admin.user
+        if user.is_bot or user.id == GROUP_ANONYMOUS_BOT_ID:
+            continue
+        if user.id not in seen:
+            seen.append(user.id)
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        group_row = await conn.fetchrow(
+            "SELECT title FROM groups WHERE group_id = $1", chat_id
+        )
+        rows = await conn.fetch(
+            """
+            SELECT admin_id, is_admin_now FROM group_administrators
+            WHERE group_id = $1
+            """,
+            chat_id,
+        )
+
+        current = {row["admin_id"]: _flag(row["is_admin_now"]) for row in rows}
+        seen_set = set(seen)
+        new_ids = [admin_id for admin_id in seen if admin_id not in current]
+        known = sum(1 for admin_id in seen if current.get(admin_id))
+        # Predicted from the read, so a dry run counts exactly what --apply
+        # will write.
+        demoted = sum(
+            1
+            for admin_id, is_admin in current.items()
+            if is_admin and admin_id not in seen_set
+        )
+
+        if apply and seen:
+            async with conn.transaction():
+                for admin_id in seen:
+                    await upsert_group_admin(conn, chat_id, admin_id)
+                if demoted:
+                    await mark_admins_not_admin(conn, chat_id, seen)
+        elif apply and not seen:
+            # An empty (or bot-only) admin list is a failed read, not a group
+            # with no admins. Demoting the whole roster on it would blank the
+            # skip set for a live group.
+            logger.warning(
+                f"sync_group_administrators: Telegram listed no human admins "
+                f"for {format_chat_log(chat_id)} — nothing written"
+            )
+            demoted = 0
+
+    return SyncReport(
+        chat_id=chat_id,
+        title=group_row["title"] if group_row else None,
+        telegram=len(seen),
+        known=known,
+        new=len(new_ids),
+        demoted=demoted,
+        applied=apply,
+    )
+
+async def set_admin_now(
+    conn, group_id: int, admin_id: int, is_admin_now: bool
+) -> int:
+    """Flip ONE seat's `is_admin_now`, never creating a row.
+
+    The `chat_member` demotion path needs the update half of
+    `upsert_group_admin` without its insert half: a demotion of someone we
+    never listed must not ADD a roster row for them — that would grow the
+    roster with every mute in a group the bot watches. Returns rows affected,
+    so a caller can tell "we knew about this seat" from "we did not".
+    """
+    result = await conn.execute(
+        """
+        UPDATE group_administrators SET is_admin_now = $1
+        WHERE group_id = $2 AND admin_id = $3
+        """,
+        is_admin_now,
+        group_id,
+        admin_id,
+    )
+    return _affected_rows(result)
+
+async def sweep_group_administrators(
+    concurrency: int = 5, limit: int = 500
+) -> dict[str, int]:
+    """Re-sync every active group's roster from Telegram (the daily writer).
+
+    The two event-driven writers (bot-add, `chat_member`) only fire while the
+    bot is present and only for the change that just happened; a promotion made
+    before the bot joined, or an update the bot was down for, is invisible to
+    both. This is the leg that closes those gaps, and it is why the roster is
+    not merely best-effort.
+
+    Shaped on `heal_bare_group_rows`: a per-group failure is COUNTED and the
+    sweep continues, because one group the bot was kicked from must not cost
+    the other 46 their refresh.
+
+    Args:
+        concurrency: max parallel Telegram reads.
+        limit: max groups per run.
+
+    Returns:
+        {"synced": n, "failed": n, "new": n, "demoted": n, "total": n}.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT group_id FROM groups
+            WHERE status = 'active'
+            ORDER BY group_id
+            LIMIT $1
+            """,
+            limit,
+        )
+    if not rows:
+        logger.info("sweep_group_administrators: no active groups to sync")
+        return {"synced": 0, "failed": 0, "new": 0, "demoted": 0, "total": 0}
+
+    synced = 0
+    failed = 0
+    new_seats = 0
+    demoted_seats = 0
+    sem = asyncio.Semaphore(concurrency)
+
+    async def sync_one(group_id: int) -> None:
+        nonlocal synced, failed, new_seats, demoted_seats
+        async with sem:
+            try:
+                report = await sync_group_administrators(group_id, apply=True)
+            except Exception as exc:  # noqa: BLE001 — per-group isolation
+                failed += 1
+                logger.warning(
+                    f"sweep_group_administrators: {format_chat_log(group_id)} "
+                    f"skipped — {type(exc).__name__}: {exc}"
+                )
+                return
+            synced += 1
+            new_seats += report.new
+            demoted_seats += report.demoted
+
+    await asyncio.gather(*(sync_one(row["group_id"]) for row in rows))
+    summary = {
+        "synced": synced,
+        "failed": failed,
+        "new": new_seats,
+        "demoted": demoted_seats,
+        "total": len(rows),
+    }
+    logger.info(f"sweep_group_administrators: {summary}")
+    return summary
+
 async def get_paid_groups_with_moderation_off() -> list[dict]:
     """Active groups with moderation off while a PAYING admin is attached (issue #41).
 
@@ -988,6 +1310,7 @@ async def get_paid_groups_with_moderation_off() -> list[dict]:
             JOIN administrators a ON a.admin_id = ga.admin_id
             WHERE g.status = $1
               AND g.moderation_enabled = false
+              AND ga.is_registered = TRUE
               AND a.credits > 0
             GROUP BY g.group_id, g.title
             ORDER BY g.group_id

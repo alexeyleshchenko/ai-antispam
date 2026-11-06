@@ -25,6 +25,7 @@ from ..common.telegram_errors import (
 )
 from ..common.trace_context import get_root_span
 from ..common.utils import (
+    format_chat_log,
     format_chat_or_channel_display,
     get_add_to_group_url,
     user_display_label,
@@ -39,8 +40,12 @@ from ..database import (
 )
 from ..database.group_operations import (
     clear_no_rights_detected_at,
+    set_admin_now,
     set_no_rights_detected_at,
+    sync_group_administrators,
+    upsert_group_admin,
 )
+from ..database.postgres_connection import get_pool
 from ..database.trust_operations import (
     JOIN_SOURCE_CHAT_MEMBER,
     JOIN_SOURCE_SERVICE_MESSAGE,
@@ -345,6 +350,21 @@ async def _handle_bot_added(
         group_title=chat_title if chat_title != "Unnamed Group" else None,
         group_username=getattr(event.chat, "username", None),
     )
+
+    # Refresh the whole roster now (#130). The add event is the only moment we
+    # are guaranteed to be looking at the group, and `update_group_admins`
+    # above records exactly ONE seat — whoever added the bot. Measured before
+    # this existed: 84 admin seats across 72 humans against 39 roster rows, so
+    # `validation` classified and charged admins it was supposed to skip.
+    # Log-and-continue: a roster refresh must never fail the add.
+    try:
+        await sync_group_administrators(chat_id, apply=True)
+    except Exception:
+        logger.warning(
+            f"Failed to sync the admin roster for chat {chat_id} "
+            f"('{chat_title}') — the daily sweep will retry",
+            exc_info=True,
+        )
 
     # Stamp the add instant PER ADD — never groups.created_at, which survives a
     # remove/re-add and would open the trust window at the wrong time (#108).
@@ -832,6 +852,31 @@ async def _deactivate_admin_after_block(admin_id: int) -> None:
         )
 
 
+async def _apply_admin_status(chat_id: int, user_id: int, is_admin_now: bool) -> None:
+    """Record one promotion/demotion observed in a `chat_member` update (#130).
+
+    Promotion goes through `upsert_group_admin`, which seeds the
+    `administrators` row the foreign key needs and writes the seat as
+    roster-only (`is_registered = FALSE`) — a promotion must never make someone
+    a billing contact, that is the payment path's decision.
+
+    Demotion goes through `set_admin_now`, which is UPDATE-only: a demotion of
+    somebody we never listed must not ADD a roster row for them, or the roster
+    grows with every mute in every group the bot watches. It is a FLAG, never a
+    delete — the row may still carry `is_registered`, and deleting it would
+    silently stop charging a paying admin.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        if is_admin_now:
+            await upsert_group_admin(conn, chat_id, user_id, True)
+        else:
+            await set_admin_now(conn, chat_id, user_id, False)
+    logger.info(
+        f"Roster {'promotion' if is_admin_now else 'demotion'} of "
+        f"{user_display_label(user_id=user_id)} in chat {format_chat_log(chat_id)}"
+    )
+
 @dp.chat_member()
 async def handle_chat_member_update(event: types.ChatMemberUpdated) -> str:
     """Persist a member join observed through a `chat_member` update (#108).
@@ -846,10 +891,12 @@ async def handle_chat_member_update(event: types.ChatMemberUpdated) -> str:
     arrives first wins and the other is a no-op.
 
     A transition INTO the group (`left`/`kicked` -> `member`/`administrator`/
-    `restricted`) is a join; anything else — a promotion, a mute, a leave — is
-    not. Never raises: a missed join only makes the pre-existing-trust
-    predicate MORE conservative, never less, so a store failure must not take
-    the update down with it.
+    `restricted`) is a join. A transition across the `administrator` boundary
+    is a ROSTER change and is recorded separately (#130) — it used to be
+    discarded, which is why promotions never reached the roster. Never raises:
+    a missed join only makes the pre-existing-trust predicate MORE
+    conservative, never less, and a missed roster write is repaired by the
+    daily sweep, so a store failure must not take the update down with it.
     """
     try:
         old_status = event.old_chat_member.status
@@ -860,12 +907,22 @@ async def handle_chat_member_update(event: types.ChatMemberUpdated) -> str:
             "restricted",
         )
         user = event.new_chat_member.user
-        if is_join and user is not None and not user.is_bot:
-            await record_join(event.chat.id, user.id, JOIN_SOURCE_CHAT_MEMBER)
-            logger.info(
-                f"Persisted join of member {user.id} in chat {event.chat.id} "
-                f"('{event.chat.title or ''}') via chat_member update"
-            )
+        if user is not None and not user.is_bot:
+            if is_join:
+                await record_join(event.chat.id, user.id, JOIN_SOURCE_CHAT_MEMBER)
+                logger.info(
+                    f"Persisted join of member {user.id} in chat {event.chat.id} "
+                    f"('{event.chat.title or ''}') via chat_member update"
+                )
+            # #130: a promotion or demotion is the update this handler used to
+            # discard — its join predicate requires `old in (left, kicked)`, so
+            # `member -> administrator` fell through and the roster never
+            # learned about a single promotion. That is how a group ended up
+            # with 18 admins and 1 roster row.
+            if new_status == "administrator" and old_status != "administrator":
+                await _apply_admin_status(event.chat.id, user.id, True)
+            elif old_status == "administrator" and new_status != "administrator":
+                await _apply_admin_status(event.chat.id, user.id, False)
     except Exception:
         logger.warning(
             f"Failed to persist chat_member join in chat {event.chat.id} "

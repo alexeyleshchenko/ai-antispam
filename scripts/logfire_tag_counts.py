@@ -215,6 +215,7 @@ def get_known_tags() -> List[str]:
         "spam_auto_deleted",
         "spam_delete_failed",
         "spam_delete_expired",
+        "spam_target_is_admin",
         # Help tags
         "help_back_shown",
     ]

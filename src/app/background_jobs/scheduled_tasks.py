@@ -8,7 +8,8 @@ Runs daily. Replaces the former low_balance_loop with a single loop that:
 4. Cleans message_history (configurable TTL)
 5. Cleans pending spam_examples (configurable TTL)
 6. Heals bare group rows
-7. Reports paying groups left silently unmoderated (issue #41)
+7. Re-syncs every active group's admin roster (issue #130)
+8. Reports paying groups left silently unmoderated (issue #41)
 
 The stale-pending verdict reaper is deliberately NOT in this bundle: its
 predicate is a 15-minute threshold, so an 86400-second cadence let a row
@@ -25,7 +26,10 @@ from ..database.classification_verdicts import (
     cleanup_old_verdicts,
     cleanup_stale_pending_verdicts,
 )
-from ..database.group_operations import heal_bare_group_rows
+from ..database.group_operations import (
+    heal_bare_group_rows,
+    sweep_group_administrators,
+)
 from ..database.message_lookup import cleanup_old_lookup_entries
 from ..database.message_operations import cleanup_old_message_history
 from ..database.spam_examples import cleanup_pending_spam_examples
@@ -86,6 +90,15 @@ async def run_scheduled_jobs() -> None:
         await heal_bare_group_rows()
     except Exception:
         logger.exception("bare group rows heal failed")
+
+    # #130: the third roster writer, and the only one that repairs what the
+    # event writers cannot see — promotions made while the bot was absent, and
+    # updates missed while it was down. Runs before the monitor below so the
+    # report describes the post-sync state.
+    try:
+        await sweep_group_administrators()
+    except Exception:
+        logger.exception("admin roster sweep failed")
 
     # Last: reports the SETTLED state, after the jobs above may have paused or
     # reactivated groups (issue #41).

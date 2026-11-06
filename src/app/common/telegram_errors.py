@@ -33,6 +33,15 @@ _PERMISSION_MESSAGE_MARKERS = (
     "message can't be deleted",
 )
 
+# Telegram refuses to ban/restrict a chat ADMIN: "user is an administrator of
+# the chat". Deliberately NOT folded into `_PERMISSION_MESSAGE_MARKERS`, which
+# means "the bot lacks rights" and drives the owner-facing permission
+# notification — the two look alike (both are TelegramBadRequest refusals of the
+# same call) and mean the opposite thing: here the bot HAS the rights and the
+# target is simply immune. Conflating them told the owner the bot lacks rights
+# when it had them, and buried the real signal (#130).
+_TARGET_IS_ADMIN_MARKERS = ("user is an administrator of the chat",)
+
 _MESSAGE_NOT_FOUND_MARKERS = (
     "message to delete not found",
     "message to edit not found",
@@ -66,6 +75,18 @@ def is_permission_error(error: Exception) -> bool:
         return False
     return _error_message_contains(error, _PERMISSION_MESSAGE_MARKERS)
 
+
+def is_target_admin_error(error: Exception) -> bool:
+    """True when Telegram refused an action because the TARGET is an admin.
+
+    The bot has the rights; the target cannot be banned or restricted by anyone
+    in this group. Not a failure and not a permission problem — the caller's
+    correct response is to record the target as an admin and skip the rest of
+    the moderation of that message (#130).
+    """
+    if not isinstance(error, TelegramBadRequest):
+        return False
+    return _error_message_contains(error, _TARGET_IS_ADMIN_MARKERS)
 
 def is_message_not_found_error(error: Exception) -> bool:
     """True when the target message was already deleted or does not exist."""

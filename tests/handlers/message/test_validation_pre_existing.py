@@ -44,11 +44,28 @@ def src_pool(test_pool):
     yield
     postgres_connection._pool = original
 
-def _group(admin_ids: list[int] | None = None) -> object:
+def _group(
+    admin_ids: list[int] | None = None,
+    telegram_admin_ids: list[int] | None = None,
+) -> object:
+    """A group whose billing list and roster are set independently.
+
+    `admin_ids` is who registered the bot (billing + notifications);
+    `telegram_admin_ids` is everyone Telegram lists as an admin (the moderation
+    skip). Defaulting the roster to the billing list keeps every pre-#130 test
+    reading exactly as it did.
+    """
+    billing = admin_ids if admin_ids is not None else [999]
     return type(
         "Group",
         (),
-        {"admin_ids": admin_ids if admin_ids is not None else [999], "moderation_enabled": True},
+        {
+            "admin_ids": billing,
+            "telegram_admin_ids": (
+                telegram_admin_ids if telegram_admin_ids is not None else billing
+            ),
+            "moderation_enabled": True,
+        },
     )()
 
 def _patch_group(group: object):
@@ -64,6 +81,52 @@ def _patch_trust_row(row: dict | None):
         new_callable=AsyncMock,
         return_value=row,
     )
+
+# --------------------------------------------------------------------------
+# The admin skip reads the ROSTER, not the billing list (#130)
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_roster_only_admin_is_skipped_without_any_further_work():
+    """A Telegram admin we never registered still gets the skip.
+
+    This is the #130 instance: @tishina_account was one of 18 admins of a
+    group, held no `group_administrators` row, and was classified at 0.90 —
+    the message was deleted and the ban refused with "user is an administrator
+    of the chat".
+    """
+    roster_id = 777001
+    group = _group(admin_ids=[999], telegram_admin_ids=[roster_id])
+    with _patch_group(group), _patch_trust_row(None) as trust:
+        _, reason = await validate_group_and_check_early_exits(
+            CHAT_ID, roster_id, source="new"
+        )
+
+    assert reason == "message_from_admin_skipped"
+    # Nothing downstream ran: no trust lookup, hence no classification.
+    trust.assert_not_awaited()
+
+@pytest.mark.asyncio
+async def test_demoted_payer_is_not_skipped():
+    """Billing and the skip are orthogonal: a payer who is no longer an admin
+    is moderated like anyone else, or a demoted admin could spam forever."""
+    payer = 888001
+    group = _group(admin_ids=[payer], telegram_admin_ids=[])
+    with (
+        _patch_group(group),
+        _patch_trust_row(None) as trust,
+        patch(
+            "src.app.handlers.message.validation.is_pre_existing_candidate",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+    ):
+        _, reason = await validate_group_and_check_early_exits(
+            CHAT_ID, payer, source="new"
+        )
+
+    assert reason == ""
+    trust.assert_awaited()
 
 # --------------------------------------------------------------------------
 # Leg 2 — a pre-existing candidate is trusted without an LLM call

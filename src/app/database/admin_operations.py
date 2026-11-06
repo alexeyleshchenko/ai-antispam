@@ -150,7 +150,8 @@ async def count_groups_awaiting_moderation_restore(admin_id: int) -> int:
             SELECT count(*)
             FROM groups g
             JOIN group_administrators ga ON ga.group_id = g.group_id
-            WHERE ga.admin_id = $1 AND g.moderation_enabled = false
+            WHERE ga.admin_id = $1 AND ga.is_registered = TRUE
+              AND g.moderation_enabled = false
             """,
             admin_id,
         )
@@ -249,43 +250,58 @@ async def initialize_new_admin(
     *,
     language_code: str | None = None,
 ) -> bool:
-    """Initialize a new administrator with initial credits"""
+    """Grant the welcome and the initial credits exactly once.
+
+    Keyed on `activated_at`, NOT on row existence (#130). The admin roster
+    prefill creates an `administrators` row (0 credits, `activated_at` NULL)
+    for every Telegram admin it discovers, so "a row exists" no longer means
+    "this user has registered" — keying on existence would have silently
+    denied the welcome and the 100 credits to 48 prefilled users.
+
+    The `UPDATE ... RETURNING` is the mutex: of two concurrent `/start`s
+    exactly one gets a row back, which a read-then-write check would not
+    guarantee.
+    """
     pool = await get_pool()
     async with pool.acquire() as conn, conn.transaction():
-        exists = await conn.fetchval(
+        # A roster row may already exist; never insert blind, and never let
+        # the seed touch an existing balance.
+        await conn.execute(
             """
-                SELECT EXISTS(SELECT 1 FROM administrators WHERE admin_id = $1)
+            INSERT INTO administrators (admin_id, credits) VALUES ($1, 0)
+            ON CONFLICT DO NOTHING
             """,
             admin_id,
         )
 
-        if exists:
+        claimed = await conn.fetchval(
+            """
+            UPDATE administrators SET activated_at = NOW()
+            WHERE admin_id = $1 AND activated_at IS NULL
+            RETURNING admin_id
+            """,
+            admin_id,
+        )
+        if claimed is None:
             return False
 
-        if await _has_delete_spam_column(conn):
-            await conn.execute(
-                """
-                    INSERT INTO administrators (
-                        admin_id, credits, moderation_mode, delete_spam,
-                        is_active, language_code, created_at, last_active
-                    ) VALUES ($1, $2, 'notify', false, TRUE, $3, NOW(), NOW())
-                """,
-                admin_id,
-                INITIAL_CREDITS,
-                language_code,
-            )
-        else:
-            await conn.execute(
-                """
-                    INSERT INTO administrators (
-                        admin_id, credits, moderation_mode,
-                        is_active, language_code, created_at, last_active
-                    ) VALUES ($1, $2, 'notify', TRUE, $3, NOW(), NOW())
-                """,
-                admin_id,
-                INITIAL_CREDITS,
-                language_code,
-            )
+        # Additive, never an assignment: a prefilled roster row is at 0, so
+        # this is the 100 initial credits; a row that somehow carries a
+        # balance keeps it.
+        await conn.execute(
+            """
+            UPDATE administrators
+            SET credits = credits + $1,
+                moderation_mode = 'notify',
+                is_active = TRUE,
+                language_code = COALESCE($2, language_code),
+                last_active = NOW()
+            WHERE admin_id = $3
+            """,
+            INITIAL_CREDITS,
+            language_code,
+            admin_id,
+        )
 
         await conn.execute(
             """
@@ -297,7 +313,6 @@ async def initialize_new_admin(
         )
 
         return True
-
 
 async def cycle_moderation_mode(admin_id: int) -> ModerationMode | None:
     """Cycle notify → delete → delete_silent → notify. Returns new mode."""

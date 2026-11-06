@@ -57,8 +57,14 @@ async def validate_group_and_check_early_exits(
     # At this point group is guaranteed to be not None
     assert group is not None
 
-    # Check if sender is an admin - skip immediately
-    if user_id in group.admin_ids:
+    # Check if sender is an admin - skip immediately.
+    #
+    # Reads the ROSTER, not the billing list: `telegram_admin_ids` is everyone
+    # Telegram currently lists as an admin of this chat. `admin_ids` holds only
+    # the users who registered the bot, which was one row per group — so a real
+    # admin we had never enumerated was classified, and their message deleted
+    # while the ban was refused (`user is an administrator of the chat`).
+    if user_id in group.telegram_admin_ids:
         return group, "message_from_admin_skipped"
 
     # Trusted members (probation complete) skip full pipeline

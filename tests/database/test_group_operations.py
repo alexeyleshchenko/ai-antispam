@@ -12,6 +12,7 @@ from app.database import (
     deduct_credits_from_admins,
     get_admin_group_ids,
     get_admin_groups,
+    get_group,
     get_groups_with_no_rights_past_grace,
     get_moderation_event_count,
     get_paying_admins,
@@ -20,12 +21,15 @@ from app.database import (
     is_member_in_group,
     is_moderation_enabled,
     is_trusted_member,
+    mark_admins_not_admin,
     refund_credits,
     remove_member_from_group,
+    seed_administrator_row,
     set_group_moderation,
     set_moderation_events,
     set_no_rights_detected_at,
     update_group_admins,
+    upsert_group_admin,
 )
 
 
@@ -871,3 +875,306 @@ async def test_refund_credits_non_positive_amount_is_a_noop(
             "SELECT COUNT(*) FROM transactions WHERE admin_id = $1", admin_id
         )
         assert txn_count == 0
+
+
+# --- The admin roster primitives (#130) -------------------------------------
+#
+# Every roster write is a `DO NOTHING` insert followed by a one-column UPDATE,
+# never an upsert: the test harness rewrites `ON CONFLICT ... DO UPDATE` into
+# `INSERT OR REPLACE`, which resets every column the INSERT list omits. These
+# tests assert the column that must survive, so the rewrite cannot hide.
+
+
+class _RecordingConn:
+    """Captures the SQL a primitive executes, with no database behind it."""
+
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+
+    async def execute(self, query: str, *args) -> str:
+        self.statements.append(query)
+        return "UPDATE 0"
+
+
+async def _seed_group_and_admin(conn, group_id: int, admin_id: int) -> None:
+    """Idempotent: several admins share one group row."""
+    await conn.execute(
+        "INSERT INTO groups (group_id) VALUES ($1) ON CONFLICT DO NOTHING", group_id
+    )
+    await conn.execute(
+        "INSERT INTO administrators (admin_id, credits) VALUES ($1, 0) "
+        "ON CONFLICT DO NOTHING",
+        admin_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_upsert_group_admin_never_promotes_a_roster_row_to_billing(
+    patched_db_conn, clean_db
+):
+    """`is_registered` survives an `is_admin_now` flip — the adapter hazard.
+
+    A `DO UPDATE` upsert rewritten to INSERT OR REPLACE would reset
+    `is_registered` to its TRUE default: a roster-only admin becomes a billing
+    admin, and the next deduction charges a stranger. Asserted, not reasoned.
+    """
+    group_id, admin_id = 880001, 880011
+    async with clean_db.acquire() as conn:
+        await _seed_group_and_admin(conn, group_id, admin_id)
+        await seed_administrator_row(conn, admin_id)
+
+        await upsert_group_admin(conn, group_id, admin_id, True)
+        await upsert_group_admin(conn, group_id, admin_id, False)
+        await upsert_group_admin(conn, group_id, admin_id, True)
+
+        row = await conn.fetchrow(
+            "SELECT is_registered, is_admin_now FROM group_administrators "
+            "WHERE group_id = $1 AND admin_id = $2",
+            group_id,
+            admin_id,
+        )
+        assert bool(row["is_registered"]) is False
+        assert bool(row["is_admin_now"]) is True
+
+
+@pytest.mark.asyncio
+async def test_upsert_group_admin_inserts_roster_only_rows(patched_db_conn, clean_db):
+    """A discovered Telegram admin starts roster-only and skip-visible."""
+    group_id, admin_id = 880002, 880012
+    async with clean_db.acquire() as conn:
+        await _seed_group_and_admin(conn, group_id, admin_id)
+
+        await upsert_group_admin(conn, group_id, admin_id, True)
+
+        row = await conn.fetchrow(
+            "SELECT is_registered, is_admin_now FROM group_administrators "
+            "WHERE group_id = $1 AND admin_id = $2",
+            group_id,
+            admin_id,
+        )
+        assert bool(row["is_registered"]) is False
+        assert bool(row["is_admin_now"]) is True
+
+
+@pytest.mark.asyncio
+async def test_seed_administrator_row_never_touches_an_existing_balance(
+    patched_db_conn, clean_db
+):
+    """Prefill creates a 0-credit row and leaves a paying admin's balance alone."""
+    paying, stranger = 880003, 880013
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO administrators (admin_id, credits) VALUES ($1, 55)", paying
+        )
+
+        await seed_administrator_row(conn, paying)
+        await seed_administrator_row(conn, stranger)
+
+        assert (
+            await conn.fetchval(
+                "SELECT credits FROM administrators WHERE admin_id = $1", paying
+            )
+            == 55
+        )
+        assert (
+            await conn.fetchval(
+                "SELECT credits FROM administrators WHERE admin_id = $1", stranger
+            )
+            == 0
+        )
+        # Never a second welcome grant: activation is what grants, not the row.
+        assert (
+            await conn.fetchval(
+                "SELECT activated_at FROM administrators WHERE admin_id = $1", paying
+            )
+            is None
+        )
+
+
+@pytest.mark.asyncio
+async def test_mark_admins_not_admin_flips_only_the_absent_admins(
+    patched_db_conn, clean_db
+):
+    """Demotion flips the flag for the absent ids and nothing else."""
+    group_id = 880004
+    kept, demoted = 880014, 880015
+    async with clean_db.acquire() as conn:
+        await _seed_group_and_admin(conn, group_id, kept)
+        await _seed_group_and_admin(conn, group_id, demoted)
+        await upsert_group_admin(conn, group_id, kept, True)
+        await upsert_group_admin(conn, group_id, demoted, True)
+
+        flipped = await mark_admins_not_admin(conn, group_id, [kept])
+
+        assert flipped == 1
+        rows = {
+            row["admin_id"]: bool(row["is_admin_now"])
+            for row in await conn.fetch(
+                "SELECT admin_id, is_admin_now FROM group_administrators "
+                "WHERE group_id = $1",
+                group_id,
+            )
+        }
+        assert rows == {kept: True, demoted: False}
+        # The demoted row is kept, never deleted: it may still carry billing.
+        assert await conn.fetchval(
+            "SELECT COUNT(*) FROM group_administrators WHERE group_id = $1", group_id
+        ) == 2
+
+
+@pytest.mark.asyncio
+async def test_mark_admins_not_admin_refuses_an_empty_keep_list(
+    patched_db_conn, clean_db, caplog
+):
+    """An empty Telegram read must not demote the whole group.
+
+    `admin_id NOT IN ()` is accepted by SQLite and is true for every row, so a
+    failed `getChatAdministrators` would have flipped the entire roster.
+    """
+    group_id = 880005
+    admins = [880016, 880017]
+    async with clean_db.acquire() as conn:
+        for admin_id in admins:
+            await _seed_group_and_admin(conn, group_id, admin_id)
+            await upsert_group_admin(conn, group_id, admin_id, True)
+
+        with caplog.at_level(logging.WARNING):
+            flipped = await mark_admins_not_admin(conn, group_id, [])
+
+        assert flipped == 0
+        remaining = await conn.fetch(
+            "SELECT is_admin_now FROM group_administrators WHERE group_id = $1",
+            group_id,
+        )
+        assert all(bool(row["is_admin_now"]) for row in remaining)
+    assert any("refusing an empty admin list" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_roster_primitives_never_emit_do_update():
+    """The two-statement form is a property of the SQL, not of the docstring.
+
+    A future "simplification" back to `ON CONFLICT ... DO UPDATE` would pass
+    every database test above on Postgres and corrupt rows only under the test
+    adapter — so the shape itself is asserted.
+    """
+    conn = _RecordingConn()
+    await upsert_group_admin(conn, 1, 2, True)
+    await seed_administrator_row(conn, 2)
+    await mark_admins_not_admin(conn, 1, [2])
+
+    assert conn.statements, "no SQL captured"
+    for statement in conn.statements:
+        upper = statement.upper()
+        assert "DO UPDATE" not in upper, statement
+        assert "EXCLUDED" not in upper, statement
+        assert "OR REPLACE" not in upper, statement
+
+
+# --- get_group: the roster partition (#130) --------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_group_partitions_billing_from_the_roster(
+    patched_db_conn, clean_db
+):
+    """One query feeds two lists with two meanings.
+
+    `admin_ids` is billing + notifications (`is_registered`); a roster-only
+    Telegram admin must never appear there or 72 strangers get DM'd and billed.
+    `telegram_admin_ids` is the moderation skip (`is_admin_now`), and a
+    demoted payer must not appear there or they could spam forever.
+    """
+    group_id = 880101
+    payer, roster_only, demoted = 880111, 880112, 880113
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO groups (group_id) VALUES ($1) ON CONFLICT DO NOTHING",
+            group_id,
+        )
+        for admin_id in (payer, roster_only, demoted):
+            await conn.execute(
+                "INSERT INTO administrators (admin_id, credits) VALUES ($1, 0) "
+                "ON CONFLICT DO NOTHING",
+                admin_id,
+            )
+        for admin_id, is_registered, is_admin_now in (
+            (payer, True, True),
+            (roster_only, False, True),
+            (demoted, True, False),
+        ):
+            await conn.execute(
+                "INSERT INTO group_administrators "
+                "(group_id, admin_id, is_registered, is_admin_now) "
+                "VALUES ($1, $2, $3, $4)",
+                group_id,
+                admin_id,
+                is_registered,
+                is_admin_now,
+            )
+
+    group = await get_group(group_id)
+
+    assert group is not None
+    assert sorted(group.admin_ids) == sorted([payer, demoted])
+    assert sorted(group.telegram_admin_ids) == sorted([payer, roster_only])
+
+
+@pytest.mark.asyncio
+async def test_get_group_costs_the_same_number_of_queries(patched_db_conn, clean_db):
+    """The roster must not add a per-message round trip.
+
+    `get_group` runs on every message. The plan's acceptance note said "exactly
+    two queries"; the real pre-existing cost is three (groups, administrators,
+    approved_members) and it stays three — what matters is that the roster is
+    read by the SAME statement, not by a new one.
+    """
+    group_id = 880102
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO groups (group_id) VALUES ($1) ON CONFLICT DO NOTHING",
+            group_id,
+        )
+
+    class _CountingConn:
+        def __init__(self, conn):
+            self._conn = conn
+            self.queries: list[str] = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def fetch(self, query, *args):
+            self.queries.append(query)
+            return await self._conn.fetch(query, *args)
+
+        async def fetchrow(self, query, *args):
+            self.queries.append(query)
+            return await self._conn.fetchrow(query, *args)
+
+        async def fetchval(self, query, *args):
+            self.queries.append(query)
+            return await self._conn.fetchval(query, *args)
+
+        async def execute(self, query, *args):
+            self.queries.append(query)
+            return await self._conn.execute(query, *args)
+
+    counting = _CountingConn(clean_db.acquire())
+
+    class _Pool:
+        def acquire(self):
+            return counting
+
+    with patch(
+        "app.database.group_operations.get_pool", AsyncMock(return_value=_Pool())
+    ):
+        await get_group(group_id)
+
+    assert len(counting.queries) == 3
+    assert (
+        sum("group_administrators" in query for query in counting.queries) == 1
+    )
