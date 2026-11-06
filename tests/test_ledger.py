@@ -544,6 +544,54 @@ def check_reissue_partition() -> None:
                   proc.returncode != 0 and "prior_occupant" in proc.stderr,
                   (proc.stderr or proc.stdout).strip()[-150:])
 
+    # --- E. THE SCHEMA AUTHORITY MUST ITSELF DECLARE, NAME AND LOAD THE OPTIONAL FIELD.
+    # docs/ledger-renumbers.json tells readers the schema lives in the example, and on
+    # 2026-11-06 that example carried ZERO mentions of `prior_occupant` while FOUR of the
+    # five live declarations used it -- the case 29 of 62 numbers hit, undocumented in the
+    # one file a factory is told to copy. Reported by Triage as a tell rather than a
+    # defect; the leg exists because a doc that OMITS a field the loader requires for the
+    # common case is a discoverability hole, and a doc that names a shape the loader
+    # REFUSES is worse than none.
+    example = REPO / "docs" / "ledger-renumbers.example.json"
+    payload = json.loads(example.read_text(encoding="utf-8"))
+    declared = [k for k, v in (payload.get("renumbers") or {}).items()
+                if isinstance(v, dict) and v.get("prior_occupant")]
+    rules = " ".join(payload.get("_rules") or [])
+    check("(e) the example DECLARES a prior_occupant entry AND its rules NAME the field",
+          bool(declared) and "prior_occupant" in rules,
+          f"{len(declared)} entry/entries carry it; rules mention it: "
+          f"{'prior_occupant' in rules}")
+
+    # --- F. AND IT MUST LOAD. Every new factory copies this file verbatim, so it is held
+    # to the loader's own contract: a documented shape the loader REJECTS fails on first
+    # copy, and one that silently LOSES the partition would read as "the number was free"
+    # -- the false close this entire surface exists to stop.
+    with tempfile.TemporaryDirectory() as ex_tmp:
+        ex_root = Path(ex_tmp)
+        (ex_root / "docs").mkdir(parents=True, exist_ok=True)
+        (ex_root / "docs" / "ledger-renumbers.json").write_text(
+            example.read_text(encoding="utf-8"), encoding="utf-8")
+        ex_proc = subprocess.run(
+            [sys.executable, "-c",
+             "import sys, pathlib; sys.path.insert(0, sys.argv[2]);"
+             "import ledger_declaration as ld;"
+             "d = ld.load_renumbers(pathlib.Path(sys.argv[1]));"
+             "print(len(d), sum(1 for r in d.values() if r.prior_ceiling is not None))",
+             str(ex_root), str(LOCAL_TOOLS)],
+            capture_output=True, text=True)
+        got = (ex_proc.stdout or "").split()
+        # `declared` is required non-empty HERE as well as in (e), and the reason is not
+        # belt-and-braces: with nothing to carry, "the loader agrees with the example" is
+        # two zeroes agreeing, so the round-trip leg would pass on a file that documents no
+        # partition at all. Measured 2026-11-06 -- stripped of the field, (e) red and (f)
+        # stayed GREEN until this clause was added.
+        check("(f) the example, copied verbatim, LOADS through the shipped loader and the "
+              "partition SURVIVES the round trip",
+              ex_proc.returncode == 0 and len(got) == 2 and bool(declared)
+              and int(got[0]) == len(payload["renumbers"])
+              and int(got[1]) == len(declared),
+              (ex_proc.stderr or ex_proc.stdout).strip()[-160:])
+
 def check_release_vocabulary() -> None:
     """#210's release arms, driven where the vocabulary exists.
 

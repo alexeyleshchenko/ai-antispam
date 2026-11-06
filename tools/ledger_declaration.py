@@ -296,11 +296,15 @@ def load_renumbers(repo: Path) -> dict[str, Renumber]:
                     f"object -- it names the board the number belonged to and the range "
                     f"of row numbers that belongs to it"])
             # `floor` is OPTIONAL and defaults to the start of the ledger: a prior
-            # occupant whose rows are a PREFIX of the subject's needs no floor, and
-            # demanding one would make the common case noisier for no gain. What it is
-            # NOT is inferrable -- #77's prior occupant sits at n=168..171 while the
-            # reissued unit's own legs are n=30..31, so a ceiling alone puts those legs
-            # on the wrong side of the boundary and reports the unit as having no intake.
+            # occupant whose block is a PREFIX of the subject's rows needs no floor, and
+            # demanding one would make the common case noisier for no gain. On every live
+            # declaration here it is INERT, measured 2026-11-06: a reissued unit's own
+            # legs carry the OLD subject, so they sit in the old subject's bucket and
+            # reach a close through the declared HOP, never through this range (#77's
+            # legs are n=30..31 under #44 while the block is n=168..171 under #77). The
+            # field exists for the unit that files under the NEW subject BELOW the block,
+            # where a ceiling alone would hand that row to the prior occupant. It is not
+            # INFERRABLE, which is why it is declared rather than derived.
             for key in ("board", "ceiling"):
                 value = occupant.get(key)
                 if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
