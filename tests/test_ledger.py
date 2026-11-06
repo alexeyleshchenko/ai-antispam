@@ -504,7 +504,7 @@ def check_reissue_partition() -> None:
             (4, "run", "prior occupant settlement receipt"),
         ])
         arm_detail = "reissued unit closed. board=closed head=" + "b" * 40
-        r = run_in_tree(b, _ledger(b), "append", "--event", "close", "--actor", "triage",
+        r = run_in_tree(b, _ledger(b), "append", "--event", "close", "--rework", "none", "--actor", "triage",
                         "--subject", "#77", "--detail", arm_detail)
         msg = (r.stdout + r.stderr).strip()
         check("(b) a close for the REISSUED unit is REFUSED — the prior occupant's legs "
@@ -513,7 +513,7 @@ def check_reissue_partition() -> None:
 
         # --- C. THE CONTROL. Same ledger, same append, declaration REMOVED.
         decl_path.unlink()
-        r = run_in_tree(b, _ledger(b), "append", "--event", "close", "--actor", "triage",
+        r = run_in_tree(b, _ledger(b), "append", "--event", "close", "--rework", "none", "--actor", "triage",
                         "--subject", "#77", "--detail", arm_detail)
         msg = (r.stdout + r.stderr).strip()
         check("(c) CONTROL: with the partition UNDECLARED the SAME close is ACCEPTED, "
@@ -823,7 +823,7 @@ def main() -> int:
         # leg a member could shadow `close` and the sequence law would silently stop
         # applying to a factory's own lifecycle.
         decl_file.write_text(json.dumps({"events": [], "kinds": []}))
-        r = run(decl_ledger, "append", "--event", "close", "--actor", "triage",
+        r = run(decl_ledger, "append", "--event", "close", "--rework", "none", "--actor", "triage",
                 "--subject", "#9", "--detail", "core event against an empty declaration",
                 extra_env=DECL)
         check("a core event is still refused by its own law, not shadowed by a declaration",
@@ -1112,7 +1112,7 @@ def main() -> int:
         write_ledger(rev, ("intake", "#187"), ("claim", "#187"))
         before_rev = hashlib.md5(rev.read_bytes()).hexdigest()
 
-        r = run(rev, "append", "--event", "close", "--actor", "worker", "--subject", "#187",
+        r = run(rev, "append", "--event", "close", "--rework", "none", "--actor", "worker", "--subject", "#187",
                 "--detail", "Closed, and the revision is not stated anywhere.",
                 actors=rev_actors, extra_env=rev_env)
         check("a close declaring no revision is REFUSED",
@@ -1123,7 +1123,7 @@ def main() -> int:
               hashlib.md5(rev.read_bytes()).hexdigest() == before_rev,
               f"{len(rows(rev))} row(s)")
 
-        r = run(rev, "append", "--event", "close", "--actor", "worker", "--subject", "#187",
+        r = run(rev, "append", "--event", "close", "--rework", "none", "--actor", "worker", "--subject", "#187",
                 "--detail", "Closed. The receipts describe revision "
                             "0123456789abcdef0123456789abcdef01234567 which resolves.",
                 actors=rev_actors, extra_env=rev_env)
@@ -1135,7 +1135,7 @@ def main() -> int:
 
         # The accepting arm. Without it the probe would pass on a refusal that rejected
         # every close row — the one-sided shape that proves nothing about the predicate.
-        r = run(rev, "append", "--event", "close", "--actor", "worker", "--subject", "#187",
+        r = run(rev, "append", "--event", "close", "--rework", "none", "--actor", "worker", "--subject", "#187",
                 "--detail", "Closed with its receipts. "
                             "head=0123456789abcdef0123456789abcdef01234567",
                 actors=rev_actors, extra_env=rev_env)
@@ -1834,7 +1834,7 @@ def main() -> int:
         prose = tdir / "prose.jsonl"
         write_ledger(prose, ("intake", "#88"), ("claim", "#88"))
         r = run(
-            prose, "append", "--event", "close", "--actor", "worker", "--subject", "#88",
+            prose, "append", "--event", "close", "--rework", "none", "--actor", "worker", "--subject", "#88",
             "--detail",
             "Closed. The writer tested whether tokens_out= was absent before appending, "
             "and cost_usd= was read from the same sentence. "
@@ -1855,7 +1855,7 @@ def main() -> int:
         # both parse — the punctuation case is the boundary pinned below.
         stated = tdir / "stated.jsonl"
         write_ledger(stated, ("intake", "#88"), ("claim", "#88"))
-        run(stated, "append", "--event", "close", "--actor", "worker", "--subject", "#88",
+        run(stated, "append", "--event", "close", "--rework", "none", "--actor", "worker", "--subject", "#88",
             "--detail", "Closed. The author stated turns=7 and cost_usd=9.99 before the "
                         "append. head=0123456789abcdef0123456789abcdef01234567",
             actors=actors, extra_env={"OPENCRABS_DB_PATH": str(db)})
@@ -1877,7 +1877,7 @@ def main() -> int:
         # would re-open the quotation hole (`turns=36'`) this class exists to close.
         punctuated = tdir / "punctuated.jsonl"
         write_ledger(punctuated, ("intake", "#88"), ("claim", "#88"))
-        run(punctuated, "append", "--event", "close", "--actor", "worker", "--subject", "#88",
+        run(punctuated, "append", "--event", "close", "--rework", "none", "--actor", "worker", "--subject", "#88",
             "--detail", "Closed. The author stated turns=7. "
                         "head=0123456789abcdef0123456789abcdef01234567",
             actors=actors, extra_env={"OPENCRABS_DB_PATH": str(db)})
@@ -1900,7 +1900,7 @@ def main() -> int:
         # something after the `=`" would leave this half of the class live.
         quoted = tdir / "quoted.jsonl"
         write_ledger(quoted, ("intake", "#88"), ("claim", "#88"))
-        run(quoted, "append", "--event", "close", "--actor", "worker", "--subject", "#88",
+        run(quoted, "append", "--event", "close", "--rework", "none", "--actor", "worker", "--subject", "#88",
             "--detail", "Closed. The quoted trailer read turns=36' before the repair. "
                         "head=0123456789abcdef0123456789abcdef01234567",
             actors=actors, extra_env={"OPENCRABS_DB_PATH": str(db)})
@@ -1957,7 +1957,7 @@ def main() -> int:
             encoding="utf-8",
         )
         r = run(
-            silent, "append", "--event", "close", "--actor", "worker", "--subject", "#89",
+            silent, "append", "--event", "close", "--rework", "none", "--actor", "worker", "--subject", "#89",
             "--detail", "Closed with no telemetry inside the window. "
                         "head=0123456789abcdef0123456789abcdef01234567",
             actors=actors, extra_env={"OPENCRABS_DB_PATH": str(empty_db)},
@@ -1978,7 +1978,7 @@ def main() -> int:
         stated = tdir / "stated_window.jsonl"
         write_ledger(stated, ("intake", "#90"), ("claim", "#90"))
         run(
-            stated, "append", "--event", "close", "--actor", "worker", "--subject", "#90",
+            stated, "append", "--event", "close", "--rework", "none", "--actor", "worker", "--subject", "#90",
             "--detail", "Closed. The author stated duration=42s before the append. "
                         "head=0123456789abcdef0123456789abcdef01234567",
             actors=actors, extra_env={"OPENCRABS_DB_PATH": str(empty_db)},
@@ -2054,7 +2054,7 @@ def main() -> int:
         # extractor must actually have RUN. Both halves are asserted: without the second,
         # the arm would pass on a tree where the module was never staged, and the RED arm
         # below would then be proving the wrong thing.
-        r = absent_run("append", "--event", "close", "--actor", "worker",
+        r = absent_run("append", "--event", "close", "--rework", "none", "--actor", "worker",
                        "--subject", "#91", "--detail", "Closed with the extractor present. "
                        "head=0123456789abcdef0123456789abcdef01234567")
         detail = close_row(absent_ledger).get("detail", "")
@@ -2074,7 +2074,7 @@ def main() -> int:
             "\n".join(json.dumps(row) for row in rows(absent_ledger)[:2]) + "\n",
             encoding="utf-8",
         )
-        r = absent_run("append", "--event", "close", "--actor", "worker",
+        r = absent_run("append", "--event", "close", "--rework", "none", "--actor", "worker",
                        "--subject", "#91", "--detail", "Closed with no extractor at all. "
                        "head=0123456789abcdef0123456789abcdef01234567")
         detail = close_row(absent_ledger).get("detail", "")

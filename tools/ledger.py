@@ -144,6 +144,7 @@ AUTHORIZED_ACTORS_BY_EVENT = AUTHORIZED_ACTORS_BY_EVENT
 from field_predicate import (
     declared_keys,
     declared_reclose,
+    declared_rework,
     declared_revision,
     mentions_reclose,
     declared_telemetry_provenance,
@@ -1373,6 +1374,7 @@ def cmd_append(args: argparse.Namespace) -> int:
                         f"deliberate re-close (the subject was re-opened) declares itself "
                         f"with `reclose=<one-token>` in its canonical trailer (#213)."
                     )
+
             # AND THE ROW MUST DECLARE THE REVISION ITS RECEIPTS DESCRIBE (#187). The
             # invariant is `close_row_revision`, enforced by
             # `tests/test_close_row_revision.py` and — until this refusal existed — by
@@ -1401,6 +1403,68 @@ def cmd_append(args: argparse.Namespace) -> int:
                     "detail declares none. The token is read from the trailing run, so a "
                     "revision mentioned in prose does not satisfy it (#187)."
                 )
+        # AND THE ROW MUST DECLARE ITS REWORK DISPOSITION (#129). The close contract
+        # above STATES one — its own words, "its contract carrying the board state
+        # observed, `head=<sha>` and a rework disposition" — and until this refusal
+        # NOTHING at the write path produced or required it. Measured 2026-11-06 over
+        # this ledger: 53 close rows, 2 carrying any `rework=` token (`n=119`, `n=139`,
+        # both `none`), 0 declaring a work unit, and no `--rework` argument in
+        # `append`'s parser at all. The two closes that HAD produced entries could not
+        # say so — #126's and #127's — while `evidence/rework.md` held all four
+        # entries and `change_fail_rate` counted them: the LOG was complete and only
+        # the ledger DECLARATION was missing, so a reader asking "which change did
+        # this close produce?" got silence from a row that had the answer.
+        #
+        # `--rework` COMPOSES the token instead of demanding the caller spell it into
+        # `--detail`, because the trailer is POSITIONAL: a value carrying a space
+        # terminates the trailing run and then declares nothing, which is the #213
+        # shape one field over — and a flag that can only emit `#N` or `none` cannot
+        # produce that row in the first place.
+        #
+        # `unstated` IS REFUSED HERE and stays lawful in HISTORY only. #53 clause 2
+        # makes an unrecorded disposition UNKNOWN rather than a value, which is why
+        # the readers must still accept the token on rows already written — but the
+        # WRITER is the one actor who knows, so a new close that answers "unstated" is
+        # choosing not to look. Refusing it here cannot reach a historical row: this
+        # binds only the row about to be written, exactly as the two refusals above
+        # state, and EXEMPTIONS govern history's reading rather than the write path.
+        if args.event == "close":
+            if args.rework is not None:
+                _value = args.rework.strip()
+                if declared_rework(args.detail):
+                    sys.exit(
+                        "ledger append refused: --rework was given, but this detail "
+                        "already declares rework=... in its canonical trailer. One "
+                        "field, one value — a row carrying two has no canonical "
+                        "reading, which is the law `repair` enforces by refusing to "
+                        "append a key the run already declares (#129)."
+                    )
+                if not (_value == "none"
+                        or (_value.startswith("#") and _value[1:].isdigit())):
+                    sys.exit(
+                        f"ledger append refused: --rework {args.rework!r} is not a "
+                        f"disposition. The vocabulary is `#N` — the rework entry this "
+                        f"close produced, N its Subject — or `none`, the close "
+                        f"declaring it produced none. `unstated` is lawful in HISTORY "
+                        f"only; a writer that knows must say which it is (#129)."
+                    )
+                args.detail = f"{args.detail.rstrip()} rework={_value}"
+            if not declared_rework(args.detail):
+                sys.exit(
+                    "ledger append refused: a close row must declare its rework "
+                    "disposition in its canonical trailer — `--rework #N` for the "
+                    "entry this close produced, or `--rework none` when it produced "
+                    "none. The token is read from the trailing run, so a disposition "
+                    "described in prose does not satisfy it (#129)."
+                )
+        elif args.rework is not None:
+            sys.exit(
+                "ledger append refused: --rework declares a CLOSE row's disposition, "
+                f"and this row is a `{args.event}`. A non-close row has no completion "
+                "to attribute, so the token would name a change nothing produced "
+                "(#129)."
+            )
+
         detail = args.detail
         if args.event == "close":
             # ONE form, and it is the bare NEIGHBOUR import -- the same form the three
@@ -2388,7 +2452,7 @@ class _LedgerParser(argparse.ArgumentParser):
         "    docs/ledger-refs-kinds.json  declare a new ref kind (or event), for a\n"
         "                                 member factory's own object\n"
         "  Full append surface: --event --actor --subject --detail [--ref ...]\n"
-        "  [--subprocess]"
+        "  [--subprocess] [--rework #N|none]"
     )
 
     def error(self, message: str) -> None:
@@ -2409,6 +2473,13 @@ def main() -> int:
     )
     ap.add_argument("--subject", required=True)
     ap.add_argument("--detail", required=True)
+    ap.add_argument(
+        "--rework", required=False, default=None, metavar="VALUE",
+        help="a close row's rework disposition, COMPOSED into its canonical trailer: "
+             "`#N` (the entry this close produced, N its Subject) or `none` (it produced "
+             "none). A close carrying neither this flag nor a literal `rework=` token is "
+             "REFUSED at the write path (#129)",
+    )
     ap.add_argument("--subprocess", required=False, help="optional subprocess domain sub-ledger name")
     ap.add_argument(
         "--ref", action="append", default=[], metavar="KIND:VALUE",
