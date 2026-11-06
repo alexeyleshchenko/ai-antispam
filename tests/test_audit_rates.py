@@ -756,6 +756,19 @@ def outcome_population_problems(payload: dict) -> list[str]:
                 f"{delivery.get('cost_per_successful_task_usd')} does not follow from "
                 f"{delivery.get('total_cost_usd')} ÷ {successful} (expected {expected_cost})"
             )
+    else:
+        # A ZERO DENOMINATOR IS UNDEFINED, NOT ZERO (#620). `0.0` here renders as
+        # `$0.0000` — "a successful task costs nothing" — the most favourable value for the
+        # least measurable state. This arm is the one that was missing BY CONSTRUCTION: the
+        # re-derivation above ran only when `successful > 0`, so the favourable default was
+        # never tested. `None` is the honest answer and is accepted.
+        published_cost = delivery.get("cost_per_successful_task_usd")
+        if published_cost is not None:
+            problems.append(
+                f"the published cost per successful task is {published_cost!r} with "
+                f"{successful} accepted closed subjects — an undefined ratio published as a "
+                f"number, and {published_cost} is the most favourable value it can take"
+            )
     return problems
 
 def test_the_outcome_reader_reads_a_field_and_validates_it():
@@ -765,6 +778,33 @@ def test_the_outcome_reader_reads_a_field_and_validates_it():
 def test_the_outcome_populations_reconcile():
     problems = outcome_population_problems(load_audit())
     assert not problems, "; ".join(problems)
+
+def test_an_undefined_cost_ratio_is_never_published_as_zero():
+    """A zero denominator is UNDEFINED, and `$0.0000` is the flattering answer (#620).
+
+    The re-derivation arm in `outcome_population_problems` ran only when the denominator
+    was non-zero, so the favourable default was untested BY CONSTRUCTION. This arm supplies
+    the zero-denominator payload a healthy live ledger may never have, and proves the gate
+    refuses `0.0` there while accepting the honest `None`. The formatter is the second half:
+    a published `None` must never reach a reader as a dollar figure.
+    """
+    payload = load_audit()
+    doctored = json.loads(json.dumps(payload))
+    doctored["delivery"]["successful_closed_tasks"] = 0
+
+    doctored["delivery"]["cost_per_successful_task_usd"] = 0.0
+    problems = outcome_population_problems(doctored)
+    assert any("undefined ratio" in p for p in problems), problems
+
+    # The three-state form is ACCEPTED: `None` is a measurement, not a defect.
+    doctored["delivery"]["cost_per_successful_task_usd"] = None
+    problems = outcome_population_problems(doctored)
+    assert not any("undefined ratio" in p for p in problems), problems
+
+    # And the renderer keeps the three states distinct: undefined, a real zero, a real cost.
+    assert audit_reader.format_cost_usd(None) == "n/a"
+    assert audit_reader.format_cost_usd(0.0) == "$0.0000"
+    assert audit_reader.format_cost_usd(12.3456) == "$12.3456"
 
 def test_a_doctored_outcome_bucket_is_rejected():
     """The invariant must reject bad input, not merely accept good input."""
@@ -1019,40 +1059,38 @@ def test_the_exemption_surface_admits_only_its_declared_ground():
 
     # An exemption matching NO doubled row is a PROBLEM, never a silent pass; and an
     # exempted row is EXCUSED rather than reported as a defect.
+    # THE POPULATION IS DERIVED, NEVER NAMED (#619). This arm used to name `n=3399` — a row
+    # from the KIT's own ledger — inside a file every member runs byte-paired, so a member
+    # whose ledger holds no such row red PERMANENTLY on a fact it has no way to change. The
+    # population under test is "close rows declaring `rework` more than once", and EMPTY is a
+    # lawful state for a young ledger, not a stale one. So the row comes from the live read
+    # when one exists; when none does, the arm SAYS SO and proves the same mechanism on a
+    # synthetic row rather than passing silently.
     real = read_rework_declarations()
     payload = load_audit()
-    stale = rework_declaration_problems(payload, {**real, "multi": []}, {3399: base})
-    assert any("matches NO close row" in p for p in stale), stale
-
-    # ADAPTED, and declared in registry/kit-exemptions.json (#126, measured 2026-11-05).
-    # The kit's live arms name `n=3399` / `#495`, which is the KIT's own ledger row: the
-    # kit's ledger holds exactly ONE close row declaring `rework` twice and that is it.
-    # A member whose ledger carries no doubled row cannot satisfy the arm, so the kit's
-    # unadapted form reds such a tree permanently with no exemption surface -- the #45 /
-    # #156 class. The arm now derives its subject from the LIVE population and, when the
-    # population is empty, STATES the skip instead of passing silently; the synthetic
-    # arms above (and the stale arm just above this block) keep the surface's bite.
-    live_multi = real.get("multi") or []
-    if not live_multi:
+    if real["multi"]:
+        probe_n = real["multi"][0]
+        population = real
         print(
-            "  stated skip: this ledger holds no close row declaring `rework` twice, so "
-            "the live-exemption arms have no row to exempt; the synthetic and stale arms "
-            "above still prove the surface bites"
+            f"  doubled-rework row under test: n={probe_n} (live; "
+            f"{real['rows_declaring']} close row(s) declare a disposition)"
         )
-        return
-    live_n = live_multi[0]
-    live_subject = ""
-    for line in LEDGER.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        ev = json.loads(line)
-        if ev.get("n") == live_n:
-            live_subject = str(ev.get("subject") or "")
-            break
-    live_entry = {**base, "n": live_n, "subject": live_subject}
-    live = rework_declaration_problems(payload, real, {live_n: live_entry})
+    else:
+        probe_n = -1
+        population = {**real, "multi": [probe_n]}
+        print(
+            f"  SKIP: no close row in this ledger declares `rework` more than once "
+            f"({real['rows_declaring']} close row(s) declare a disposition, 0 doubled) — "
+            f"the exemption mechanism is proved on a SYNTHETIC row n={probe_n} instead of "
+            f"passing silently"
+        )
+    probe = {**base, "n": probe_n}
+
+    stale = rework_declaration_problems(payload, {**population, "multi": []}, {probe_n: probe})
+    assert any("matches NO close row" in p for p in stale), stale
+    live = rework_declaration_problems(payload, population, {probe_n: probe})
     assert not live, live
-    assert rework_excused(real, {live_n: live_entry}), "the live entry printed nothing"
+    assert rework_excused(population, {probe_n: probe}), "the live entry printed nothing"
 
 def test_a_doctored_rework_declaration_figure_is_rejected():
     """The reconciliation must reject bad input, not merely accept good input."""

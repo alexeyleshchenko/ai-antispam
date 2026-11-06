@@ -60,7 +60,7 @@
     "TEMPLATE/tests/ledger_boundary.py": "bc037ee4c8f51550c751f4b21692b33e436e3d3b7fadb2b73db4997e91d72047",
     "TEMPLATE/tests/rework_table.py": "50db06e0ed782b400564de72523a3243b4660ca4583d3a00f683b1bae4b9c193",
     "TEMPLATE/tests/test_audit_inflight_guard.py": "d259a907e244071d14e21b6706a716d8d72141c42a14fd077a6fb07b694e84c1",
-    "TEMPLATE/tests/test_audit_rates.py": "ef98d2dd35d55ae740bfdbfa0e3825d2d474bc2d1e7684d550d159be55b8341c",
+    "TEMPLATE/tests/test_audit_rates.py": "b90ef47e753d051a895bdf6465dfa55bcc3912aa89f1f9aba023124ee3cb80d2",
     "TEMPLATE/tests/test_audit_tree_condition.py": "613f86244a19ab95ffb9d362bde22de710343156901e5cb977bcff4e5f8bdc62",
     "TEMPLATE/tests/test_binding_mechanism_exists.py": "0f400900e38c840225b091203cadb93c2064ef87840869d55baa8da81b159d72",
     "TEMPLATE/tests/test_board_intake_recorded.py": "4a6bd23e221aadd8d7f8d7a911e96b5aeed4b74f520918075e499fd4d010d05a",
