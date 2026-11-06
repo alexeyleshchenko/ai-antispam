@@ -546,6 +546,38 @@ def probe() -> list[str]:
         if not probs:
             failures.append("probe: malformed JSON in the marker's own file must be an ERROR")
 
+        # THE HOOK'S SUBJECT READER, driven end-to-end. A guard is only a guard on the
+        # line it actually READS, and this house's subjects are number-first: the hook
+        # skipped every `#` line as a comment, so it judged the BODY's first line and
+        # called it the subject. Measured 2026-11-06 — a subject `#132 ledger:
+        # supersedes the row at n=999` passed with exit 0 while the same subject without
+        # the prefix was refused. Four arms, including the control that the hook still
+        # bites at all.
+        hook = REPO / HOOK_PATH
+        for message, should_refuse, why in (
+            ("#132 ledger: supersedes the row at n=999\n\nbody\n", True,
+             "a number-first subject citing a row"),
+            ("ledger: supersedes the row at n=999\n\nbody\n", True,
+             "a plain subject citing a row (the control: the hook still bites)"),
+            ("#132 ledger: the close row, written after the board read CLOSED\n\nbody\n",
+             False, "a number-first subject with no citation"),
+            ("# Please enter the commit message for your changes.\n\n#132 ledger: n=1\n",
+             True, "a git template comment above a citing number-first subject"),
+        ):
+            msg = Path(td) / "msg.txt"
+            msg.write_text(message, encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, str(hook), str(msg)],
+                capture_output=True, text=True,
+            )
+            refused = proc.returncode != 0
+            if refused != should_refuse:
+                failures.append(
+                    f"probe: the hook must {'REFUSE' if should_refuse else 'PASS'} "
+                    f"{why} (got rc={proc.returncode}: "
+                    f"{(proc.stdout + proc.stderr).strip().splitlines()[:1]})"
+                )
+
     return failures
 
 def main() -> int:

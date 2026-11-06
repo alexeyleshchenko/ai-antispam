@@ -95,6 +95,22 @@ def repo_toplevel() -> Path | None:
     return Path(top) if top else None
 
 
+def is_comment_line(line: str) -> bool:
+    """True for a git template comment, FALSE for a number-first subject.
+
+    Git's own comment block is `# ` (hash + space). This house's subjects are
+    number-first (`#131 ledger: ...`), so skipping every `#` line made the refusal
+    blind to exactly the subjects it exists to check: measured 2026-11-06, a message
+    whose subject read `#132 ledger: supersedes the row at n=999` PASSED this hook
+    (exit 0) while the same subject without the `#NNN` prefix was refused (exit 1).
+    The guard was reading the body's first line and calling it the subject.
+    """
+    stripped = line.strip()
+    if not stripped.startswith("#"):
+        return False
+    return not (len(stripped) > 1 and stripped[1].isdigit())
+
+
 def subject_of(message_path: Path) -> str:
     """The first non-empty, non-comment line — the line git reads as the subject."""
     try:
@@ -103,7 +119,7 @@ def subject_of(message_path: Path) -> str:
         return ""
     for line in text.splitlines():
         stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
+        if not stripped or is_comment_line(stripped):
             continue
         return stripped
     return ""
@@ -165,7 +181,7 @@ def add_session_trailer(message_path: Path, sid: str) -> bool:
     # Git strips comment lines before committing, so the trailer must land after the
     # last CONTENT line rather than after the comment block `-v`/`-e` may append.
     lines = text.splitlines()
-    last = max((i for i, l in enumerate(lines) if l.strip() and not l.startswith("#")),
+    last = max((i for i, l in enumerate(lines) if l.strip() and not is_comment_line(l)),
                default=None)
     if last is None:
         return False
