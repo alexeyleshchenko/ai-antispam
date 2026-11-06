@@ -159,6 +159,12 @@ from field_predicate import (
 # matter (`n=405` clause 5, `n=599`).
 from reconstruction import interval_line, reconstructed_claims
 
+# THE REPO COMES FROM THIS FILE'S OWN LOCATION, NOT FROM THE CALLER'S CWD -- so a probe
+# run from a throwaway git repo still reads and WRITES the production ledger, and `cd`
+# isolates nothing (measured 2026-11-06: a lane testing the close contract from a /tmp
+# repo wrote four real rows under a throwaway subject into this tree's ledger; restored
+# by checkout, nothing committed). `OC_LEDGER_PATH` is the ONLY sandbox knob -- see
+# `LEDGER` below -- and it is named in the refusal text for that reason.
 REPO = Path(__file__).resolve().parent.parent
 
 # The fields that make a row what it is. `detail` is deliberately absent: it is the ONE
@@ -2452,7 +2458,13 @@ class _LedgerParser(argparse.ArgumentParser):
         "    docs/ledger-refs-kinds.json  declare a new ref kind (or event), for a\n"
         "                                 member factory's own object\n"
         "  Full append surface: --event --actor --subject --detail [--ref ...]\n"
-        "  [--subprocess] [--rework #N|none]"
+        "  [--subprocess] [--rework #N|none]\n"
+        "  To PROBE a refusal without writing the real record, redirect the store:\n"
+        "    OC_LEDGER_PATH=/tmp/probe-ledger.jsonl\n"
+        "  cwd is NOT a sandbox: the repo resolves from THIS script's own location\n"
+        "  (REPO = Path(__file__).resolve().parent.parent), so a probe run from a\n"
+        "  throwaway git repo still appends to the production ledger. A refusal that\n"
+        "  SUCCEEDS appends a real row, so the only safe probe is a redirected store."
     )
 
     def error(self, message: str) -> None:

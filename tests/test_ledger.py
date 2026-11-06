@@ -34,6 +34,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -689,6 +690,46 @@ def check_release_vocabulary() -> None:
             check("(210h) with no release the SAME claim reads OPEN (the control)",
                   r.returncode == 0 and "0 terminal by release, 1 open" in r.stdout,
                   r.stdout[-420:])
+
+def check_probe_sandbox_is_named() -> None:
+    """A probe of the write path must not contaminate the record it verifies.
+
+    THE TRAP, measured 2026-11-06: `REPO` in `tools/ledger.py` resolves from the
+    TOOL's own location, not the caller's cwd, so a lane testing the close contract
+    from a throwaway git repo wrote four real rows into this tree's ledger. `cd` is
+    not a sandbox, and a refusal that SUCCEEDS appends a real row -- so the only
+    safe probe is a redirected store. Two arms: the refusal NAMES the knob, and the
+    knob is the ONLY thing that redirects (a bare run from an unrelated cwd still
+    reads this repo's ledger).
+    """
+    tmp = Path(tempfile.mkdtemp(prefix="ledger-sandbox-"))
+    try:
+        ledger = tmp / "probe.jsonl"
+        write_ledger(ledger, ("intake", "#1"))
+
+        # (a) THE DOC ARM: an unknown flag is a refusal, and the refusal names the knob.
+        r = run(ledger, "append", "--event", "close", "--subject", "#1",
+                "--detail", "x", "--this-flag-does-not-exist")
+        msg = r.stdout + r.stderr
+        check("(a) an unknown flag is refused AND the refusal names OC_LEDGER_PATH",
+              r.returncode != 0 and "OC_LEDGER_PATH" in msg, msg.strip()[-120:])
+
+        # (b) THE CONTROL ARM: without the knob, cwd isolates nothing -- a bare run
+        # from an unrelated directory still reads THIS repo's ledger. `tail` is
+        # read-only, so the control cannot itself contaminate anything.
+        live = REPO / "evidence" / "ledger.jsonl"
+        last_n = json.loads(live.read_text(encoding="utf-8").strip().splitlines()[-1])["n"]
+        env = {k: v for k, v in os.environ.items() if k != "OC_LEDGER_PATH"}
+        bare = subprocess.run(
+            [sys.executable, str(TOOL), "tail"],
+            capture_output=True, text=True, env=env, cwd=str(tmp),
+        )
+        out = bare.stdout + bare.stderr
+        check("(b) cwd does NOT redirect: a bare run from a throwaway dir reads this repo's ledger",
+              bare.returncode == 0 and f"{last_n} row(s)" in out, out.strip()[-120:])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
 
 def main() -> int:
     print("registration — an unregistered gate never runs (P29)")
@@ -2155,6 +2196,7 @@ def main() -> int:
     check_worktree_fork_refused()
     check_reissue_partition()
     check_release_vocabulary()
+    check_probe_sandbox_is_named()
 
     print()
     if failures:
