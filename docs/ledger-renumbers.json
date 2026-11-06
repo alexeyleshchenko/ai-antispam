@@ -3,7 +3,43 @@
   "renumbers": {
     "#107": {
       "was": "#74",
-      "evidence": "docs/board-migration/number-map.json: \"74\": {\"new\": 107, \"state\": \"OPEN\", \"comments\": 5} -- the 2026-10-04 board migration. The work-unit is #107 on the board today; its legs carry the pre-migration number: intake n=147 (2026-10-01T00:47:48Z, actor triage) and claim n=148 (2026-10-01T01:21:01Z, actor hq). Board #74 TODAY is a different, already-CLOSED item (\"[defect] re-adding the bot leaves moderation_enabled=false\"), which is why the close must NOT be filed under #74 -- appending there would write a false close onto an unrelated item that no gate can catch."
+      "evidence": "docs/board-migration/number-map.json: \"74\": {\"new\": 107, \"state\": \"OPEN\", \"comments\": 5} -- the 2026-10-04 board migration. The work-unit is #107 on the board today; its legs carry the pre-migration number: intake n=147 (2026-10-01T00:47:48Z, actor triage) and claim n=148 (2026-10-01T01:21:01Z, actor hq). Board #74 TODAY is a different, already-CLOSED item (\"[defect] re-adding the bot leaves moderation_enabled=false\"), which is why the close must NOT be filed under #74 -- appending there would write a false close onto an unrelated item that no gate can catch. NO PARTITION: the string #107 was free when the unit took it -- measured 2026-11-06, it carries no row at or below the migrated block."
+    },
+    "#67": {
+      "was": "#34",
+      "prior_occupant": {
+        "board": 100,
+        "floor": 108,
+        "ceiling": 113
+      },
+      "evidence": "docs/board-migration/number-map.json: \"34\": {\"new\": 67} -- the 2026-10-04 board migration. The STRING #67 was ALREADY OCCUPIED by the item now at board #100 (\"[defect] close_row_revision gate resolves campaign-repo receipts against the bot repo\", CLOSED 2026-10-04T20:52:48Z), whose four rows sit under #67 -- n=108 intake, n=110 claim, n=112 close, n=113 run/settlement -- so n=108..113 is the prior occupant's range. The reissued unit's own number #34 carries ZERO rows, measured 2026-11-06, so any subject-keyed close under #67 could only have leaned on #100's legs."
+    },
+    "#73": {
+      "was": "#40",
+      "prior_occupant": {
+        "board": 106,
+        "floor": 135,
+        "ceiling": 138
+      },
+      "evidence": "docs/board-migration/number-map.json: \"40\": {\"new\": 73} -- the 2026-10-04 board migration. The STRING #73 was already held by the item now at board #106 (\"[defect] the OOM census instrument reads journalctl -k, whose coverage an ENOSPC silently truncated to 2h\", CLOSED 2026-10-04T20:54:20Z), whose rows under #73 are n=135 intake, n=136 claim, n=137 close, n=138 run/settlement -- so n=135..138 is the range. The reissued unit's own number #40 carries ZERO rows, measured 2026-11-06."
+    },
+    "#75": {
+      "was": "#42",
+      "prior_occupant": {
+        "board": 108,
+        "floor": 150,
+        "ceiling": 163
+      },
+      "evidence": "docs/board-migration/number-map.json: \"42\": {\"new\": 75} -- the 2026-10-04 board migration. The STRING #75 was already held by the item now at board #108 (\"[work] auto-whitelist members who joined before the bot was added\", CLOSED 2026-10-05T14:20:47Z), whose rows under #75 are n=150 intake, n=162 claim and n=163 run (a repair receipt) -- so n=150..163 is the range, and it is NOT contiguous: 151..161 belong to other subjects and are excluded by the subject filter anyway. That unit's own CLOSE lives under its canonical number #108 (n=177 release, n=178 reconstructed intake, n=179 claim, n=180 close, n=181 settlement), not under #75 -- which is why #75 shows no close of its own. The reissued unit's own number #42 carries one row: intake n=26, measured 2026-11-06."
+    },
+    "#77": {
+      "was": "#44",
+      "prior_occupant": {
+        "board": 110,
+        "floor": 168,
+        "ceiling": 171
+      },
+      "evidence": "docs/board-migration/number-map.json: \"44\": {\"new\": 77} -- the 2026-10-04 board migration. The STRING #77 was already held by the item now at board #110 (\"[defect] scorecard prints rates with no floor -- a 300% rework rate over one close reads as a verdict\", CLOSED 2026-10-04T21:03:04Z), whose rows under #77 are n=168 intake, n=169 claim, n=170 close, n=171 run/settlement -- so n=168..171 is the range. The reissued unit's own number #44 carries TWO rows, intake n=30 and claim n=31 (still open: no close and no release names it), which sit BELOW this block and carry the OLD subject, so they live in #44's bucket and reach a #77 close through the declared HOP, not through this partition -- the floor is therefore inert here and declared for the non-prefix case. A repair here owes a RELEASE of n=31 before its own claim, per ruling n=297."
     }
   }
 }

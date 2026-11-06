@@ -685,6 +685,70 @@ def index_by_subject(rows: list[dict]) -> dict[str, list[tuple[int, str]]]:
         by_subject.setdefault(row.get("subject"), []).append((i, row.get("event")))
     return by_subject
 
+def unit_view(
+    by_subject: dict[str, list[tuple[int, str]]], rows: list[dict],
+    subject: str, ceiling: int | None, anchor_n: int | None,
+    floor: int | None = None,
+) -> dict[str, list[tuple[int, str]]]:
+    """`by_subject` narrowed to the ONE REISSUE UNIT the anchor row belongs to.
+
+    A subject STRING can be reissued, and on this ledger that is the majority case
+    rather than a curiosity: the 2026-10-04 migration moved old item #67 to board #100
+    while a different item later took the string `#67`, so "the rows of #67" is two
+    unrelated units sharing one label. A predicate that reads them as one will accept a
+    close by LEANING ON the other unit's legs — a false close no gate can catch, which is
+    the defect #127 exists for.
+
+    The declared partition names the prior occupant's board and the RANGE of row numbers
+    that belongs to it, so a row's OWN `n` says which unit it is: inside the range is the
+    prior occupant, outside it is the reissued unit. Rows of the other unit are neither
+    legs nor blockers of this one.
+
+    THE FLOOR IS INERT HERE AND DECLARED ANYWAY, measured 2026-11-06. Every live prior
+    block is a PREFIX of its subject's rows, so `_low = 0` and `_low = 168` select the
+    same view on `#77` today: the reissued unit's own legs (n=30, n=31) carry the OLD
+    subject `#44` and live in `#44`'s bucket, reaching a `#77` close through the declared
+    HOP rather than through this view. The floor exists so the language stays correct for
+    the first unit that files under the NEW subject below the block — where a ceiling
+    alone would hand that row to the prior occupant and judge the unit against another
+    unit's legs.
+
+    APPLIED PER ROW, NEVER GLOBALLY. The anchor is the `n` of the row being judged — or,
+    at append time, the number the row about to be written will carry. A global filter
+    keyed on the subject alone would strip the prior occupant's own intake and claim and
+    then report them missing, i.e. invent a defect in a unit that is closed and correct.
+
+    A declared ceiling that resolves to NO rows on either side changes nothing, and the
+    caller prints the partition anyway: an inert partition that nobody sees is
+    exempt-by-silence one surface over (`n=571`).
+    """
+    if ceiling is None or anchor_n is None or not rows:
+        return by_subject
+    # The prior occupant's block, as a half-open-on-the-outside range. A missing floor
+    # means "the prior occupant's rows run from the start of the ledger", which is the
+    # common shape and keeps the declaration short.
+    _low = floor if floor is not None else 0
+
+    def belongs_to_prior(n: int) -> bool:
+        return _low <= n <= ceiling
+
+    keep_prior = belongs_to_prior(anchor_n)
+
+    def number_at(i: int) -> int | None:
+        if 0 <= i < len(rows):
+            n = rows[i].get("n")
+            return n if isinstance(n, int) else None
+        return None
+
+    narrowed = [
+        (i, event)
+        for i, event in by_subject.get(subject, [])
+        if number_at(i) is not None and belongs_to_prior(number_at(i)) == keep_prior
+    ]
+    view = dict(by_subject)
+    view[subject] = narrowed
+    return view
+
 def sequence_problems(
     by_subject: dict[str, list[tuple[int, str]]], subject: str, index: int,
     event: str = "close",
@@ -772,8 +836,11 @@ def sequence_problems(
 def resolved_sequence_problems(
     by_subject: dict[str, list[tuple[int, str]]], subject: str, index: int,
     event: str = "close",
-    renumbers: dict[str, tuple[str, str]] | None = None,
+    renumbers: dict | None = None,
     notices: list[str] | None = None,
+    rows: list[dict] | None = None,
+    anchor_n: int | None = None,
+    partitions: list[str] | None = None,
 ) -> list[tuple[str, str, str]]:
     """`sequence_problems`, with a DECLARED board renumber resolved first.
 
@@ -808,10 +875,36 @@ def resolved_sequence_problems(
     chat migration and the 2026-10-04 board migration), so an item can legitimately
     carry three numbers across its life. The walk follows up to eight hops with a
     visited set, and a cycle stops the walk rather than spinning.
+
+    THE PARTITION, added 2026-11-06 (#127, ruling n=296). A renumber into a FREE number
+    -- #107 <- #74, the shape this surface was built for -- is the easy half. The
+    majority case is a renumber into an OCCUPIED number: 29 of the 62 migrated items
+    carry pre-migration rows under their NEW number, belonging to a DIFFERENT unit, and
+    five of those were live board items. There, the subject's rows are two units, and
+    the predicate as written above accepts a close by LEANING ON the other unit's legs:
+    measured, all five false closes passed with NO problems. So a declared
+    `prior_occupant` names the RANGE of rows that belongs to the prior unit, and
+    `unit_view` narrows the subject to the unit the anchor row belongs to before anything
+    is judged. The partition is per-ROW: the prior occupant's own rows are judged against
+    the prior occupant's rows, so a closed unit is never accused of missing the legs it
+    supplies.
     """
     if not subject:
         return []
-    problems = sequence_problems(by_subject, subject, index, event)
+    entry = renumbers.get(subject) if renumbers else None
+    ceiling = getattr(entry, "prior_ceiling", None) if entry is not None else None
+    floor = getattr(entry, "prior_floor", None) if entry is not None else None
+    if ceiling is not None and partitions is not None:
+        _low = floor if floor is not None else 0
+        _span = f"n={_low}..{ceiling}" if floor is not None else f"n<={ceiling}"
+        line = (
+            f"reissue partition: {subject} rows {_span} belong to board "
+            f"#{entry.prior_board}, not to the unit filed as {entry.was} — the number was "
+            f"REISSUED, so those rows are neither legs nor blockers of this one")
+        if line not in partitions:
+            partitions.append(line)
+    view = unit_view(by_subject, rows or [], subject, ceiling, anchor_n, floor)
+    problems = sequence_problems(view, subject, index, event)
     if not problems or not renumbers:
         return problems
 
@@ -824,7 +917,7 @@ def resolved_sequence_problems(
         entry = renumbers.get(cursor)
         if not entry:
             break
-        prior, evidence = entry
+        prior, evidence = entry.was, entry.evidence
         if prior in seen:
             break
         seen.add(prior)
@@ -881,7 +974,7 @@ def canonical_subject(
     """
     if not subject or not renumbers:
         return subject, None
-    upward = {was: (new, evidence) for new, (was, evidence) in renumbers.items()}
+    upward = {e.was: (new, e.evidence) for new, e in renumbers.items()}
     cursor = subject
     evidence: str | None = None
     seen = {subject}
@@ -1195,10 +1288,19 @@ def cmd_append(args: argparse.Namespace) -> int:
                     "ledger append refused: the renumber declaration could not be "
                     f"read, so a lawful close cannot be told from an unlawful one: {exc}")
             renumber_notices: list[str] = []
+            partition_notices: list[str] = []
+            _next_n = (rows[-1]["n"] + 1) if rows else 1
             problems = resolved_sequence_problems(
                 index_by_subject(rows), args.subject, len(rows), args.event,
-                renumbers=renumbers, notices=renumber_notices)
+                renumbers=renumbers, notices=renumber_notices,
+                rows=rows, anchor_n=_next_n, partitions=partition_notices)
             for _notice in renumber_notices:
+                print(_notice)
+            # THE PARTITION IS PRINTED AT THE WRITE PATH TOO, not only in `verify`: the
+            # row this append is about to write is the one whose unit the partition
+            # decided, and a writer who cannot see which rows were set aside cannot tell
+            # a lawful close from one leaning on another unit's legs.
+            for _notice in partition_notices:
                 print(_notice)
             if problems:
                 sys.exit("ledger append refused: "
@@ -1247,9 +1349,21 @@ def cmd_append(args: argparse.Namespace) -> int:
                         "trailer-scoped reader stops at. Write `reclose=<one-token>` "
                         "with the explanation in the detail's prose (#213)."
                     )
-                prior_closes = [r for r in rows
-                                if r.get("event") == "close"
-                                and r.get("subject") == args.subject]
+                # A REISSUED NUMBER'S PRIOR OCCUPANT'S CLOSE IS NOT THIS UNIT'S CLOSE
+                # (#127). Without the partition this leg refuses a lawful close because
+                # a DIFFERENT unit once held the same string — and, worse, the refusal
+                # would be indistinguishable from the duplicate-write guard it is.
+                _entry = renumbers.get(args.subject) if renumbers else None
+                _ceiling = getattr(_entry, "prior_ceiling", None) if _entry else None
+                _floor = getattr(_entry, "prior_floor", None) if _entry else None
+                _low = _floor if _floor is not None else 0
+                prior_closes = [
+                    r for r in rows
+                    if r.get("event") == "close"
+                    and r.get("subject") == args.subject
+                    and (_ceiling is None
+                         or not (isinstance(r.get("n"), int)
+                                 and _low <= r["n"] <= _ceiling))]
                 if prior_closes:
                     last = prior_closes[-1]
                     sys.exit(
@@ -1933,6 +2047,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     # is a PROBLEM rather than a silent "no renumbers": the silent reading refuses lawful
     # closes and blames the items for it.
     renumber_notices: list[str] = []
+    partition_notices: list[str] = []
     try:
         _renumbers = load_renumbers(REPO)
     except (DeclarationUnavailable, DeclarationUnreadable) as exc:
@@ -1953,7 +2068,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
         seq_problems.extend(
             resolved_sequence_problems(
                 by_subject, row.get("subject"), i, event,
-                renumbers=_renumbers, notices=renumber_notices))
+                renumbers=_renumbers, notices=renumber_notices,
+                rows=rows, anchor_n=row.get("n"), partitions=partition_notices))
 
     # The dispatch leg is INDEPENDENT of the close sequence above (n=524: the malformed
     # check "may land with it or before it"), and its two halves have different
@@ -2018,6 +2134,18 @@ def cmd_verify(args: argparse.Namespace) -> int:
     for _notice in renumber_notices:
         print(_notice)
     print(f"renumber-resolved closes: {len(renumber_notices)}")
+    # THE REISSUE PARTITIONS, printed with BOTH halves of their population: how many the
+    # factory declares and how many this pass actually applied. A single count would let
+    # "declared and never consulted" read exactly like "none declared" — the same
+    # exempt-by-silence shape one surface over (n=571).
+    for _notice in partition_notices:
+        print(_notice)
+    _declared_partitions = sum(
+        1 for _e in (_renumbers or {}).values()
+        if getattr(_e, "prior_ceiling", None) is not None)
+    print(
+        f"reissue partitions: {_declared_partitions} declared, "
+        f"{len(partition_notices)} applied")
     print(f"refs examined: {refs_examined}")
     # The dispatch leg's population, printed BESIDE the verdict rather than implied by
     # it — a leg that examined nothing must not read as one that examined the ledger.

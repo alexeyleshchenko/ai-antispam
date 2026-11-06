@@ -413,6 +413,137 @@ def check_registered_in_the_audit() -> None:
     )
 
 
+def check_reissue_partition() -> None:
+    """#127 — a REISSUED number's prior occupant's legs are not the reissued unit's legs.
+
+    Measured 2026-11-06 on this ledger: 29 of the 62 migrated items carry pre-migration
+    rows under their NEW number that belong to a DIFFERENT unit, so "the rows of #N" is
+    not one unit's rows. The sequence predicate compares subjects as EXACT STRINGS and
+    applies no normalisation, deliberately — which is right, and which also means a close
+    for the reissued unit is satisfied by the prior occupant's intake and claim: a unit
+    with no legs of its own closing on another unit's work. All five live false closes
+    passed verify with NO problems.
+
+    THE ARM AND ITS CONTROL are the SAME append against the SAME ledger; the only thing
+    that differs is whether the partition is declared. If the refusal survived with the
+    declaration removed, the probe would be measuring the duplicate-close guard or the
+    fixture instead of the partition — so the control is not decoration, it is the leg
+    that says WHICH mechanism refused.
+    """
+    print("reissue partition \u2014 a reissued number's prior occupant is another unit")
+    DECL = {
+        "renumbers": {
+            "#77": {
+                "was": "#44",
+                "evidence": "probe: the board reissued 44 -> 77 on 2026-10-04",
+                "prior_occupant": {"board": 110, "floor": 1, "ceiling": 4},
+            }
+        }
+    }
+    BASE = dt.datetime(2026, 10, 1, tzinfo=dt.timezone.utc)
+
+    def pin_rows(root: Path, entries: list[tuple[int, str, str]]) -> None:
+        """Write rows with the EXACT numbers a partition names, then commit them.
+
+        The append path assigns `n` itself, so a probe that let the tool choose the
+        numbers could not build a fixture in which the partition's range means anything.
+        The commit is not ceremony: the append guard reads the repository state, and a
+        dirty tree would refuse for a reason that has nothing to do with the partition.
+        """
+        out = [
+            {
+                "n": n,
+                "ts": (BASE + dt.timedelta(minutes=n)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "event": event,
+                "actor": "triage",
+                "subject": "#77",
+                "detail": detail,
+            }
+            for n, event, detail in entries
+        ]
+        (root / "evidence" / "ledger.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in out), encoding="utf-8")
+        _git(root, "add", "-A")
+        _git(root, "commit", "-qm", "probe rows")
+
+    def declare(root: Path, payload: dict) -> Path:
+        (root / "docs").mkdir(exist_ok=True)
+        path = root / "docs" / "ledger-renumbers.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # --- A. THE PARTITION DOES NOT ACCUSE A CLOSED UNIT OF MISSING ITS OWN LEGS.
+        # The prior occupant's whole lifecycle sits under #77; judging its close must read
+        # ITS rows, not "the reissued unit's rows". Without this leg the partition would
+        # fix one false close by inventing a problem in a unit that is closed and correct.
+        a = _fixture_repo(Path(tmp) / "a")
+        declare(a, DECL)
+        pin_rows(a, [
+            (1, "intake", "prior occupant: filed"),
+            (2, "claim", "prior occupant: taken"),
+            (3, "close", "prior occupant closed. board=closed head=" + "a" * 40),
+            (4, "run", "prior occupant settlement receipt"),
+        ])
+        v = run_in_tree(a, _ledger(a), "verify")
+        out = v.stdout + v.stderr
+        check("(a) the prior occupant's own closed unit still verifies, and the partition "
+              "is PRINTED on the run",
+              v.returncode == 0 and "reissue partition: #77 rows n=1..4" in out,
+              out.strip()[-170:])
+
+        # --- B. THE ARM. The prior occupant's legs exist; the REISSUED unit has none.
+        # The prior occupant's CLOSE deliberately lives under its canonical number, which
+        # is the shape this ledger really carries for #75/#108 — so the duplicate-close
+        # guard cannot be what refuses, and the arm measures the SEQUENCE leg alone.
+        b = _fixture_repo(Path(tmp) / "b")
+        decl_path = declare(b, DECL)
+        pin_rows(b, [
+            (1, "intake", "prior occupant: filed"),
+            (2, "claim", "prior occupant: taken"),
+            (4, "run", "prior occupant settlement receipt"),
+        ])
+        arm_detail = "reissued unit closed. board=closed head=" + "b" * 40
+        r = run_in_tree(b, _ledger(b), "append", "--event", "close", "--actor", "triage",
+                        "--subject", "#77", "--detail", arm_detail)
+        msg = (r.stdout + r.stderr).strip()
+        check("(b) a close for the REISSUED unit is REFUSED — the prior occupant's legs "
+              "are not its legs",
+              r.returncode != 0 and "no intake before it" in msg, msg[-170:])
+
+        # --- C. THE CONTROL. Same ledger, same append, declaration REMOVED.
+        decl_path.unlink()
+        r = run_in_tree(b, _ledger(b), "append", "--event", "close", "--actor", "triage",
+                        "--subject", "#77", "--detail", arm_detail)
+        msg = (r.stdout + r.stderr).strip()
+        check("(c) CONTROL: with the partition UNDECLARED the SAME close is ACCEPTED, "
+              "piggybacking on the prior occupant's legs",
+              r.returncode == 0, msg[-170:])
+
+        # --- D. THE DECLARATION BITES AT LOAD. A partition that cannot resolve must be a
+        # typed failure, never a silent read of "the number was free": the two readings
+        # differ by another unit's close.
+        d = Path(tmp) / "decl"
+        for occupant, why in (
+            ({"board": 110, "floor": 172, "ceiling": 171}, "a floor above its ceiling"),
+            ({"board": 110, "floor": 0, "ceiling": 171}, "a floor of zero"),
+            ({"board": 110, "ceiling": "171"}, "a ceiling that is not an integer"),
+        ):
+            (d / "docs").mkdir(parents=True, exist_ok=True)
+            (d / "docs" / "ledger-renumbers.json").write_text(json.dumps(
+                {"renumbers": {"#77": {"was": "#44", "evidence": "probe",
+                                       "prior_occupant": occupant}}}), encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, "-c",
+                 "import sys, pathlib; sys.path.insert(0, sys.argv[2]);"
+                 "import ledger_declaration as ld;"
+                 "ld.load_renumbers(pathlib.Path(sys.argv[1]))",
+                 str(d), str(LOCAL_TOOLS)],
+                capture_output=True, text=True)
+            check(f"(d) a partition declaring {why} is REFUSED at load",
+                  proc.returncode != 0 and "prior_occupant" in proc.stderr,
+                  (proc.stderr or proc.stdout).strip()[-150:])
+
 def check_release_vocabulary() -> None:
     """#210's release arms, driven where the vocabulary exists.
 
@@ -1974,6 +2105,7 @@ def main() -> int:
     check_stale_ref_refused()
     check_fail_open_needs_no_remote()
     check_worktree_fork_refused()
+    check_reissue_partition()
     check_release_vocabulary()
 
     print()

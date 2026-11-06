@@ -53,6 +53,7 @@ import datetime as dt
 import json
 import os
 from pathlib import Path
+from typing import NamedTuple
 
 DECLARATION_REL = "docs/ledger-invariants.json"
 DECLARATION_EXAMPLE_REL = "docs/ledger-invariants.example.json"
@@ -183,8 +184,49 @@ EXEMPTIONS_EXAMPLE_REL = "docs/ledger-exemptions.example.json"
 
 RENUMBERS_REL = "docs/ledger-renumbers.json"
 
-def load_renumbers(repo: Path) -> dict[str, tuple[str, str]]:
-    """The DECLARED subject renumbers: new subject -> (the subject it was, evidence).
+class Renumber(NamedTuple):
+    """One declared subject renumber, and the PARTITION that makes it lawful.
+
+    `was` and `evidence` are the renumber proper: the number a unit was filed under, and
+    the receipt that establishes the step. `prior_board`, `prior_floor` and
+    `prior_ceiling` are the REISSUE PARTITION, declared only when the new subject string
+    was already OCCUPIED by a DIFFERENT unit — the board it became, and the RANGE of row
+    numbers under this subject that belongs to it. All three are None for a renumber into
+    a FREE number (#107 <- #74), which is the shape the surface was first built for and
+    still the common one.
+
+    WHY THE PARTITION CARRIES AN OPTIONAL FLOOR, stated with its measured status. A
+    ceiling alone assumes the prior occupant's rows are a PREFIX of the subject's rows.
+    That holds for all four live cases — their prior blocks are n=108..113, n=135..138,
+    n=150..163 and n=168..171, and each reissued unit's own legs were filed under its OLD
+    subject, so they sit in the OLD subject's bucket and reach a close under the new one
+    through the declared HOP, never through the partition. The floor is therefore INERT
+    on this ledger today, and that is written here rather than left for a reader to
+    discover. It is declared anyway because a ceiling-only language is silently WRONG for
+    the first reissued unit that files a row under the NEW subject below the prior
+    occupant's block: that row would be classified as the prior occupant's, and the unit
+    would be judged against another unit's legs. A partition that can only express
+    prefixes is a trap with a delay fuse.
+
+    WHY THE PARTITION IS A DECLARATION AND NOT A DERIVATION, measured 2026-11-06 on this
+    ledger: 29 of the 62 migrated items carry pre-migration rows under their NEW number,
+    belonging to a different unit — so "the subject's rows" is not one unit's rows, and a
+    predicate that assumes it is will read another unit's close as this one's. The
+    boundary cannot be inferred: it is a fact about the BOARD history (which item held the
+    number when), and no arithmetic over row numbers recovers it. The prior unit's board
+    is named beside it so a reader can check the one thing that makes the partition safe —
+    that the unit being excluded is CLOSED, i.e. that no live work is being partitioned
+    out of sight.
+    """
+    was: str
+    evidence: str
+    prior_board: int | None = None
+    prior_floor: int | None = None
+    prior_ceiling: int | None = None
+
+
+def load_renumbers(repo: Path) -> dict[str, Renumber]:
+    """The DECLARED subject renumbers: new subject -> Renumber(was, evidence, partition).
 
     WHY THIS EXISTS, measured 2026-11-05. The sequence predicate compares subjects as
     EXACT STRINGS and applies no normalisation -- deliberately, because guessing at
@@ -229,7 +271,7 @@ def load_renumbers(repo: Path) -> dict[str, tuple[str, str]]:
         raise DeclarationUnreadable([
             f"{RENUMBERS_REL} carries no `renumbers` object -- a map of the subject a row "
             f"carries NOW to the subject it carried when it was filed"])
-    out: dict[str, tuple[str, str]] = {}
+    out: dict[str, Renumber] = {}
     for subject, entry in rows.items():
         if not isinstance(entry, dict):
             raise DeclarationUnreadable([
@@ -239,7 +281,52 @@ def load_renumbers(repo: Path) -> dict[str, tuple[str, str]]:
             raise DeclarationUnreadable([
                 f"{RENUMBERS_REL}: renumbers[{subject!r}] is missing {', '.join(missing)} "
                 f"-- a renumber names the subject it was AND the receipt that establishes it"])
-        out[str(subject)] = (str(entry["was"]), str(entry["evidence"]))
+        # THE OPTIONAL PARTITION. Absent is the shipped state and means "the new number
+        # was free"; PRESENT but malformed is a typed failure, because a partition that
+        # silently failed to parse would read as "free number" and hand the reader the
+        # other unit's close — the exact false close the surface exists to prevent.
+        prior_board: int | None = None
+        prior_floor: int | None = None
+        prior_ceiling: int | None = None
+        occupant = entry.get("prior_occupant")
+        if occupant is not None:
+            if not isinstance(occupant, dict):
+                raise DeclarationUnreadable([
+                    f"{RENUMBERS_REL}: renumbers[{subject!r}].prior_occupant is not an "
+                    f"object -- it names the board the number belonged to and the range "
+                    f"of row numbers that belongs to it"])
+            # `floor` is OPTIONAL and defaults to the start of the ledger: a prior
+            # occupant whose rows are a PREFIX of the subject's needs no floor, and
+            # demanding one would make the common case noisier for no gain. What it is
+            # NOT is inferrable -- #77's prior occupant sits at n=168..171 while the
+            # reissued unit's own legs are n=30..31, so a ceiling alone puts those legs
+            # on the wrong side of the boundary and reports the unit as having no intake.
+            for key in ("board", "ceiling"):
+                value = occupant.get(key)
+                if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                    raise DeclarationUnreadable([
+                        f"{RENUMBERS_REL}: renumbers[{subject!r}].prior_occupant.{key} must "
+                        f"be a positive integer, got {value!r} -- a partition that does not "
+                        f"resolve is indistinguishable from no partition, and the two "
+                        f"readings differ by another unit's close"])
+            floor_value = occupant.get("floor")
+            if floor_value is not None:
+                if (not isinstance(floor_value, int) or isinstance(floor_value, bool)
+                        or floor_value <= 0):
+                    raise DeclarationUnreadable([
+                        f"{RENUMBERS_REL}: renumbers[{subject!r}].prior_occupant.floor must "
+                        f"be a positive integer, got {floor_value!r}"])
+                if floor_value > int(occupant["ceiling"]):
+                    raise DeclarationUnreadable([
+                        f"{RENUMBERS_REL}: renumbers[{subject!r}].prior_occupant.floor "
+                        f"({floor_value}) is ABOVE its ceiling ({occupant['ceiling']}) -- an "
+                        f"empty range excludes nothing while reading as a declared partition"])
+                prior_floor = int(floor_value)
+            prior_board = int(occupant["board"])
+            prior_ceiling = int(occupant["ceiling"])
+        out[str(subject)] = Renumber(
+            str(entry["was"]), str(entry["evidence"]),
+            prior_board, prior_floor, prior_ceiling)
     return out
 
 
