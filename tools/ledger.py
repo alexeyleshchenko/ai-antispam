@@ -840,6 +840,56 @@ def sequence_problems(
     # its close is still caught, because `claims` is read positionally.
     return problems
 
+def declared_hops(renumbers: dict | None, subject: str) -> list[tuple[str, str]]:
+    """The declared renumber chain BELOW `subject`, nearest hop first, each with evidence.
+
+    ONE HOME FOR THE WALK, extracted when #133 measured the dispatch leg renumber-blind.
+    The close leg had followed this chain since #107 and the dispatch leg had never
+    learned to, because the walk lived INSIDE `resolved_sequence_problems`. Two legs
+    resolving the same declaration through two copies of the same loop is the drift
+    hazard itself: nothing compares them, so the copy nobody is looking at is the one
+    that goes stale, and it fails in the direction that REFUSES honest work (a dispatch
+    under a migrated number reads as a promise about a filing that never happened).
+
+    Bounded to eight hops with a visited set: this board has been renumbered twice
+    (2026-09-11 chat migration, 2026-10-04 board migration), so an item can legitimately
+    carry three numbers across its life, and a cycle stops the walk rather than spinning.
+    """
+    if not subject or not renumbers:
+        return []
+    hops: list[tuple[str, str]] = []
+    seen = {subject}
+    cursor = subject
+    while len(hops) < 8:
+        entry = renumbers.get(cursor)
+        if not entry:
+            break
+        prior, evidence = entry.was, entry.evidence
+        if prior in seen:
+            break
+        seen.add(prior)
+        hops.append((prior, evidence))
+        cursor = prior
+    return hops
+
+def partition_line(subject: str, entry) -> str | None:
+    """The printed line naming a reissued number's prior-occupant block, or None.
+
+    Shared with the dispatch leg for the reason `declared_hops` is: a sentence printed
+    from two copies drifts, and the reader who sees the two forms cannot tell which one
+    the gate actually applied.
+    """
+    ceiling = getattr(entry, "prior_ceiling", None) if entry is not None else None
+    if ceiling is None:
+        return None
+    floor = getattr(entry, "prior_floor", None)
+    _low = floor if floor is not None else 0
+    _span = f"n={_low}..{ceiling}" if floor is not None else f"n<={ceiling}"
+    return (
+        f"reissue partition: {subject} rows {_span} belong to board "
+        f"#{entry.prior_board}, not to the unit filed as {entry.was} — the number was "
+        f"REISSUED, so those rows are neither legs nor blockers of this one")
+
 def resolved_sequence_problems(
     by_subject: dict[str, list[tuple[int, str]]], subject: str, index: int,
     event: str = "close",
@@ -902,12 +952,7 @@ def resolved_sequence_problems(
     ceiling = getattr(entry, "prior_ceiling", None) if entry is not None else None
     floor = getattr(entry, "prior_floor", None) if entry is not None else None
     if ceiling is not None and partitions is not None:
-        _low = floor if floor is not None else 0
-        _span = f"n={_low}..{ceiling}" if floor is not None else f"n<={ceiling}"
-        line = (
-            f"reissue partition: {subject} rows {_span} belong to board "
-            f"#{entry.prior_board}, not to the unit filed as {entry.was} — the number was "
-            f"REISSUED, so those rows are neither legs nor blockers of this one")
+        line = partition_line(subject, entry)
         if line not in partitions:
             partitions.append(line)
     view = unit_view(by_subject, rows or [], subject, ceiling, anchor_n, floor)
@@ -917,19 +962,7 @@ def resolved_sequence_problems(
 
     # Walk the declared chain. `hops` keeps each edge's own evidence, because a notice
     # that names only the destination hides which receipt established the step.
-    hops: list[tuple[str, str]] = []
-    seen = {subject}
-    cursor = subject
-    while len(hops) < 8:
-        entry = renumbers.get(cursor)
-        if not entry:
-            break
-        prior, evidence = entry.was, entry.evidence
-        if prior in seen:
-            break
-        seen.add(prior)
-        hops.append((prior, evidence))
-        cursor = prior
+    hops = declared_hops(renumbers, subject)
     if not hops:
         return problems
 
@@ -1040,8 +1073,28 @@ def is_work_unit(subject: str) -> bool:
 
 def dispatch_problems(
     rows: list[dict], by_subject: dict[str, list[tuple[int, str]]],
+    renumbers: dict | None = None,
+    notices: list[str] | None = None,
+    partitions: list[str] | None = None,
 ) -> tuple[list[tuple[str, str, str]], list[tuple[str, int]], list[tuple[str, int, str]]]:
     """(problems, malformed, excused) for the dispatch leg — PURE over the row list.
+
+    RENUMBER-BLIND UNTIL #133, measured 2026-11-06 by Triage with a positive control on
+    one sandbox ledger: a dispatch under the NEW number was refused while the identical
+    dispatch under the OLD number was clean, because `by_subject` is keyed on the literal
+    subject string and this leg took no map. The refusal was therefore not a finding
+    about the ledger — it was a finding about the instrument: ten routing dispatches were
+    written, nine read as "dispatch of #87 has no intake before it", and the lane
+    correctly reverted rather than ship a promise it could not evidence. Routing HAD
+    happened; the ledger could not say so.
+
+    THE RESOLUTION MIRRORS ITS SIBLING, deliberately and to the letter: the same
+    `declared_hops` walk, the same `unit_view` narrowing, the same printed partition.
+    A dispatch leg that resolved renumbers BETTER than the close leg (or differently)
+    would be a second resolver, and two resolvers disagree in exactly the case nobody
+    has a probe for. It is also INERT by default: no declaration naming the subject
+    leaves every verdict byte-identical to before, which is what makes the change
+    safe to land on a ledger the factory has already pushed.
 
     Returned as three populations rather than one verdict, because they are three
     different facts: a post-boundary ordering defect (a problem), a row whose subject
@@ -1057,10 +1110,40 @@ def dispatch_problems(
             continue
         subject = str(row.get("subject") or "").strip()
         if is_work_unit(subject):
+            entry = renumbers.get(subject) if renumbers else None
+            view = by_subject
+            if entry is not None:
+                ceiling = getattr(entry, "prior_ceiling", None)
+                floor = getattr(entry, "prior_floor", None)
+                # The partition narrows the subject to THIS unit before anything is read,
+                # so a dispatch cannot be satisfied by the prior occupant's intake — the
+                # false PASS that #127 exists to refuse, one leg over.
+                view = unit_view(by_subject, rows, subject, ceiling,
+                                 row.get("n"), floor)
+                if ceiling is not None and partitions is not None:
+                    line = partition_line(subject, entry)
+                    if line not in partitions:
+                        partitions.append(line)
             precedes = any(
-                ev == "intake" and j < i for j, ev in by_subject.get(subject, [])
+                ev == "intake" and j < i for j, ev in view.get(subject, [])
             )
             if precedes:
+                continue
+            # The chain, walked DOWN: the intake a migrated dispatch promises is filed
+            # under the number the item carried when it was TAKEN IN, never under the
+            # number the board gives it today.
+            resolved = next(
+                ((prior, evidence) for prior, evidence
+                 in declared_hops(renumbers, subject)
+                 if any(ev == "intake" and j < i
+                        for j, ev in by_subject.get(prior, []))),
+                None,
+            )
+            if resolved is not None:
+                prior, evidence = resolved
+                if notices is not None:
+                    notices.append(
+                        f"renumber resolved: dispatch {subject} -> {prior} ({evidence})")
                 continue
             ts = str(row.get("ts") or "")
             if ts and ts < DISPATCH_LEG_BOUNDARY:
@@ -2117,6 +2200,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     # is a PROBLEM rather than a silent "no renumbers": the silent reading refuses lawful
     # closes and blames the items for it.
     renumber_notices: list[str] = []
+    dispatch_renumber_notices: list[str] = []
     partition_notices: list[str] = []
     try:
         _renumbers = load_renumbers(REPO)
@@ -2146,7 +2230,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
     # dispositions: the ordering half is EXEMPTABLE like every other leg, the malformed
     # half is REPORTED and never gated.
     dispatch_defects, dispatch_malformed, dispatch_excused = dispatch_problems(
-        rows, by_subject
+        rows, by_subject, renumbers=_renumbers,
+        notices=dispatch_renumber_notices, partitions=partition_notices
     )
     seq_problems.extend(dispatch_defects)
     dispatch_examined = sum(1 for r in rows if r.get("event") == "dispatch")
@@ -2204,6 +2289,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
     for _notice in renumber_notices:
         print(_notice)
     print(f"renumber-resolved closes: {len(renumber_notices)}")
+    # The dispatch leg's resolutions are counted SEPARATELY (#133): folding them into the
+    # close count would print one number over two populations, and a reader cannot tell
+    # "the map was consulted for a dispatch" from "for a close".
+    for _notice in dispatch_renumber_notices:
+        print(_notice)
+    print(f"renumber-resolved dispatches: {len(dispatch_renumber_notices)}")
     # THE REISSUE PARTITIONS, printed with BOTH halves of their population: how many the
     # factory declares and how many this pass actually applied. A single count would let
     # "declared and never consulted" read exactly like "none declared" — the same

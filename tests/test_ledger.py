@@ -593,6 +593,132 @@ def check_reissue_partition() -> None:
               and int(got[1]) == len(declared),
               (ex_proc.stderr or ex_proc.stdout).strip()[-160:])
 
+def check_dispatch_renumber() -> None:
+    """#133 — the dispatch leg must resolve a DECLARED renumber, or it refuses honest work.
+
+    Measured 2026-11-06 by Triage on ONE sandbox ledger, with the positive control the
+    defect needed: identical detail and actor, dispatch `#87` refused
+    (`no intake before it`) while dispatch `#54` was clean — because that unit's intake
+    is filed under the number it carried when it was TAKEN IN, not the number the board
+    gives it today. Ten routing dispatches were written, nine read as promises about
+    filings that never happened, and the lane reverted rather than ship them. Routing HAD
+    happened; the ledger could not say so.
+
+    FOUR ARMS AND TWO OF THEM NEGATIVE, which is the close condition's own requirement:
+    a declared hop must be FOLLOWED; with the declaration removed the same row must still
+    be REFUSED (else the probe measures the fixture, not the map); a genuinely unfiled
+    unit must still be REFUSED (a wildcard that silences the leg is the failure mode the
+    guard exists to refuse); and a bare number must still be REPORTED as malformed.
+    """
+    print("dispatch renumber — a migrated dispatch promises an intake filed under the OLD number")
+    POST = "2027-01-01T00:00:00Z"
+    DECL = {"renumbers": {"#87": {
+        "was": "#54",
+        "evidence": "probe: the board reissued 54 -> 87 on 2026-10-04"}}}
+
+    def rows_for(root: Path, entries: list[tuple[str, str]]) -> None:
+        """(event, subject) rows numbered 1..N, all POST-boundary.
+
+        POST because the leg is FORWARD-ONLY from a declared boundary: a pre-boundary row
+        is EXCUSED, so a fixture that used an old `ts` would pass every arm for the wrong
+        reason — the trap `write_ledger`'s fixed 2026-09-12 sets for this leg.
+        """
+        out = [
+            {"n": n, "ts": POST, "event": event, "actor": "triage",
+             "subject": subject, "detail": "probe"}
+            for n, (event, subject) in enumerate(entries, 1)
+        ]
+        _ledger(root).write_text(
+            "".join(json.dumps(r) + "\n" for r in out), encoding="utf-8")
+
+    def declare(root: Path, payload: dict | None) -> None:
+        (root / "docs").mkdir(exist_ok=True)
+        path = root / "docs" / "ledger-renumbers.json"
+        if payload is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # --- A. THE ARM. The intake carries #54, the dispatch carries #87.
+        a = _fixture_repo(Path(tmp) / "a")
+        declare(a, DECL)
+        rows_for(a, [("intake", "#54"), ("dispatch", "#87")])
+        v = run_in_tree(a, _ledger(a), "verify")
+        out = v.stdout + v.stderr
+        check("(a) a dispatch under the NEW number is CLEAN when its intake sits under "
+              "the declared OLD one",
+              v.returncode == 0 and "dispatch of #87" not in out, out.strip()[-180:])
+        # The count is a separate population, not folded into the close count: one number
+        # printed over two populations cannot be read.
+        check("(a2) the resolution is PRINTED with its receipt, and counted APART from "
+              "the closes",
+              "renumber resolved: dispatch #87 -> #54 (probe: the board reissued 54 -> 87"
+              in out
+              and "renumber-resolved dispatches: 1" in out
+              and "renumber-resolved closes: 0" in out,
+              " | ".join(l.strip() for l in out.splitlines() if "renumber" in l)[:200])
+
+        # --- B. THE CONTROL. Same ledger, same rows, declaration REMOVED. If the refusal
+        # does not come back, arm (a) measured the fixture and not the map.
+        declare(a, None)
+        v = run_in_tree(a, _ledger(a), "verify")
+        out = v.stdout + v.stderr
+        check("(b) CONTROL: with the declaration removed the SAME dispatch is REFUSED "
+              "— the map is what resolves it",
+              v.returncode != 0 and "dispatch of #87 has no intake before it" in out,
+              out.strip()[-180:])
+
+        # --- C. NO WILDCARD. #87 is declared and NOTHING carries an intake for it: a
+        # resolution that silenced the leg for every migrated number would pass (a) and
+        # (a2) while accepting dispatches about filings that do not exist.
+        c = _fixture_repo(Path(tmp) / "c")
+        declare(c, DECL)
+        rows_for(c, [("dispatch", "#87")])
+        v = run_in_tree(c, _ledger(c), "verify")
+        out = v.stdout + v.stderr
+        check("(c) a dispatch whose declared chain supplies NO intake is STILL REFUSED",
+              v.returncode != 0 and "dispatch of #87 has no intake before it" in out,
+              out.strip()[-180:])
+
+        # --- D. THE MALFORMED HALF IS UNTOUCHED: a bare number is REPORTED, never gated,
+        # declaration or no declaration.
+        d = _fixture_repo(Path(tmp) / "d")
+        declare(d, DECL)
+        rows_for(d, [("dispatch", "87")])
+        v = run_in_tree(d, _ledger(d), "verify")
+        out = v.stdout + v.stderr
+        check("(d) a bare non-existent number is STILL REPORTED as malformed, and the "
+              "ledger stays clean",
+              v.returncode == 0 and "malformed subject" in out, out.strip()[-180:])
+
+        # --- E. THE REISSUED-NUMBER FALSE PASS. #127's defect one leg over: the STRING
+        # #87 can belong to an EARLIER unit, and that unit's intake is not this one's.
+        # Without the partition the dispatch passes on a stranger's filing.
+        PART = {"renumbers": {"#87": {
+            "was": "#54",
+            "evidence": "probe: the board reissued 54 -> 87, and the string was occupied",
+            "prior_occupant": {"board": 130, "floor": 1, "ceiling": 1}}}}
+        e = _fixture_repo(Path(tmp) / "e")
+        declare(e, PART)
+        rows_for(e, [("intake", "#87"), ("dispatch", "#87")])
+        v = run_in_tree(e, _ledger(e), "verify")
+        out = v.stdout + v.stderr
+        check("(e) the PRIOR OCCUPANT's intake under the reissued number does not satisfy "
+              "the dispatch — it is REFUSED",
+              v.returncode != 0 and "dispatch of #87 has no intake before it" in out,
+              out.strip()[-220:])
+
+        # --- F. THE CONTROL FOR (e): with the partition UNDECLARED the same rows pass,
+        # piggybacking on the prior occupant — which is what makes (e) about the
+        # partition rather than about the fixture.
+        declare(e, DECL)
+        v = run_in_tree(e, _ledger(e), "verify")
+        out = v.stdout + v.stderr
+        check("(f) CONTROL: with the partition UNDECLARED the same dispatch is ACCEPTED, "
+              "piggybacking on the prior occupant",
+              v.returncode == 0, out.strip()[-220:])
+
 def check_release_vocabulary() -> None:
     """#210's release arms, driven where the vocabulary exists.
 
@@ -2195,6 +2321,7 @@ def main() -> int:
     check_fail_open_needs_no_remote()
     check_worktree_fork_refused()
     check_reissue_partition()
+    check_dispatch_renumber()
     check_release_vocabulary()
     check_probe_sandbox_is_named()
 

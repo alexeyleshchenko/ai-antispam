@@ -40,6 +40,42 @@
         "ceiling": 171
       },
       "evidence": "docs/board-migration/number-map.json: \"44\": {\"new\": 77} -- the 2026-10-04 board migration. The STRING #77 was already held by the item now at board #110 (\"[defect] scorecard prints rates with no floor -- a 300% rework rate over one close reads as a verdict\", CLOSED 2026-10-04T21:03:04Z), whose rows under #77 are n=168 intake, n=169 claim, n=170 close, n=171 run/settlement -- so n=168..171 is the range. The reissued unit's own number #44 carries TWO rows, intake n=30 and claim n=31 (still open: no close and no release names it), which sit BELOW this block and carry the OLD subject, so they live in #44's bucket and reach a #77 close through the declared HOP, not through this partition -- the floor is therefore inert here and declared for the non-prefix case. A repair here owes a RELEASE of n=31 before its own claim, per ruling n=297."
+    },
+    "#78": {
+      "was": "#45",
+      "evidence": "docs/board-migration/number-map.json: \"45\": {\"new\": 78, \"state\": \"OPEN\", \"comments\": 3} — the 2026-10-04 board migration. The work-unit is #78 on the board today; its lifecycle legs carry the pre-migration number #45: intake n=33, claim n=34. NO PARTITION: the string #78 was free when the unit took it — measured 2026-11-07, it carries no row belonging to another unit."
+    },
+    "#87": {
+      "was": "#54",
+      "evidence": "docs/board-migration/number-map.json: \"54\": {\"new\": 87, \"state\": \"OPEN\", \"comments\": 0} — the 2026-10-04 board migration. The work-unit is #87 on the board today; its lifecycle legs carry the pre-migration number #54: intake n=55, claim n=56. NO PARTITION: the string #87 was free when the unit took it — measured 2026-11-07, it carries no row belonging to another unit."
+    },
+    "#89": {
+      "was": "#56",
+      "evidence": "docs/board-migration/number-map.json: \"56\": {\"new\": 89, \"state\": \"OPEN\", \"comments\": 0} — the 2026-10-04 board migration. The work-unit is #89 on the board today; its lifecycle legs carry the pre-migration number #56: intake n=60, claim n=61. NO PARTITION: the string #89 was free when the unit took it — measured 2026-11-07, it carries no row belonging to another unit."
+    },
+    "#90": {
+      "was": "#57",
+      "evidence": "docs/board-migration/number-map.json: \"57\": {\"new\": 90, \"state\": \"OPEN\", \"comments\": 4} — the 2026-10-04 board migration. The work-unit is #90 on the board today; its lifecycle legs carry the pre-migration number #57: intake n=64, claim n=91. NO PARTITION: the string #90 was free when the unit took it — measured 2026-11-07, it carries no row belonging to another unit."
+    },
+    "#93": {
+      "was": "#60",
+      "evidence": "docs/board-migration/number-map.json: \"60\": {\"new\": 93, \"state\": \"OPEN\", \"comments\": 1} — the 2026-10-04 board migration. The work-unit is #93 on the board today; its lifecycle legs carry the pre-migration number #60: intake n=66, claim n=92. NO PARTITION: the string #93 was free when the unit took it — measured 2026-11-07, it carries no row belonging to another unit."
+    },
+    "#94": {
+      "was": "#61",
+      "evidence": "docs/board-migration/number-map.json: \"61\": {\"new\": 94, \"state\": \"OPEN\", \"comments\": 3} — the 2026-10-04 board migration. The work-unit is #94 on the board today; its lifecycle legs carry the pre-migration number #61: intake n=67, claim n=93, claim n=123. NO PARTITION: the string #94 was free when the unit took it — measured 2026-11-07, it carries no row belonging to another unit."
+    },
+    "#97": {
+      "was": "#64",
+      "evidence": "docs/board-migration/number-map.json: \"64\": {\"new\": 97, \"state\": \"OPEN\", \"comments\": 0} — the 2026-10-04 board migration. The work-unit is #97 on the board today; its lifecycle legs carry the pre-migration number #64: intake n=70, claim n=71. NO PARTITION: the string #97 was free when the unit took it — measured 2026-11-07, it carries no row belonging to another unit."
+    },
+    "#102": {
+      "was": "#69",
+      "evidence": "docs/board-migration/number-map.json: \"69\": {\"new\": 102, \"state\": \"OPEN\", \"comments\": 0} — the 2026-10-04 board migration. The work-unit is #102 on the board today; its lifecycle legs carry the pre-migration number #69: intake n=124, claim n=125. NO PARTITION: the string #102 was free when the unit took it — measured 2026-11-07, it carries no row belonging to another unit."
+    },
+    "#101": {
+      "was": "#68",
+      "evidence": "docs/board-migration/number-map.json: \"68\": {\"new\": 101, \"state\": \"OPEN\", \"comments\": 14} — the 2026-10-04 board migration. The work-unit is #101 on the board today; its lifecycle legs carry the pre-migration number #68: intake n=116. NO PARTITION: the string #101 was free when the unit took it — measured 2026-11-07, it carries no row belonging to another unit."
     }
   }
 }
