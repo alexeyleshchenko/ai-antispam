@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, NamedTuple
 
 from .constants import INITIAL_CREDITS
 from .models import Administrator, ModerationMode
@@ -130,6 +130,80 @@ async def update_admin_username_if_needed(admin_id: int, username: str | None) -
         await save_admin(admin)
 
 
+class ModerationRestore(NamedTuple):
+    """What a payment's moderation restore actually did, in three states.
+
+    A bare `restored == 0` collapses three different situations into one number,
+    and the collapsed form is what produced a false alarm on 2026-11-08: admin
+    1457796755 paid 100 stars for a group whose moderation had been ON for
+    nineteen days (100 deductions before the payment), and the handler told them
+    the join "matched nothing" and to re-add the bot — both of those stated
+    causes were false.
+
+    The states, kept apart because they call for opposite responses:
+      * `restored`     — mappings exist and moderation was OFF; the payment
+                         flipped them. This is the good path.
+      * `already_on`   — mappings exist and moderation was ALREADY on. Nothing
+                         needed doing; that is a success, not a warning. 35 of
+                         the 37 admins with groups read this way.
+      * no mapping at all (`registered_groups == 0`) — the issue #41 case. The
+                         low-balance leave hard-deletes the mapping, so the
+                         top-up genuinely restores nothing and the customer has
+                         to re-add the bot. THIS is the only state that warrants
+                         a warning, and it is the one the old code could not tell
+                         apart from a healthy no-op.
+    """
+
+    restored: int = 0
+    already_on: int = 0
+    registered_groups: int = 0
+
+    @property
+    def has_mapping(self) -> bool:
+        """False only in the issue #41 state: the bot is not in their groups."""
+        return self.registered_groups > 0
+
+    def as_log_line(self) -> str:
+        return (
+            f"restored={self.restored} already_on={self.already_on} "
+            f"registered_groups={self.registered_groups}"
+        )
+
+
+async def describe_moderation_restore(admin_id: int) -> ModerationRestore:
+    """The three states a payment's moderation restore can land in.
+
+    One query, because the three counts must come from the same join: reading
+    them separately would let a concurrent leave change the population between
+    the arms and report a combination that never existed.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                count(*) FILTER (
+                    WHERE g.moderation_enabled IS NOT TRUE
+                ) AS restored,
+                count(*) FILTER (
+                    WHERE g.moderation_enabled IS TRUE
+                ) AS already_on,
+                count(*) AS registered_groups
+            FROM groups g
+            JOIN group_administrators ga ON ga.group_id = g.group_id
+            WHERE ga.admin_id = $1 AND ga.is_registered = TRUE
+            """,
+            admin_id,
+        )
+    if row is None:
+        return ModerationRestore()
+    return ModerationRestore(
+        restored=row["restored"] or 0,
+        already_on=row["already_on"] or 0,
+        registered_groups=row["registered_groups"] or 0,
+    )
+
+
 async def count_groups_awaiting_moderation_restore(admin_id: int) -> int:
     """Groups whose moderation a payment from this admin would restore (issue #41).
 
@@ -141,21 +215,11 @@ async def count_groups_awaiting_moderation_restore(admin_id: int) -> int:
     nothing happened, and no line anywhere said so.
 
     This is the same join the procedure uses, so the count equals the number of
-    groups the payment will actually flip.
+    groups the payment will actually flip. It is the `restored` arm of
+    `describe_moderation_restore`, kept as a function because callers that only
+    want the flip count should not have to unpack a report.
     """
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        count = await conn.fetchval(
-            """
-            SELECT count(*)
-            FROM groups g
-            JOIN group_administrators ga ON ga.group_id = g.group_id
-            WHERE ga.admin_id = $1 AND ga.is_registered = TRUE
-              AND g.moderation_enabled = false
-            """,
-            admin_id,
-        )
-    return count or 0
+    return (await describe_moderation_restore(admin_id)).restored
 
 
 async def record_successful_payment(admin_id: int, stars_amount: int) -> int:
@@ -164,7 +228,17 @@ async def record_successful_payment(admin_id: int, stars_amount: int) -> int:
     Returns the number of groups whose moderation this payment restored, so the
     caller can report a zero (issue #41).
     """
-    restored = await count_groups_awaiting_moderation_restore(admin_id)
+async def record_successful_payment(
+    admin_id: int, stars_amount: int
+) -> ModerationRestore:
+    """Record a successful Stars payment: add credits, record transaction, enable moderation.
+
+    Returns the three-state `ModerationRestore` rather than a bare count, so the
+    caller can tell "nothing needed doing" apart from "nothing COULD be done"
+    (issue #41). Measured before the procedure runs, because afterwards every
+    group reads `moderation_enabled = true` and the pre-state is gone.
+    """
+    before = await describe_moderation_restore(admin_id)
 
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -174,7 +248,7 @@ async def record_successful_payment(admin_id: int, stars_amount: int) -> int:
             stars_amount,
         )
 
-    return restored
+    return before
 
 
 def _admin_from_row(row) -> Administrator:

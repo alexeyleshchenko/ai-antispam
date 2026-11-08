@@ -399,6 +399,100 @@ async def test_count_groups_awaiting_moderation_restore(patched_db_conn, clean_d
 
     assert await count_groups_awaiting_moderation_restore(admin_id) == 0
 
+@pytest.mark.asyncio
+async def test_describe_moderation_restore_keeps_the_three_states_apart(
+    patched_db_conn, clean_db
+):
+    """A zero `restored` means three different things; they must not collapse.
+
+    Measured live 2026-11-08: admin 1457796755 paid 100 stars, moderation was
+    already ON in their only group (100 deductions before the payment), and the
+    old code reported `restored == 0` and warned that the join "matched nothing"
+    and to re-add the bot — both stated causes false. Fleet-wide, 35 of the 37
+    admins with groups are in that healthy-no-op state, so the collapsed number
+    fired a false alarm for 94.6% of the population it was aimed at.
+
+    The three states, each asserted separately so a future refactor that merges
+    any two of them fails by name:
+      * moderation OFF  -> `restored` counts it (the good path)
+      * moderation ON   -> `already_on` counts it (success, not a warning)
+      * no mapping      -> `registered_groups == 0` (the only real issue #41)
+    """
+    from app.database.admin_operations import describe_moderation_restore
+
+    healthy_id = 8201  # mapping present, moderation already on (the false-alarm case)
+    flipping_id = 8202  # mapping present, moderation off (the good path)
+    orphan_id = 8203  # no mapping at all (the genuine issue #41 case)
+
+    async with clean_db.acquire() as conn:
+        for aid in (healthy_id, flipping_id, orphan_id):
+            await conn.execute(
+                "INSERT INTO administrators (admin_id, credits) VALUES ($1, $2)",
+                aid,
+                0,
+            )
+        await conn.execute(
+            "INSERT INTO groups (group_id, title, moderation_enabled) "
+            "VALUES ($1, 'Already on', 1)",
+            -4001,
+        )
+        await conn.execute(
+            "INSERT INTO group_administrators (group_id, admin_id) VALUES ($1, $2)",
+            -4001,
+            healthy_id,
+        )
+        await conn.execute(
+            "INSERT INTO groups (group_id, title, moderation_enabled) "
+            "VALUES ($1, 'Off, restorable', 0)",
+            -4002,
+        )
+        await conn.execute(
+            "INSERT INTO group_administrators (group_id, admin_id) VALUES ($1, $2)",
+            -4002,
+            flipping_id,
+        )
+
+    # STATE 2 — the good path: exactly one flip, nothing already-on.
+    flipping = await describe_moderation_restore(flipping_id)
+    assert (flipping.restored, flipping.already_on, flipping.registered_groups) == (
+        1,
+        0,
+        1,
+    ), flipping
+    assert flipping.has_mapping is True
+
+    # STATE 1 — the false-alarm case: zero to restore, but the mapping IS there.
+    # `restored == 0` alone cannot distinguish this from STATE 3; `has_mapping`
+    # is what makes the distinction, and this assertion is the guard on it.
+    healthy = await describe_moderation_restore(healthy_id)
+    assert (healthy.restored, healthy.already_on, healthy.registered_groups) == (
+        0,
+        1,
+        1,
+    ), healthy
+    assert healthy.has_mapping is True
+
+    # STATE 3 — the genuine issue #41 case: nothing to restore because the
+    # low-balance leave hard-deleted the mapping. The ONLY state that warrants
+    # the "re-add the bot" warning.
+    orphan = await describe_moderation_restore(orphan_id)
+    assert (orphan.restored, orphan.already_on, orphan.registered_groups) == (
+        0,
+        0,
+        0,
+    ), orphan
+    assert orphan.has_mapping is False
+
+    # The log line carries all three numbers, so a future incident can be read
+    # out of the log instead of reconstructed from the database.
+    assert healthy.as_log_line() == (
+        "restored=0 already_on=1 registered_groups=1"
+    )
+
+    # And the count helper stays the `restored` arm, not the collapsed sum.
+    assert await count_groups_awaiting_moderation_restore(healthy_id) == 0
+    assert await count_groups_awaiting_moderation_restore(flipping_id) == 1
+
 
 # --- #130: activation is keyed on activated_at, never on row existence --------
 #

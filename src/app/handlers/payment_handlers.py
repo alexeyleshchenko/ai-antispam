@@ -126,25 +126,38 @@ async def process_successful_payment(message: types.Message) -> str:
     lang = resolve_lang(message, admin)
 
     try:
-        restored = await record_successful_payment(admin_id, stars_amount)
+        restore = await record_successful_payment(admin_id, stars_amount)
 
         # Issue #41: the restore joins group_administrators, which the
         # low-balance leave HARD-DELETES — so a top-up made before the bot is
         # re-added restores nothing. That is correct (re-adding re-creates the
         # mapping) but it must not be silent: a paying customer sat unmoderated
         # for ~36 days because no line anywhere said so.
-        if restored:
-            logger.info(
-                f"Payment for admin {admin_id} restored moderation in "
-                f"{restored} group(s)"
-            )
-        else:
+        #
+        # But a zero `restored` is NOT that case on its own. Measured
+        # 2026-11-08: 35 of the 37 admins with groups have moderation already
+        # ON, so a top-up correctly restores 0 groups and the old warning told
+        # them the join "matched nothing" and to re-add the bot — both false.
+        # Only a genuinely absent mapping warrants the warning.
+        if not restore.has_mapping:
             logger.warning(
                 f"Payment for admin {admin_id} restored moderation in 0 groups — "
-                "the group_administrators join matched nothing: either this admin "
-                "has no groups yet, or the bot is not currently in them (a "
+                "this admin has NO group_administrators rows at all: either they "
+                "have no groups yet, or the bot is not currently in them (a "
                 "low-balance leave deletes that mapping). Re-adding the bot "
-                "restores moderation."
+                "restores moderation. "
+                f"({restore.as_log_line()})"
+            )
+        elif restore.restored:
+            logger.info(
+                f"Payment for admin {admin_id} restored moderation in "
+                f"{restore.restored} group(s) ({restore.as_log_line()})"
+            )
+        else:
+            # The healthy no-op: mappings exist, moderation was already on.
+            logger.info(
+                f"Payment for admin {admin_id} needed no moderation restore — "
+                f"already enabled ({restore.as_log_line()})"
             )
 
         success_text = t(lang, "payment.success_full", amount=stars_amount)
