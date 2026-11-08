@@ -84,8 +84,17 @@ Report it verbatim. Field guide: `all= / decided / failed` is the RETAINED windo
 
 1. `git -C /root/ai-antispam pull --ff-only`
 2. `cd /root/ai-antispam && python3 tools/audit.py --report`
-3. Commit ONLY the scorecard that run produced (`evidence/scores/<date>-self-audit.md`), message `evidence: daily self-audit <date>`, then `git push alexey main` and `git push origin main`. Stage `evidence/ledger.jsonl` ONLY if it actually changed — another lane may have committed rows since your pull.
-4. Report the verdict line (HEALTHY / DEGRADED), the artifact path, and — only if DEGRADED — the failing leg verbatim.
+3. Commit ONLY the scorecard that run produced (`evidence/scores/<date>-self-audit.md`), message `evidence: daily self-audit <date>`. Stage `evidence/ledger.jsonl` ONLY if it actually changed — another lane may have committed rows since your pull. **Then read the ahead-count BEFORE pushing, because `git push <remote> main` pushes a REF, not a commit:**
+
+   ```
+   git -C /root/ai-antispam rev-list --count origin/main..HEAD
+   ```
+
+   - **`0` ahead** → `git push alexey main` and `git push origin main`, as before.
+   - **`> 0` ahead** → **do NOT push.** Those commits are someone else's held work (a leg awaiting an owner gate, or a peer lane's unpushed commits), and a cron run has no knob that publishes one without the other. Leave the scorecard committed, the tree clean, and carry the count into step 4.
+
+   Board #135, measured 2026-11-08: **19** commits ahead of `origin/main` and **25** of `alexey`, every one of them the owner-gated #130 roster leg. The unconditional push would have published a leg the owner had not released. The 2026-11-07 run hit the same wall and recorded it **only in a chat message** — 0 hits for "push" in its own scorecard, no board item — so the finding had to be re-derived from scratch a day later. That is the #547 class: a finding that lives in one chat line is un-aged, un-paged and invisible to the digest.
+4. Report the verdict line (HEALTHY / DEGRADED), the artifact path, **the push disposition — `push: pushed` or `push: blocked <N> commit(s) ahead of origin/main`** — and, only if DEGRADED, the failing leg verbatim. The disposition line is **unconditional**: a silent skip reads exactly like a success, which is the defect #135 exists to close.
 
 WHY NO `--stamp` (do not put it back — board #65, ledger n=86): `tools/ledger.py` derives the writing identity from `OPENCRABS_SESSION_ID` and refuses any session it cannot place in a fragment's lanes; a cron session is never a lane, so `--stamp` is refused by construction. Do NOT retry it, do NOT pass a different `--actor`, and do NOT redirect `OC_LEDGER_PATH`. The `run` row this job used to stamp is OWED BY THE HQ LANE on receipt — end the report with the line `stamp owed: run row for <date>` and the HQ lane writes it.
 

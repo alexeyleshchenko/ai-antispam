@@ -901,6 +901,7 @@ PYTEST_FORM_GATES: tuple[str, ...] = (
     "tests/test_registry_attest.py",
     "tests/test_registry_render.py",
     "tests/test_score_gate_recorded.py",
+    "tests/test_self_audit_push_gate.py",
 )
 for _pytest_gate in PYTEST_FORM_GATES:
     GATE_WALLS_SEC[_pytest_gate] = 150.0
@@ -1666,6 +1667,15 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
         gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_registry_render.py", "-q"])
     if (repo_root / "tests/test_score_gate_recorded.py").is_file():
         gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_score_gate_recorded.py", "-q"])
+    # Registered under #135: the daily self-audit's push leg. `git push <remote> main` pushes a
+    # REF, not a commit, so an unconditional push in step 3 ships whatever held leg happens to
+    # be on main (measured 2026-11-08: 19 commits ahead of origin, all of them the owner-gated
+    # #130 roster leg). The gate asserts the procedure names the ahead-count read and both
+    # branches, REJECTS the pre-fix step text as a negative control, and proves the push
+    # coupling in a throwaway two-remote sandbox. pytest form, so a bare-script registration
+    # would execute ZERO checks and exit 0.
+    if (repo_root / "tests/test_self_audit_push_gate.py").is_file():
+        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_self_audit_push_gate.py", "-q"])
     # Registered under #126: the reporting contract's own gate -- both rework rate FORMS
     # with their denominators, the outcome partition for run AND close rows, the rework
     # declaration population, the change fail rate with its linkage coverage, and the
