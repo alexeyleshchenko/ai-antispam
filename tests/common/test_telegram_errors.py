@@ -4,6 +4,7 @@ import asyncpg
 from aiogram.exceptions import (
     TelegramBadRequest,
     TelegramForbiddenError,
+    TelegramMigrateToChat,
     TelegramNetworkError,
     TelegramNotFound,
     TelegramServerError,
@@ -13,10 +14,12 @@ from src.app.common.telegram_errors import (
     is_bot_kicked_error,
     is_bot_to_bot_disabled_error,
     is_group_inaccessible_error,
+    is_member_list_inaccessible_error,
     is_message_not_found_error,
     is_permission_error,
     is_user_blocked_error,
     is_webhook_retryable,
+    migrate_target_id,
 )
 
 
@@ -230,3 +233,51 @@ def test_is_bot_kicked_error_wrong_type():
 def test_is_bot_kicked_error_non_telegram():
     """Non-Telegram errors should not match."""
     assert is_bot_kicked_error(RuntimeError("network")) is False
+
+# ─── lifecycle classification: rights vs retirement vs migration ─────────────
+#
+# The four exceptions the group-lifecycle sweep must tell apart. They are
+# CONSTRUCTED, never mocked: the whole point is aiogram's class hierarchy, and a
+# MagicMock subclass would assert whatever we told it to.
+
+GONE = TelegramBadRequest(method=MagicMock(), message="Bad Request: chat not found")
+NO_RIGHTS = TelegramBadRequest(
+    method=MagicMock(), message="Bad Request: member list is inaccessible"
+)
+KICKED = TelegramForbiddenError(
+    method=MagicMock(), message="Forbidden: bot was kicked from the group chat"
+)
+MOVED = TelegramMigrateToChat(
+    method=MagicMock(),
+    message="Bad Request: group chat was upgraded to a supergroup chat",
+    migrate_to_chat_id=-1003721264646,
+)
+
+def test_member_list_inaccessible_is_not_group_inaccessible():
+    """A rights error must never read as an inaccessible group — both directions.
+
+    Both directions live in one test because the failure mode is a widened marker
+    list: folding "member list is inaccessible" into `_INACCESSIBLE_MESSAGE_MARKERS`
+    makes the first assertion pass for the wrong reason and the second one fail.
+    """
+    assert is_member_list_inaccessible_error(NO_RIGHTS) is True
+    assert is_group_inaccessible_error(NO_RIGHTS) is False
+    assert is_group_inaccessible_error(GONE) is True
+    assert is_member_list_inaccessible_error(GONE) is False
+
+def test_migrate_target_id_reads_the_upgrade_and_nothing_else():
+    """Only `TelegramMigrateToChat` carries a destination id.
+
+    The second half is the one that matters: `TelegramMigrateToChat` is not a
+    `TelegramBadRequest`, so a guard written against that type would return None
+    here — and the same message text on a real `TelegramBadRequest` must return
+    None, because a plain upgrade error we cannot act on is not a migration.
+    """
+    assert migrate_target_id(MOVED) == -1003721264646
+    assert is_group_inaccessible_error(MOVED) is False
+    same_text = TelegramBadRequest(
+        method=MagicMock(),
+        message="Bad Request: group chat was upgraded to a supergroup chat",
+    )
+    assert migrate_target_id(same_text) is None
+    assert migrate_target_id(RuntimeError("boom")) is None

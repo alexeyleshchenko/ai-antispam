@@ -13,7 +13,12 @@ from aiogram.exceptions import (
 )
 
 from ..common.bot import bot
-from ..common.telegram_errors import GROUP_ANONYMOUS_BOT_ID, is_group_inaccessible_error
+from ..common.telegram_errors import (
+    GROUP_ANONYMOUS_BOT_ID,
+    is_group_inaccessible_error,
+    is_member_list_inaccessible_error,
+    migrate_target_id,
+)
 from ..common.utils import format_chat_log, load_config
 from . import admin_operations
 from .models import Group, GroupStatus
@@ -323,6 +328,198 @@ async def cleanup_group_data(
         f"Successfully deactivated database records for group {format_chat_log(group_id)} "
         f"(status={status_value})"
     )
+
+
+async def _retire_group(
+    conn,
+    group_id: int,
+    *,
+    status: str,
+    reason: str,
+    migrated_to: int | None,
+) -> bool:
+    """The retire write, on a caller's connection. True if the row changed.
+
+    Separate from `cleanup_group_data` on purpose (D1): retirement is an
+    OBSERVATION (Telegram says the chat is gone, or the group was upgraded), and
+    an observation must not destroy the paying-admin link. `cleanup_group_data`
+    hard-deletes `group_administrators` and `approved_members`; this leaves both
+    intact so a re-add and the billing report still resolve.
+
+    Takes `conn` rather than acquiring its own so `migrate_group` can perform the
+    copy and the retire inside ONE transaction.
+    """
+    old_row = await conn.fetchrow(
+        "SELECT * FROM groups WHERE group_id = $1",
+        group_id,
+    )
+    if old_row is None:
+        return False
+
+    # $N must appear in ascending text order: the SQLite test adapter rewrites
+    # $N -> ? positionally (same constraint documented in cleanup_group_data).
+    # `last_active` is deliberately NOT touched — it means last message activity,
+    # and the `dormant` counter reads it (D5).
+    result = await conn.execute(
+        """
+        UPDATE groups
+        SET status = $1,
+            bot_removed_at = COALESCE(bot_removed_at, NOW()),
+            migrated_to_group_id = COALESCE($2, migrated_to_group_id)
+        WHERE group_id = $3 AND status <> $4
+        """,
+        status,
+        migrated_to,
+        group_id,
+        status,
+    )
+    if _affected_rows(result) == 0:
+        # Already retired: idempotent, and no second event (D7).
+        return False
+
+    await conn.execute(
+        """
+        INSERT INTO entity_events (entity_type, entity_id, action, reason, old_row)
+        VALUES ('group', $1, $2, $3, $4)
+        """,
+        group_id,
+        "group_retired",
+        reason,
+        json.dumps(dict(old_row), default=str),
+    )
+    return True
+
+
+async def retire_group(
+    group_id: int,
+    *,
+    reason: str,
+    status: GroupStatus | str = GroupStatus.LEFT,
+    migrated_to: int | None = None,
+) -> bool:
+    """Retire a group row on observation — status + stamp + one event, nothing else.
+
+    NOT `cleanup_group_data`: that hard-deletes `group_administrators` and
+    `approved_members`, which is right for a deliberate leave and wrong for an
+    observation — the paying-admin link must survive so a re-add and the billing
+    report still resolve. Idempotent: a row already `left` changes nothing and
+    emits no event (D7).
+    """
+    status_value = status.value if isinstance(status, GroupStatus) else str(status)
+    pool = await get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        changed = await _retire_group(
+            conn,
+            group_id,
+            status=status_value,
+            reason=reason,
+            migrated_to=migrated_to,
+        )
+    if changed:
+        logger.info(f"Retired group {format_chat_log(group_id)} (reason={reason})")
+    return changed
+
+
+async def migrate_group(old_id: int, new_id: int) -> bool:
+    """Move a group's identity and roster to the supergroup Telegram migrated it to.
+
+    Identity and roster only (D3): the chat-keyed operational tables
+    (`classification_verdicts`, `message_lookup_cache`, `recovery_attempts`,
+    `spam_examples`, `message_classification_context`) are short-TTL junk, and
+    `member_joins` is deliberately NOT moved — we have not observed joins in the
+    new chat, so pre-existing trust must start closed there.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        old_row = await conn.fetchrow(
+            "SELECT * FROM groups WHERE group_id = $1",
+            old_id,
+        )
+        if old_row is None:
+            logger.warning(
+                f"migrate_group: {format_chat_log(old_id)} has no row — "
+                f"nothing to migrate to {format_chat_log(new_id)}"
+            )
+            return False
+
+        # Copy-not-clobber (D3): a row already at the destination is left exactly
+        # as it is, so an operator's or an earlier job's lifecycle state there is
+        # never overwritten. `ON CONFLICT ... DO NOTHING` only — NEVER DO UPDATE,
+        # which the test adapter rewrites to INSERT OR REPLACE and which would
+        # reset the destination row's columns.
+        #
+        # `bot_added_at` is carried VERBATIM (Q2): the observation was continuous
+        # across the move, so the pre-existing window keeps the clock it had.
+        # Neither NOW() (a fresh 72 h on unchanged evidence) nor NULL (which fails
+        # is_pre_existing_candidate at its first leg, permanently).
+        # `no_rights_detected_at` is omitted: rights at the destination are
+        # unprobed, so the grace clock must start from an observation (D3).
+        await conn.execute(
+            """
+            INSERT INTO groups (group_id, title, username, moderation_enabled,
+                                status, linked_channel_id, created_at, last_active,
+                                bot_added_at)
+            SELECT $1, title, username, moderation_enabled, status,
+                   linked_channel_id, NOW(), NOW(), bot_added_at
+            FROM groups WHERE group_id = $2
+            ON CONFLICT (group_id) DO NOTHING
+            """,
+            new_id,
+            old_id,
+        )
+
+        # `is_registered` is carried, never defaulted: it is the billing link.
+        await conn.execute(
+            """
+            INSERT INTO group_administrators
+                (group_id, admin_id, is_registered, is_admin_now)
+            SELECT $1, admin_id, is_registered, is_admin_now
+            FROM group_administrators WHERE group_id = $2
+            ON CONFLICT (group_id, admin_id) DO NOTHING
+            """,
+            new_id,
+            old_id,
+        )
+
+        await conn.execute(
+            """
+            INSERT INTO approved_members
+                (group_id, member_id, approved_at, moderation_event_count,
+                 trust_source, trusted_until)
+            SELECT $1, member_id, approved_at, moderation_event_count,
+                   trust_source, trusted_until
+            FROM approved_members WHERE group_id = $2
+            ON CONFLICT (group_id, member_id) DO NOTHING
+            """,
+            new_id,
+            old_id,
+        )
+
+        # Seat counts from COUNT rather than _affected_rows: that helper parses a
+        # driver tag ("UPDATE 3"), and asyncpg tags an INSERT "INSERT 0 <n>" — so
+        # parts[1] is the OID field and it reads 0. The counts below are log
+        # context, not control flow, so a query is the honest source.
+        seats = await conn.fetchval(
+            "SELECT COUNT(*) FROM group_administrators WHERE group_id = $1", new_id
+        )
+        members = await conn.fetchval(
+            "SELECT COUNT(*) FROM approved_members WHERE group_id = $1", new_id
+        )
+
+        changed = await _retire_group(
+            conn,
+            old_id,
+            status=GroupStatus.LEFT.value,
+            reason="migrated",
+            migrated_to=new_id,
+        )
+
+    logger.info(
+        f"Migrated group {format_chat_log(old_id)} -> {format_chat_log(new_id)}: "
+        f"seats={seats} members={members} "
+        f"(old row {'retired' if changed else 'already retired'})"
+    )
+    return changed
 
 
 async def set_no_rights_detected_at(group_id: int) -> None:
@@ -666,6 +863,12 @@ async def update_group_admins(
             "SELECT status FROM groups WHERE group_id = $1", group_id
         )
         if prior and prior["status"] != GroupStatus.ACTIVE.value:
+            # D6b: the reactivation must ALSO clear `bot_removed_at`, which is not
+            # a duplicate of `record_bot_added`'s clear — that runs on the add
+            # path, this branch runs when the row already existed and was retired
+            # by the sweep (or left). Leaving the stamp behind would read as
+            # "removed, then still removed" to anything that inspects it, and
+            # `is_pre_existing_candidate` would see a removal it must distrust.
             # Issue #41: reactivation must ALSO restore moderation_enabled.
             # A row with status != active can only have come from
             # cleanup_group_data, i.e. the bot left the group — the low-balance
@@ -682,6 +885,7 @@ async def update_group_admins(
                 """
                 UPDATE groups
                 SET status = $1, no_rights_detected_at = NULL,
+                    bot_removed_at = NULL,
                     moderation_enabled = TRUE
                 WHERE group_id = $2
                 """,
@@ -1217,6 +1421,12 @@ async def set_admin_now(
     )
     return _affected_rows(result)
 
+# A group is DORMANT — quiet rather than dead — when nothing has happened in it
+# for this long AND no paying admin is attached. Dormancy is a report, never an
+# action (D4): a quiet group with a payer still gets its roster refreshed, and a
+# quiet group without one is named in the summary so an operator can decide.
+DORMANT_AFTER_DAYS = 90
+
 async def sweep_group_administrators(
     concurrency: int = 5, limit: int = 500
 ) -> dict[str, int]:
@@ -1236,54 +1446,166 @@ async def sweep_group_administrators(
         concurrency: max parallel Telegram reads.
         limit: max groups per run.
 
+    A per-group failure is CLASSIFIED rather than merely counted (#130): a chat
+    Telegram says is gone is retired, a chat that moved is migrated, and a bot
+    that lost only its member-list rights is routed to the existing no-rights
+    grace flow instead of being retired — that last one is a paying group whose
+    roster we cannot read, and retiring it would stop its moderation (D2). An
+    error no predicate claims stays a loud WARNING and counts as `failed`.
+
     Returns:
-        {"synced": n, "failed": n, "new": n, "demoted": n, "total": n}.
+        {"synced": n, "failed": n, "retired": n, "migrated": n, "no_rights": n,
+         "dormant": n, "new": n, "demoted": n, "total": n}.
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
+        # Both dormant inputs are computed in SQL: `last_active` is a timestamp
+        # and parsing it in Python would duplicate what the database already
+        # knows. `has_paying_admin` is the same predicate
+        # `get_paid_groups_with_moderation_off` uses — a group whose admins are
+        # all at zero credits is unmoderated by design, not by defect.
         rows = await conn.fetch(
-            """
-            SELECT group_id FROM groups
-            WHERE status = 'active'
-            ORDER BY group_id
+            f"""
+            SELECT g.group_id,
+                   (g.last_active < NOW() - INTERVAL '{DORMANT_AFTER_DAYS} days')
+                       AS is_stale,
+                   EXISTS (
+                       SELECT 1
+                       FROM group_administrators ga
+                       JOIN administrators a ON a.admin_id = ga.admin_id
+                       WHERE ga.group_id = g.group_id
+                         AND ga.is_registered = TRUE
+                         AND a.credits > 0
+                   ) AS has_paying_admin
+            FROM groups g
+            WHERE g.status = 'active'
+            ORDER BY g.group_id
             LIMIT $1
             """,
             limit,
         )
     if not rows:
         logger.info("sweep_group_administrators: no active groups to sync")
-        return {"synced": 0, "failed": 0, "new": 0, "demoted": 0, "total": 0}
+        return {
+            "synced": 0,
+            "failed": 0,
+            "retired": 0,
+            "migrated": 0,
+            "no_rights": 0,
+            "dormant": 0,
+            "new": 0,
+            "demoted": 0,
+            "total": 0,
+        }
 
-    synced = 0
-    failed = 0
-    new_seats = 0
-    demoted_seats = 0
+    counts = {
+        "synced": 0,
+        "failed": 0,
+        "retired": 0,
+        "migrated": 0,
+        "no_rights": 0,
+        "dormant": 0,
+        "new": 0,
+        "demoted": 0,
+    }
     sem = asyncio.Semaphore(concurrency)
 
-    async def sync_one(group_id: int) -> None:
-        nonlocal synced, failed, new_seats, demoted_seats
+    async def act(group_id: int, exc: Exception) -> str:
+        """Classify one per-group failure and take its action.
+
+        Returns the summary bucket: `"migrated"`, `"no_rights"`, `"retired"`,
+        `"failed"` (classified, but its own write raised — already logged here),
+        or `"unknown"` (no predicate claimed the exception, so `sync_one` logs
+        today's warning and counts it as `failed`).
+
+        Never raises: an action's own database error must not abort the gather
+        and cost the remaining groups their refresh.
+
+        Order is load-bearing — `migrate_target_id` is consulted FIRST.
+        `TelegramMigrateToChat` is neither a `TelegramBadRequest` nor matched by
+        the inaccessible markers, so today no ordering flips a test; a future
+        aiogram that reparents it must not silently demote a migration into a
+        retirement.
+        """
+        target = migrate_target_id(exc)
+        if target is not None:
+            try:
+                await migrate_group(group_id, target)
+            except Exception as act_exc:
+                logger.warning(
+                    f"sweep: migrate of {format_chat_log(group_id)} to "
+                    f"{format_chat_log(target)} failed — "
+                    f"{type(act_exc).__name__}: {act_exc}",
+                    exc_info=True,
+                )
+                return "failed"
+            logger.info(
+                f"sweep: migrated {format_chat_log(group_id)} to "
+                f"{format_chat_log(target)}"
+            )
+            return "migrated"
+        if is_member_list_inaccessible_error(exc):
+            # D2: rights, not absence. This is a group we cannot READ, and it may
+            # be a paying one — retiring it would silently stop its moderation.
+            # Route it into the existing no-rights grace flow instead.
+            try:
+                await set_no_rights_detected_at(group_id)
+            except Exception as act_exc:
+                logger.warning(
+                    f"sweep: no-rights flag of {format_chat_log(group_id)} "
+                    f"failed — {type(act_exc).__name__}: {act_exc}",
+                    exc_info=True,
+                )
+                return "failed"
+            logger.info(
+                f"sweep: {format_chat_log(group_id)} lacks member-list rights — "
+                "routed to the no-rights grace flow"
+            )
+            return "no_rights"
+        if is_group_inaccessible_error(exc):
+            try:
+                await retire_group(group_id, reason="sweep_inaccessible")
+            except Exception as act_exc:
+                logger.warning(
+                    f"sweep: retirement of {format_chat_log(group_id)} "
+                    f"failed — {type(act_exc).__name__}: {act_exc}",
+                    exc_info=True,
+                )
+                return "failed"
+            logger.info(
+                f"sweep: retired {format_chat_log(group_id)} as inaccessible"
+            )
+            return "retired"
+        return "unknown"
+
+    async def sync_one(row) -> None:
+        group_id = row["group_id"]
         async with sem:
             try:
                 report = await sync_group_administrators(group_id, apply=True)
             except Exception as exc:  # noqa: BLE001 — per-group isolation
-                failed += 1
-                logger.warning(
-                    f"sweep_group_administrators: {format_chat_log(group_id)} "
-                    f"skipped — {type(exc).__name__}: {exc}"
-                )
+                bucket = await act(group_id, exc)
+                if bucket == "unknown":
+                    # The one unclassified channel stays LOUD: an error we cannot
+                    # name is a defect, not a lifecycle event.
+                    logger.warning(
+                        f"sweep_group_administrators: {format_chat_log(group_id)} "
+                        f"skipped — {type(exc).__name__}: {exc}"
+                    )
+                    bucket = "failed"
+                counts[bucket] += 1
                 return
-            synced += 1
-            new_seats += report.new
-            demoted_seats += report.demoted
+            counts["synced"] += 1
+            counts["new"] += report.new
+            counts["demoted"] += report.demoted
+            # Dormant is counted only for groups we actually synced: a retired or
+            # migrated row is not a live quiet group, and counting it would
+            # double-report the same groups the retirement buckets already name.
+            if row["is_stale"] and not row["has_paying_admin"]:
+                counts["dormant"] += 1
 
-    await asyncio.gather(*(sync_one(row["group_id"]) for row in rows))
-    summary = {
-        "synced": synced,
-        "failed": failed,
-        "new": new_seats,
-        "demoted": demoted_seats,
-        "total": len(rows),
-    }
+    await asyncio.gather(*(sync_one(row) for row in rows))
+    summary = {**counts, "total": len(rows)}
     logger.info(f"sweep_group_administrators: {summary}")
     return summary
 

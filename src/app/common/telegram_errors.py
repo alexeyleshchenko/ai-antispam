@@ -4,6 +4,7 @@ import asyncpg
 from aiogram.exceptions import (
     TelegramBadRequest,
     TelegramForbiddenError,
+    TelegramMigrateToChat,
     TelegramNetworkError,
     TelegramNotFound,
     TelegramServerError,
@@ -68,6 +69,38 @@ def is_group_inaccessible_error(error: Exception) -> bool:
         return _error_message_contains(error, _INACCESSIBLE_MESSAGE_MARKERS)
     return False
 
+
+# The bot IS in the chat and the chat exists; it merely lacks the right to
+# enumerate members. Deliberately NOT folded into `_INACCESSIBLE_MESSAGE_MARKERS`,
+# whose markers do not contain this string and whose predicate drives RETIREMENT:
+# a rights error must never retire a paying group (it is routed to the no-rights
+# grace flow instead, which notifies the admins before anything is abandoned).
+_MEMBER_LIST_INACCESSIBLE_MARKERS = ("member list is inaccessible",)
+
+def is_member_list_inaccessible_error(error: Exception) -> bool:
+    """True when Telegram refuses the admin list because the bot cannot read members.
+
+    The group is alive and the bot is still in it; it has lost the member-list
+    right (or was demoted). The correct response is to start the no-rights grace
+    clock, never to retire the row — see `_MEMBER_LIST_INACCESSIBLE_MARKERS`.
+    """
+    if not isinstance(error, TelegramBadRequest):
+        return False
+    return _error_message_contains(error, _MEMBER_LIST_INACCESSIBLE_MARKERS)
+
+def migrate_target_id(error: Exception) -> int | None:
+    """The new supergroup id when Telegram reports an upgrade, else None.
+
+    `TelegramMigrateToChat` is NOT a `TelegramBadRequest` — it subclasses
+    `TelegramAPIError` directly — so `is_group_inaccessible_error` returns False
+    for it and a guard written against `TelegramBadRequest` here would never
+    match. That would make the migration branch dead code that reads as correct,
+    and the upgraded group would then be reported as an unexplained failure
+    forever.
+    """
+    if isinstance(error, TelegramMigrateToChat):
+        return error.migrate_to_chat_id
+    return None
 
 def is_permission_error(error: Exception) -> bool:
     """True when the bot lacks admin rights for delete/ban (still in the group)."""

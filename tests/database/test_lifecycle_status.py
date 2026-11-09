@@ -166,9 +166,11 @@ async def test_update_group_admins_reactivates_paused_group(
             return await self._inner.__aexit__(*exc)
 
     async with clean_db.acquire() as conn:
+        # D6b: a row retired by the sweep carries bot_removed_at; re-add must
+        # clear it, not just the no-rights stamp.
         await conn.execute(
-            "INSERT INTO groups (group_id, status, no_rights_detected_at) "
-            "VALUES ($1, 'paused', CURRENT_TIMESTAMP)",
+            "INSERT INTO groups (group_id, status, no_rights_detected_at, bot_removed_at) "
+            "VALUES ($1, 'paused', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
             group_id,
         )
         await conn.execute(
@@ -187,11 +189,13 @@ async def test_update_group_admins_reactivates_paused_group(
     # Row is active, no_rights_detected_at cleared
     async with clean_db.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT status, no_rights_detected_at FROM groups WHERE group_id = $1",
+            "SELECT status, no_rights_detected_at, bot_removed_at "
+            "FROM groups WHERE group_id = $1",
             group_id,
         )
         assert row["status"] == "active"
         assert row["no_rights_detected_at"] is None
+        assert row["bot_removed_at"] is None
         # Reactivation event written
         ev = await conn.fetchrow(
             "SELECT action, reason FROM entity_events "
@@ -203,9 +207,11 @@ async def test_update_group_admins_reactivates_paused_group(
 
     # SQL spy: the reactivation UPDATE was actually issued (not skipped)
     assert any(
-        "SET status" in s and "no_rights_detected_at = NULL" in s
+        "SET status" in s
+        and "no_rights_detected_at = NULL" in s
+        and "bot_removed_at = NULL" in s
         for s in spy.statements
-    ), f"reactivation UPDATE missing; got:\n{spy.statements}"
+    ), f"reactivation UPDATE missing a clear; got:\n{spy.statements}"
 
 
 @pytest.mark.asyncio

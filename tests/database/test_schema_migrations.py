@@ -68,7 +68,7 @@ LEGACY_DDL = (
 
 # The columns #108 and #130 add, by table.
 ADDED_COLUMNS = {
-    "groups": {"bot_added_at", "bot_removed_at"},
+    "groups": {"bot_added_at", "bot_removed_at", "migrated_to_group_id"},
     "approved_members": {"trust_source", "trusted_until"},
     "administrators": {"activated_at"},
     "group_administrators": {"is_registered", "is_admin_now"},

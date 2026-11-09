@@ -84,7 +84,8 @@ async def create_schema(conn: asyncpg.Connection):
                 last_active TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 no_rights_detected_at TIMESTAMPTZ,
                 bot_added_at TIMESTAMPTZ,
-                bot_removed_at TIMESTAMPTZ
+                bot_removed_at TIMESTAMPTZ,
+                migrated_to_group_id BIGINT
             );
 
             -- Entity lifecycle events (append-only audit log, deletion-policy E+C)

@@ -1,8 +1,13 @@
 """Unit tests for the unified scheduled jobs runner (metadata heal wiring)."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramMigrateToChat,
+)
 
 from app.background_jobs.scheduled_tasks import run_scheduled_jobs
 
@@ -91,10 +96,29 @@ async def test_sweep_counts_a_failing_group_and_keeps_sweeping(
     assert summary == {
         "synced": 2,
         "failed": 1,
+        "retired": 0,
+        "migrated": 0,
+        "no_rights": 0,
+        "dormant": 0,
         "new": 4,
         "demoted": 0,
         "total": 3,
     }, summary
+
+    # D4 positive control: an error no predicate claims stays LOUD and must not
+    # be "handled" by touching the row. This is the whole point of the
+    # classifier — a real defect must not be laundered into a lifecycle event.
+    async with clean_db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT status, no_rights_detected_at FROM groups WHERE group_id = $1",
+            bad,
+        )
+        events = await conn.fetch(
+            "SELECT id FROM entity_events WHERE entity_id = $1", bad
+        )
+    assert row["status"] == "active"
+    assert row["no_rights_detected_at"] is None
+    assert events == []
 
 
 @pytest.mark.asyncio
@@ -175,3 +199,303 @@ async def test_sweep_respects_the_limit(patched_db_conn, clean_db):
 
     assert len(calls) == 2
     assert summary["total"] == 2
+
+
+# --- #130: the sweep classifies a failure instead of only counting it --------
+
+GONE = TelegramBadRequest(method=MagicMock(), message="Bad Request: chat not found")
+NO_RIGHTS = TelegramBadRequest(
+    method=MagicMock(), message="Bad Request: member list is inaccessible"
+)
+KICKED = TelegramForbiddenError(
+    method=MagicMock(), message="Forbidden: bot was kicked from the group chat"
+)
+MOVED = TelegramMigrateToChat(
+    method=MagicMock(),
+    message="Bad Request: group chat was upgraded to a supergroup chat",
+    migrate_to_chat_id=-1003721264646,
+)
+
+
+async def _seed_group(clean_db, group_id, *, last_active="2026-11-01 00:00:00"):
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO groups (group_id, title, status, moderation_enabled, "
+            "last_active) VALUES ($1, 'g', 'active', 1, $2)",
+            group_id,
+            last_active,
+        )
+
+
+async def _seed_seat(clean_db, group_id, admin_id, *, registered=False, credits=0):
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO administrators (admin_id, credits) VALUES ($1, $2)",
+            admin_id,
+            credits,
+        )
+        await conn.execute(
+            "INSERT INTO group_administrators (group_id, admin_id, is_registered) "
+            "VALUES ($1, $2, $3)",
+            group_id,
+            admin_id,
+            registered,
+        )
+
+
+@pytest.mark.asyncio
+async def test_sweep_retires_a_chat_not_found_group(patched_db_conn, clean_db):
+    """A chat Telegram says is gone is RETIRED — status only, roster intact (D1)."""
+    from app.database.group_operations import (
+        SyncReport,
+        sweep_group_administrators,
+    )
+
+    group_id, admin_id = -1001400021, 1400021
+    await _seed_group(clean_db, group_id)
+    await _seed_seat(clean_db, group_id, admin_id)
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO approved_members (group_id, member_id) VALUES ($1, $2)",
+            group_id,
+            admin_id,
+        )
+
+    async def fake_sync(chat_id, *, apply):
+        raise GONE
+
+    with patch(
+        "app.database.group_operations.sync_group_administrators",
+        side_effect=fake_sync,
+    ):
+        summary = await sweep_group_administrators()
+
+    assert summary["retired"] == 1
+    assert summary["failed"] == 0
+
+    async with clean_db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT status, bot_removed_at, migrated_to_group_id FROM groups "
+            "WHERE group_id = $1",
+            group_id,
+        )
+        events = await conn.fetch(
+            "SELECT action, reason FROM entity_events WHERE entity_id = $1", group_id
+        )
+        seats = await conn.fetch(
+            "SELECT admin_id FROM group_administrators WHERE group_id = $1", group_id
+        )
+        members = await conn.fetch(
+            "SELECT member_id FROM approved_members WHERE group_id = $1", group_id
+        )
+
+    assert row["status"] == "left"
+    assert row["bot_removed_at"] is not None
+    assert row["migrated_to_group_id"] is None
+    assert len(events) == 1
+    assert events[0]["action"] == "group_retired"
+    assert events[0]["reason"] == "sweep_inaccessible"
+    # D1: retirement is a STATUS, not a purge — billing links survive
+    assert [s["admin_id"] for s in seats] == [admin_id]
+    assert [m["member_id"] for m in members] == [admin_id]
+
+
+@pytest.mark.asyncio
+async def test_sweep_migrates_an_upgraded_group(patched_db_conn, clean_db):
+    """A Telegram upgrade is MIGRATED, not retired: the new id inherits the identity."""
+    from app.database.group_operations import (
+        SyncReport,
+        sweep_group_administrators,
+    )
+
+    old_id, new_id, admin_id = -1001400031, MOVED.migrate_to_chat_id, 1400031
+    await _seed_group(clean_db, old_id)
+    await _seed_seat(clean_db, old_id, admin_id, registered=True)
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            "UPDATE groups SET bot_added_at = '2026-10-01 12:00:00' "
+            "WHERE group_id = $1",
+            old_id,
+        )
+        await conn.execute(
+            "INSERT INTO approved_members (group_id, member_id) VALUES ($1, $2)",
+            old_id,
+            admin_id,
+        )
+
+    async def fake_sync(chat_id, *, apply):
+        raise MOVED
+
+    with patch(
+        "app.database.group_operations.sync_group_administrators",
+        side_effect=fake_sync,
+    ):
+        summary = await sweep_group_administrators()
+
+    assert summary["migrated"] == 1
+    assert summary["retired"] == 0
+
+    async with clean_db.acquire() as conn:
+        old_row = await conn.fetchrow(
+            "SELECT status, migrated_to_group_id FROM groups WHERE group_id = $1",
+            old_id,
+        )
+        new_row = await conn.fetchrow(
+            "SELECT bot_added_at, moderation_enabled FROM groups WHERE group_id = $1",
+            new_id,
+        )
+        new_seats = await conn.fetch(
+            "SELECT admin_id, is_registered FROM group_administrators "
+            "WHERE group_id = $1",
+            new_id,
+        )
+        old_seats = await conn.fetch(
+            "SELECT admin_id FROM group_administrators WHERE group_id = $1", old_id
+        )
+
+    assert old_row["status"] == "left"
+    assert old_row["migrated_to_group_id"] == new_id
+    assert new_row is not None
+    # Q2: verbatim, not NOW() — a fresh 72 h would re-grant trust on unchanged
+    # evidence, and NULL would kill the pre-existing window permanently.
+    assert str(new_row["bot_added_at"]).startswith("2026-10-01 12:00:00")
+    assert bool(new_row["moderation_enabled"]) is True
+    assert [s["admin_id"] for s in new_seats] == [admin_id]
+    assert bool(new_seats[0]["is_registered"]) is True
+    # The old roster is not stolen, only copied
+    assert [s["admin_id"] for s in old_seats] == [admin_id]
+
+
+@pytest.mark.asyncio
+async def test_sweep_flags_member_list_inaccessible_without_retiring(
+    patched_db_conn, clean_db
+):
+    """D2: a rights error is NOT absence — the grace flow decides, not the sweep."""
+    from app.database.group_operations import sweep_group_administrators
+
+    group_id = -1001400041
+    await _seed_group(clean_db, group_id)
+
+    async def fake_sync(chat_id, *, apply):
+        raise NO_RIGHTS
+
+    with patch(
+        "app.database.group_operations.sync_group_administrators",
+        side_effect=fake_sync,
+    ):
+        summary = await sweep_group_administrators()
+
+    assert summary["no_rights"] == 1
+    assert summary["retired"] == 0
+
+    async with clean_db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT status, no_rights_detected_at FROM groups WHERE group_id = $1",
+            group_id,
+        )
+        events = await conn.fetch(
+            "SELECT id FROM entity_events WHERE entity_id = $1", group_id
+        )
+
+    assert row["no_rights_detected_at"] is not None
+    assert row["status"] == "active"
+    assert events == []
+
+
+@pytest.mark.asyncio
+async def test_sweep_retires_a_kicked_group(patched_db_conn, clean_db):
+    """The ForbiddenError leg reaches the same predicate by a different class."""
+    from app.database.group_operations import sweep_group_administrators
+
+    group_id = -1001400051
+    await _seed_group(clean_db, group_id)
+
+    async def fake_sync(chat_id, *, apply):
+        raise KICKED
+
+    with patch(
+        "app.database.group_operations.sync_group_administrators",
+        side_effect=fake_sync,
+    ):
+        summary = await sweep_group_administrators()
+
+    assert summary["retired"] == 1
+
+    async with clean_db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT status FROM groups WHERE group_id = $1", group_id
+        )
+    assert row["status"] == "left"
+
+
+@pytest.mark.asyncio
+async def test_sweep_second_run_is_quiet(patched_db_conn, clean_db):
+    """Retirement takes the row out of the active set — the next run does not repeat it."""
+    from app.database.group_operations import sweep_group_administrators
+
+    group_id = -1001400061
+    await _seed_group(clean_db, group_id)
+
+    async def fake_sync(chat_id, *, apply):
+        raise GONE
+
+    with patch(
+        "app.database.group_operations.sync_group_administrators",
+        side_effect=fake_sync,
+    ):
+        first = await sweep_group_administrators()
+        second = await sweep_group_administrators()
+
+    assert first["retired"] == 1
+    assert second["total"] == 0
+    assert second["retired"] == 0
+    assert second["failed"] == 0
+
+    async with clean_db.acquire() as conn:
+        events = await conn.fetch(
+            "SELECT id FROM entity_events WHERE entity_id = $1", group_id
+        )
+    assert len(events) == 1
+
+
+@pytest.mark.asyncio
+async def test_sweep_counts_dormant_only_for_synced_groups(patched_db_conn, clean_db):
+    """Dormant = quiet AND unpaid, and only for groups the sweep actually synced."""
+    from app.database.group_operations import (
+        SyncReport,
+        sweep_group_administrators,
+    )
+
+    quiet_unpaid, quiet_paid, failing = -1001400071, -1001400072, -1001400073
+    old = "2026-01-01 00:00:00"  # >90 days before any plausible run date
+    await _seed_group(clean_db, quiet_unpaid, last_active=old)
+    await _seed_group(clean_db, quiet_paid, last_active=old)
+    await _seed_seat(clean_db, quiet_paid, 1400072, registered=True, credits=50)
+    await _seed_group(clean_db, failing, last_active=old)
+
+    async def fake_sync(chat_id, *, apply):
+        if chat_id == failing:
+            raise RuntimeError("kaboom")
+        return SyncReport(
+            chat_id=chat_id,
+            title="g",
+            telegram=1,
+            known=1,
+            new=0,
+            demoted=0,
+            applied=apply,
+        )
+
+    with patch(
+        "app.database.group_operations.sync_group_administrators",
+        side_effect=fake_sync,
+    ):
+        summary = await sweep_group_administrators()
+
+    # The paid quiet group is NOT dormant: it is a live customer, not dead weight
+    assert summary["dormant"] == 1
+    # The failing group is counted as failed, never folded into a lifecycle bucket
+    assert summary["retired"] == 0
+    assert summary["migrated"] == 0
+    assert summary["no_rights"] == 0
+    assert summary["failed"] == 1

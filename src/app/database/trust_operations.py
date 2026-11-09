@@ -27,6 +27,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 from ..common.utils import load_config
+from .models import GroupStatus
 from .postgres_connection import get_pool
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,10 @@ ALTER TABLE groups ADD COLUMN IF NOT EXISTS bot_added_at TIMESTAMPTZ
 
 GROUPS_BOT_REMOVED_AT_DDL = """
 ALTER TABLE groups ADD COLUMN IF NOT EXISTS bot_removed_at TIMESTAMPTZ
+"""
+
+GROUPS_MIGRATED_TO_DDL = """
+ALTER TABLE groups ADD COLUMN IF NOT EXISTS migrated_to_group_id BIGINT
 """
 
 APPROVED_MEMBERS_TRUST_SOURCE_DDL = """
@@ -169,6 +174,7 @@ async def ensure_trust_tables(conn) -> None:
     await conn.execute(MEMBER_JOINS_INDEX_DDL)
     await conn.execute(GROUPS_BOT_ADDED_AT_DDL)
     await conn.execute(GROUPS_BOT_REMOVED_AT_DDL)
+    await conn.execute(GROUPS_MIGRATED_TO_DDL)
     await conn.execute(APPROVED_MEMBERS_TRUST_SOURCE_DDL)
     await conn.execute(APPROVED_MEMBERS_TRUSTED_UNTIL_DDL)
     await conn.execute(GROUP_ADMIN_IS_REGISTERED_DDL)
@@ -234,15 +240,29 @@ async def record_bot_added(group_id: int) -> None:
         )
 
 async def record_bot_removed(group_id: int) -> None:
-    """Stamp the bot removal instant. A re-add clears it via `record_bot_added`."""
+    """Stamp the removal instant AND retire the row.
+
+    The removal event is the one observation that needs no sweep to confirm:
+    the bot is no longer in the chat, so the group is `left` from that instant
+    (D6a). Retiring here is what stops the next startup roster sweep from
+    re-probing a chat we already know we are not in.
+
+    `$N` appears in ascending text order below because the SQLite test
+    adapter rewrites placeholders positionally (same trap as _retire_group).
+
+    `bot_added_at` is untouched, and a re-add clears `bot_removed_at` via
+    `record_bot_added` while `update_group_admins` clears it too (D6b) — the
+    stamp means "removed at", not "ever removed".
+    """
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
             UPDATE groups
-            SET bot_removed_at = NOW()
-            WHERE group_id = $1
+            SET bot_removed_at = NOW(), status = $1
+            WHERE group_id = $2
             """,
+            GroupStatus.LEFT.value,
             group_id,
         )
 

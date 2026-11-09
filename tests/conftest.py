@@ -378,7 +378,8 @@ async def create_sqlite_schema(conn):
             last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             no_rights_detected_at TIMESTAMP,
             bot_added_at TIMESTAMP,
-            bot_removed_at TIMESTAMP
+            bot_removed_at TIMESTAMP,
+            migrated_to_group_id INTEGER
         );
     """)
 

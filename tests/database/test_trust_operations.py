@@ -274,3 +274,46 @@ async def test_candidate_fails_closed_on_each_gap(patched_db_conn, clean_db):
             "UPDATE coverage_state SET continuous_since = $1 WHERE id = 1", _now()
         )
     assert await is_pre_existing_candidate(GROUP_ID, MEMBER_ID) is False
+
+@pytest.mark.asyncio
+async def test_record_bot_removed_retires_the_row(patched_db_conn, clean_db):
+    """D6a: the removal event retires the row, and keeps the paying-admin link.
+
+    Retiring here is what stops the next startup roster sweep from re-probing a
+    chat we already know the bot is not in — the ten standing warnings this
+    design exists to remove. `cleanup_group_data` is NOT used: retirement is an
+    observation, so the roster must survive for billing and for a re-add (D1).
+    """
+    async with clean_db.acquire() as conn:
+        await _insert_group(conn)
+        await conn.execute(
+            "INSERT INTO administrators (admin_id) VALUES ($1)", 9001
+        )
+        await conn.execute(
+            "INSERT INTO group_administrators (group_id, admin_id, is_registered) "
+            "VALUES ($1, $2, 1)",
+            GROUP_ID,
+            9001,
+        )
+
+    await record_bot_added(GROUP_ID)
+    before = await get_group_bot_state(GROUP_ID)
+    assert before["bot_added_at"] is not None
+
+    await record_bot_removed(GROUP_ID)
+
+    async with clean_db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT status, bot_removed_at, bot_added_at FROM groups WHERE group_id = $1",
+            GROUP_ID,
+        )
+        assert row["status"] == "left", "removal must retire the row (D6a)"
+        assert row["bot_removed_at"] is not None
+        # bot_added_at is the trust window's origin; a removal must not erase it.
+        assert row["bot_added_at"] is not None
+
+        seat = await conn.fetchrow(
+            "SELECT admin_id FROM group_administrators WHERE group_id = $1",
+            GROUP_ID,
+        )
+        assert seat is not None, "retirement must keep the roster (D1)"

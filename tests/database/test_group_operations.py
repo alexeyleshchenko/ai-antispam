@@ -22,7 +22,9 @@ from app.database import (
     is_moderation_enabled,
     is_trusted_member,
     mark_admins_not_admin,
+    migrate_group,
     refund_credits,
+    retire_group,
     remove_member_from_group,
     seed_administrator_row,
     set_group_moderation,
@@ -1178,3 +1180,228 @@ async def test_get_group_costs_the_same_number_of_queries(patched_db_conn, clean
     assert (
         sum("group_administrators" in query for query in counting.queries) == 1
     )
+
+
+# --- retire_group: observation, not cleanup (D1/D7) -------------------------
+
+
+async def _seed_retirable(clean_db, group_id: int, admin_id: int) -> None:
+    """An active group with one roster seat and one approved member."""
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO groups (group_id, title, status) VALUES ($1, 'Retirable', 'active')",
+            group_id,
+        )
+        await conn.execute("INSERT INTO administrators (admin_id) VALUES ($1)", admin_id)
+        await conn.execute(
+            "INSERT INTO group_administrators (group_id, admin_id, is_registered) "
+            "VALUES ($1, $2, 0)",
+            group_id,
+            admin_id,
+        )
+        await conn.execute(
+            "INSERT INTO approved_members (group_id, member_id) VALUES ($1, $2)",
+            group_id,
+            admin_id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_retire_group_is_idempotent_and_emits_one_event(
+    patched_db_conn, clean_db
+):
+    """Second retirement is a no-op: no second event, no moved stamp (D7)."""
+    group_id, admin_id = -1009101, 9101
+    await _seed_retirable(clean_db, group_id, admin_id)
+
+    assert await retire_group(group_id, reason="sweep_inaccessible") is True
+
+    async with clean_db.acquire() as conn:
+        first = await conn.fetchrow(
+            "SELECT status, bot_removed_at FROM groups WHERE group_id = $1", group_id
+        )
+
+    assert await retire_group(group_id, reason="sweep_inaccessible") is False
+
+    async with clean_db.acquire() as conn:
+        after = await conn.fetchrow(
+            "SELECT status, bot_removed_at FROM groups WHERE group_id = $1", group_id
+        )
+        events = await conn.fetch(
+            "SELECT action, reason FROM entity_events "
+            "WHERE entity_type = 'group' AND entity_id = $1",
+            group_id,
+        )
+
+    assert first["status"] == "left"
+    assert first["bot_removed_at"] is not None  # the retire stamps, it does not just flip status
+    assert after["status"] == "left"
+    # The stamp is COALESCE'd, so a re-retire cannot move it.
+    assert after["bot_removed_at"] == first["bot_removed_at"]
+    assert len(events) == 1
+    assert events[0]["action"] == "group_retired"
+    assert events[0]["reason"] == "sweep_inaccessible"
+
+
+@pytest.mark.asyncio
+async def test_retire_group_refuses_a_missing_group(patched_db_conn, clean_db):
+    """A group with no row has nothing to retire: False, and no event."""
+    missing = -1009102
+
+    assert await retire_group(missing, reason="sweep_inaccessible") is False
+
+    async with clean_db.acquire() as conn:
+        events = await conn.fetch(
+            "SELECT 1 FROM entity_events WHERE entity_id = $1", missing
+        )
+        row = await conn.fetchrow(
+            "SELECT 1 FROM groups WHERE group_id = $1", missing
+        )
+    assert events == []
+    assert row is None
+
+
+@pytest.mark.asyncio
+async def test_retire_group_keeps_the_roster(patched_db_conn, clean_db):
+    """D1: the paying-admin link survives — this is NOT cleanup_group_data."""
+    group_id, admin_id = -1009103, 9103
+    await _seed_retirable(clean_db, group_id, admin_id)
+
+    assert await retire_group(group_id, reason="sweep_inaccessible") is True
+
+    async with clean_db.acquire() as conn:
+        seats = await conn.fetch(
+            "SELECT admin_id, is_registered FROM group_administrators WHERE group_id = $1",
+            group_id,
+        )
+        members = await conn.fetch(
+            "SELECT member_id FROM approved_members WHERE group_id = $1", group_id
+        )
+        # last_active is message activity, not lifecycle: it must not move (D5)
+        row = await conn.fetchrow(
+            "SELECT status, last_active, created_at FROM groups WHERE group_id = $1",
+            group_id,
+        )
+
+    assert len(seats) == 1
+    assert seats[0]["admin_id"] == admin_id
+    assert bool(seats[0]["is_registered"]) is False  # billing flag preserved
+    assert [m["member_id"] for m in members] == [admin_id]
+    assert row["status"] == "left"
+
+
+# --- migrate_group: identity + roster, never the caches (D3) ----------------
+
+
+@pytest.mark.asyncio
+async def test_migrate_group_moves_roster_and_retires_the_old_row(
+    patched_db_conn, clean_db
+):
+    """The upgrade: new row carries the old lifecycle, roster moves, old retires."""
+    old_id, new_id, admin_id = -1009201, -1003721264646, 9201
+
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO groups (group_id, title, username, moderation_enabled, "
+            "status, bot_added_at) "
+            "VALUES ($1, 'Old', 'oldchan', 1, 'active', '2026-10-01 12:00:00')",
+            old_id,
+        )
+        await conn.execute("INSERT INTO administrators (admin_id) VALUES ($1)", admin_id)
+        await conn.execute(
+            "INSERT INTO group_administrators (group_id, admin_id, is_registered) "
+            "VALUES ($1, $2, 1)",
+            old_id,
+            admin_id,
+        )
+        await conn.execute(
+            "INSERT INTO approved_members (group_id, member_id, trust_source) "
+            "VALUES ($1, $2, 'pre_existing')",
+            old_id,
+            admin_id,
+        )
+
+    assert await migrate_group(old_id, new_id) is True
+
+    async with clean_db.acquire() as conn:
+        new_row = await conn.fetchrow(
+            "SELECT * FROM groups WHERE group_id = $1", new_id
+        )
+        old_row = await conn.fetchrow(
+            "SELECT * FROM groups WHERE group_id = $1", old_id
+        )
+        new_seats = await conn.fetch(
+            "SELECT admin_id, is_registered FROM group_administrators WHERE group_id = $1",
+            new_id,
+        )
+        old_seats = await conn.fetch(
+            "SELECT admin_id FROM group_administrators WHERE group_id = $1", old_id
+        )
+        new_members = await conn.fetch(
+            "SELECT member_id, trust_source FROM approved_members WHERE group_id = $1",
+            new_id,
+        )
+
+    assert new_row is not None
+    assert new_row["title"] == "Old"
+    assert new_row["username"] == "oldchan"
+    assert bool(new_row["moderation_enabled"]) is True
+    # Q2: verbatim, so neither NULL (inference dead) nor NOW() (fresh 72 h)
+    assert new_row["bot_added_at"] is not None
+    assert new_row["bot_added_at"] == old_row["bot_added_at"]
+    # D3: rights at the destination are unprobed, so the grace clock starts clean
+    assert new_row["no_rights_detected_at"] is None
+
+    assert old_row["status"] == "left"
+    assert old_row["migrated_to_group_id"] == new_id
+
+    assert [s["admin_id"] for s in new_seats] == [admin_id]
+    assert bool(new_seats[0]["is_registered"]) is True  # billing link preserved
+    assert [s["admin_id"] for s in old_seats] == [admin_id]  # old roster untouched
+    assert [m["member_id"] for m in new_members] == [admin_id]
+    assert new_members[0]["trust_source"] == "pre_existing"
+
+
+@pytest.mark.asyncio
+async def test_migrate_group_does_not_clobber_an_existing_destination_row(
+    patched_db_conn, clean_db
+):
+    """D3: a row already at the destination keeps its state; seats are still added."""
+    old_id, new_id, admin_id = -1009202, -1003721264647, 9202
+
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO groups (group_id, title, moderation_enabled, status) "
+            "VALUES ($1, 'Old', 1, 'active')",
+            old_id,
+        )
+        await conn.execute(
+            "INSERT INTO groups (group_id, title, moderation_enabled, status) "
+            "VALUES ($1, 'dest', 0, 'paused')",
+            new_id,
+        )
+        await conn.execute("INSERT INTO administrators (admin_id) VALUES ($1)", admin_id)
+        await conn.execute(
+            "INSERT INTO group_administrators (group_id, admin_id, is_registered) "
+            "VALUES ($1, $2, 1)",
+            old_id,
+            admin_id,
+        )
+
+    assert await migrate_group(old_id, new_id) is True
+
+    async with clean_db.acquire() as conn:
+        dest = await conn.fetchrow(
+            "SELECT title, status, moderation_enabled FROM groups WHERE group_id = $1",
+            new_id,
+        )
+        seats = await conn.fetch(
+            "SELECT admin_id FROM group_administrators WHERE group_id = $1", new_id
+        )
+
+    # The destination's own lifecycle wins — this is the guard against DO UPDATE
+    assert dest["title"] == "dest"
+    assert dest["status"] == "paused"
+    assert bool(dest["moderation_enabled"]) is False
+    # ...but the missing seat is still added
+    assert [s["admin_id"] for s in seats] == [admin_id]
