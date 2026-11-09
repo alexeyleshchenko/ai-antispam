@@ -393,18 +393,24 @@ async def credits_available(chat_id: int) -> bool:
     no UPDATE. The production path refuses to moderate without credits
     (``message_insufficient_credits``), so a dry-run that ignored the balance
     would over-state the delete list.
+
+    The join is the shared BILLING predicate, imported rather than restated:
+    this function claimed to be a twin while carrying NEITHER flag, so a
+    stranger's balance read as payable and the dry run over-stated what
+    production would delete (measured 2026-11-09).
     """
     from app.database.constants import DELETE_PRICE
     from app.database.postgres_connection import get_pool
+    from app.database.roster_predicates import BILLABLE_SEAT
 
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            """
+            f"""
             SELECT max(a.credits) AS credits
             FROM administrators a
             JOIN group_administrators ga ON a.admin_id = ga.admin_id
-            WHERE ga.group_id = $1
+            WHERE ga.group_id = $1 AND {BILLABLE_SEAT}
             """,
             chat_id,
         )

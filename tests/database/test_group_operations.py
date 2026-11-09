@@ -24,8 +24,8 @@ from app.database import (
     mark_admins_not_admin,
     migrate_group,
     refund_credits,
-    retire_group,
     remove_member_from_group,
+    retire_group,
     seed_administrator_row,
     set_group_moderation,
     set_moderation_events,
@@ -1547,3 +1547,218 @@ async def test_upsert_group_admin_never_flips_a_registered_seat_back(
 
     assert bool(row["is_registered"]) is True
     assert bool(row["is_admin_now"]) is True
+
+
+# ---------------------------------------------------------------------------
+# Billing predicate — a seat that left must never be the payer (#140)
+#
+# `is_registered` alone was the billing link, so an admin who left the group
+# stayed chargeable: measured live 2026-11-09, 2 such seats, one of them
+# funding a group it left weeks earlier (last deduction 2026-11-08). The
+# predicate now also requires `is_admin_now`, and it is ONE constant so the
+# five billing sites cannot drift apart again — see `roster_predicates`.
+# ---------------------------------------------------------------------------
+
+
+async def _seed_seat(
+    conn,
+    group_id: int,
+    admin_id: int,
+    *,
+    credits: int,
+    registered: bool,
+    admin_now: bool,
+    moderation: bool = True,
+) -> None:
+    """One administrator row + one roster seat with both flags named."""
+    await conn.execute(
+        "INSERT INTO groups (group_id, moderation_enabled) VALUES ($1, $2) "
+        "ON CONFLICT DO NOTHING",
+        group_id,
+        1 if moderation else 0,
+    )
+    await conn.execute(
+        "INSERT INTO administrators (admin_id, credits) VALUES ($1, $2) "
+        "ON CONFLICT DO NOTHING",
+        admin_id,
+        credits,
+    )
+    await conn.execute(
+        "INSERT INTO group_administrators "
+        "(group_id, admin_id, is_registered, is_admin_now) VALUES ($1, $2, $3, $4)",
+        group_id,
+        admin_id,
+        1 if registered else 0,
+        1 if admin_now else 0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_deduction_skips_a_departed_admin_and_charges_the_current_one(
+    patched_db_conn, clean_db
+):
+    """The departed seat holds the biggest balance and must still not pay.
+
+    This is the exact live shape: `meoww_meow_meeeow` (85 credits, left the
+    group) outranked the sitting admin, so the group was funded by somebody who
+    could not see its `/stats` and had not been a member for weeks.
+    """
+    group_id = 881001
+    departed, current = 881011, 881012
+
+    async with clean_db.acquire() as conn:
+        await _seed_seat(
+            conn, group_id, departed, credits=500, registered=True, admin_now=False
+        )
+        await _seed_seat(
+            conn, group_id, current, credits=10, registered=True, admin_now=True
+        )
+
+    assert await deduct_credits_from_admins(group_id, 1) == current
+
+    async with clean_db.acquire() as conn:
+        balances = dict(
+            await conn.fetch(
+                "SELECT admin_id, credits FROM administrators "
+                "WHERE admin_id IN ($1, $2)",
+                departed,
+                current,
+            )
+        )
+    assert balances[departed] == 500, "the departed admin was charged"
+    assert balances[current] == 9
+
+
+@pytest.mark.asyncio
+async def test_deduction_refuses_when_only_a_departed_admin_has_credits(
+    patched_db_conn, clean_db
+):
+    """No billable seat means no charge — 0 is the insufficient-credits signal.
+
+    Deliberate: `try_deduct_credits` reads 0 as "cannot pay" and deactivates the
+    group, which is the honest outcome. Charging the departed admin instead
+    would keep a group alive on money from somebody who left.
+    """
+    group_id = 881002
+    departed = 881021
+
+    async with clean_db.acquire() as conn:
+        await _seed_seat(
+            conn, group_id, departed, credits=500, registered=True, admin_now=False
+        )
+
+    assert await deduct_credits_from_admins(group_id, 1) == 0
+
+    async with clean_db.acquire() as conn:
+        credits = await conn.fetchval(
+            "SELECT credits FROM administrators WHERE admin_id = $1", departed
+        )
+    assert credits == 500
+
+
+@pytest.mark.asyncio
+async def test_get_paying_admins_excludes_a_departed_admin(patched_db_conn, clean_db):
+    """Low-balance warnings must not chase somebody who left the group."""
+    group_id = 881003
+    departed, current = 881031, 881032
+
+    async with clean_db.acquire() as conn:
+        await _seed_seat(
+            conn, group_id, departed, credits=500, registered=True, admin_now=False
+        )
+        await _seed_seat(
+            conn, group_id, current, credits=5, registered=True, admin_now=True
+        )
+        # A roster-only stranger: never opened the bot, so never a payer.
+        await _seed_seat(
+            conn, group_id, 881033, credits=900, registered=False, admin_now=True
+        )
+
+    assert await get_paying_admins(group_id) == [current]
+
+
+@pytest.mark.asyncio
+async def test_paid_groups_query_ignores_a_departed_payer(patched_db_conn, clean_db):
+    """The silent-death scan must not call a group funded by an absent admin.
+
+    `get_paid_groups_with_moderation_off` is what reports "you are paying but
+    nothing is moderated". A departed payer would make that report fire for
+    somebody who cannot act on it, and would hide the real state (nobody can
+    fund the group) behind a false one.
+    """
+    from app.database.group_operations import get_paid_groups_with_moderation_off
+
+    group_id = 881004
+    departed, current = 881041, 881042
+
+    async with clean_db.acquire() as conn:
+        await _seed_seat(
+            conn,
+            group_id,
+            departed,
+            credits=500,
+            registered=True,
+            admin_now=False,
+            moderation=False,
+        )
+
+    assert group_id not in [
+        row["group_id"]
+        for row in await get_paid_groups_with_moderation_off()
+    ], "a departed admin's balance was read as funding"
+
+    # The same group with a SITTING admin funded becomes a real finding: the
+    # negative above is a property of the predicate, not of the group.
+    async with clean_db.acquire() as conn:
+        await _seed_seat(
+            conn,
+            group_id,
+            current,
+            credits=5,
+            registered=True,
+            admin_now=True,
+            moderation=False,
+        )
+
+    assert group_id in [
+        row["group_id"]
+        for row in await get_paid_groups_with_moderation_off()
+    ]
+
+
+def test_every_billing_site_composes_the_one_shared_predicate():
+    """The anti-drift guard: five sites, one constant, asserted by source.
+
+    The defect this closes was DRIFT, not duplication — `recover_failed`'s twin
+    documented itself as "same join, same ordering" while carrying neither flag.
+    A behaviour test cannot catch that (the twin's behaviour was tested; it was
+    the promise in its docstring that was false), so this asserts the shape:
+    every billing site must interpolate the constant, never spell the predicate
+    out again.
+    """
+    import inspect
+
+    from app.database import group_operations, roster_predicates
+
+    sites = {
+        "deduct_credits_from_admins": group_operations.deduct_credits_from_admins,
+        "get_paying_admins": group_operations.get_paying_admins,
+        "get_paid_groups_with_moderation_off": (
+            group_operations.get_paid_groups_with_moderation_off
+        ),
+    }
+    for name, func in sites.items():
+        source = inspect.getsource(func)
+        assert "BILLABLE_SEAT" in source or "PAYING_SEAT" in source, (
+            f"{name} restates the billing predicate instead of composing it"
+        )
+        assert "is_registered = TRUE" not in source, (
+            f"{name} still carries its own copy of the predicate"
+        )
+
+    # The two fragments themselves carry the flags the whole leg is about.
+    assert "is_admin_now = TRUE" in roster_predicates.BILLABLE_SEAT
+    assert "is_admin_now = TRUE" in roster_predicates.PAYING_SEAT
+    assert "is_admin_now" not in roster_predicates.REGISTERED_SEAT, (
+        "the ownership predicate must fail OPEN — see roster_predicates"
+    )

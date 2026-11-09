@@ -1,5 +1,7 @@
 import asyncpg
 
+from .roster_predicates import BILLABLE_SEAT
+
 
 async def drop_and_create_database(system_conn: asyncpg.Connection, db_name: str):
     """Drop and recreate the database with specific locale and encoding"""
@@ -302,8 +304,10 @@ async def create_procedures(conn: asyncpg.Connection):
     """Create stored procedures for the database"""
     try:
         # Create stored procedures
+        # f-string: {BILLABLE_SEAT} is the shared billing predicate, so this
+        # string must stay BRACE-FREE (verified: no `{`/`}` in the body today).
         await conn.execute(
-            """
+            f"""
             -- Update group administrators
             --
             -- DEAD CODE: nothing in the codebase CALLs this procedure (the
@@ -397,13 +401,16 @@ async def create_procedures(conn: asyncpg.Connection):
                 );
 
                 -- Enable moderation in all user's groups
+                -- BILLABLE seats only: a payer who is no longer an admin there
+                -- must not switch moderation back on, because nobody can fund
+                -- it — that is the silent-death state (#138).
                 UPDATE groups g
                 SET moderation_enabled = true,
                 last_active = NOW()
                 FROM group_administrators ga
                 WHERE g.group_id = ga.group_id
                 AND ga.admin_id = p_admin_id
-                AND ga.is_registered = TRUE;
+                AND {BILLABLE_SEAT};
             END;
             $$;
             """

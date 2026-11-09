@@ -3,6 +3,7 @@ from typing import Any, NamedTuple
 from .constants import INITIAL_CREDITS
 from .models import Administrator, ModerationMode
 from .postgres_connection import get_pool
+from .roster_predicates import BILLABLE_SEAT
 
 _MODE_CYCLE = (
     ModerationMode.NOTIFY,
@@ -176,11 +177,16 @@ async def describe_moderation_restore(admin_id: int) -> ModerationRestore:
     One query, because the three counts must come from the same join: reading
     them separately would let a concurrent leave change the population between
     the arms and report a combination that never existed.
+
+    The join is the BILLING predicate, and it must stay identical to the one
+    `process_successful_payment` flips: a payer who is no longer an admin there
+    gets no restore, so counting their seat would promise a flip the procedure
+    refuses (the #136 class — a count that disagrees with the write).
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            """
+            f"""
             SELECT
                 count(*) FILTER (
                     WHERE g.moderation_enabled IS NOT TRUE
@@ -191,7 +197,7 @@ async def describe_moderation_restore(admin_id: int) -> ModerationRestore:
                 count(*) AS registered_groups
             FROM groups g
             JOIN group_administrators ga ON ga.group_id = g.group_id
-            WHERE ga.admin_id = $1 AND ga.is_registered = TRUE
+            WHERE ga.admin_id = $1 AND {BILLABLE_SEAT}
             """,
             admin_id,
         )

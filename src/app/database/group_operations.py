@@ -23,6 +23,7 @@ from ..common.utils import format_chat_log, load_config
 from . import admin_operations
 from .models import Group, GroupStatus
 from .postgres_connection import get_pool
+from .roster_predicates import BILLABLE_SEAT, PAYING_SEAT, REGISTERED_SEAT
 
 logger = logging.getLogger(__name__)
 
@@ -142,16 +143,19 @@ async def is_moderation_enabled(group_id: int) -> bool:
 
 
 async def get_paying_admins(group_id: int) -> list[int]:
-    """Get list of admins with positive credits"""
+    """Get list of admins with positive credits.
+
+    A PAYING seat: opened the bot, still an admin, has a balance. Shared with
+    every other billing site — see `roster_predicates`.
+    """
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            """
+            f"""
             SELECT a.admin_id
             FROM administrators a
             JOIN group_administrators ga ON a.admin_id = ga.admin_id
-            WHERE ga.group_id = $1 AND a.credits > 0
-              AND ga.is_registered = TRUE
+            WHERE ga.group_id = $1 AND {PAYING_SEAT}
         """,
             group_id,
         )
@@ -166,13 +170,15 @@ async def deduct_credits_from_admins(group_id: int, amount: int) -> int:
     """
     pool = await get_pool()
     async with pool.acquire() as conn, conn.transaction():
-        # Find admin with highest balance
+        # Find admin with highest balance among BILLABLE seats: `is_registered`
+        # alone billed admins who had left the group (measured 2026-11-09: 2
+        # live seats, one funding a group it left weeks earlier).
         admin_row = await conn.fetchrow(
-            """
+            f"""
                 SELECT a.admin_id, a.credits
                 FROM administrators a
                 JOIN group_administrators ga ON a.admin_id = ga.admin_id
-                WHERE ga.group_id = $1 AND ga.is_registered = TRUE
+                WHERE ga.group_id = $1 AND {BILLABLE_SEAT}
                 ORDER BY a.credits DESC
                 LIMIT 1
             """,
@@ -577,9 +583,9 @@ async def get_admin_group_ids(admin_id: int) -> list[int]:
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            """
-            SELECT group_id FROM group_administrators
-            WHERE admin_id = $1 AND is_registered = TRUE
+            f"""
+            SELECT ga.group_id FROM group_administrators ga
+            WHERE ga.admin_id = $1 AND {REGISTERED_SEAT}
             """,
             admin_id,
         )
@@ -591,13 +597,13 @@ async def get_admin_groups(admin_id: int) -> list[dict]:
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            """
+            f"""
             SELECT g.group_id, g.title, g.moderation_enabled,
                    g.topic_description_short, g.topic_updated_at,
                    g.status
             FROM groups g
             JOIN group_administrators ga ON g.group_id = ga.group_id
-            WHERE ga.admin_id = $1 AND ga.is_registered = TRUE
+            WHERE ga.admin_id = $1 AND {REGISTERED_SEAT}
         """,
             admin_id,
         )
@@ -1560,8 +1566,7 @@ async def sweep_group_administrators(
                        FROM group_administrators ga
                        JOIN administrators a ON a.admin_id = ga.admin_id
                        WHERE ga.group_id = g.group_id
-                         AND ga.is_registered = TRUE
-                         AND a.credits > 0
+                         AND {PAYING_SEAT}
                    ) AS has_paying_admin
             FROM groups g
             WHERE g.status = 'active'
@@ -1713,7 +1718,7 @@ async def get_paid_groups_with_moderation_off() -> list[dict]:
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            """
+            f"""
             SELECT g.group_id,
                    g.title,
                    count(ga.admin_id) AS paying_admin_count,
@@ -1723,8 +1728,7 @@ async def get_paid_groups_with_moderation_off() -> list[dict]:
             JOIN administrators a ON a.admin_id = ga.admin_id
             WHERE g.status = $1
               AND g.moderation_enabled = false
-              AND ga.is_registered = TRUE
-              AND a.credits > 0
+              AND {PAYING_SEAT}
             GROUP BY g.group_id, g.title
             ORDER BY g.group_id
             """,
