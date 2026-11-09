@@ -126,6 +126,9 @@ async def test_sweep_counts_a_failing_group_and_keeps_sweeping(
         "rights_cleared": 0,
         "rights_unverified": 0,
         "total": 3,
+        # #144: the detection payload for a degraded administrator. Empty here
+        # because no probe in this test reports one.
+        "rights_degraded": [],
     }, summary
 
     # D4 positive control: an error no predicate claims stays LOUD and must not
@@ -736,3 +739,139 @@ async def test_rights_monitor_is_wired_into_the_daily_bundle():
         await run_scheduled_jobs()
 
     mock_monitor.assert_awaited_once()
+
+
+# --- #144: detection is one-shot, and the operator line is an ERROR ---------
+
+
+@pytest.mark.asyncio
+async def test_degraded_administrator_is_reported_once_then_never_again(
+    patched_db_conn, clean_db
+):
+    """Close condition 3: the DM rides the `NULL → NOW()` transition, not the sweep.
+
+    A group already flagged must produce NO new payload, or every daily sweep
+    would send the same customer message again.
+    """
+    from app.database.group_operations import (
+        SyncReport,
+        sweep_group_administrators,
+    )
+
+    group_id = -1002496127723
+    await _seed_group(clean_db, group_id)
+
+    async def fake_sync(chat_id, *, apply):
+        return SyncReport(
+            chat_id=chat_id,
+            title="блатные чупани",
+            telegram=1,
+            known=1,
+            new=0,
+            demoted=0,
+            applied=apply,
+        )
+
+    with (
+        patch(
+            "app.database.group_operations.sync_group_administrators",
+            side_effect=fake_sync,
+        ),
+        patch(
+            "app.database.group_operations.probe_bot_moderation_rights",
+            new_callable=AsyncMock,
+            return_value=_bot_admin(can_delete=True, can_restrict=False),
+        ),
+    ):
+        first = await sweep_group_administrators()
+        second = await sweep_group_administrators()
+
+    # First detection: one payload naming the missing right in UI vocabulary.
+    assert len(first["rights_degraded"]) == 1
+    assert first["rights_degraded"][0]["group_id"] == group_id
+    assert first["rights_degraded"][0]["missing"] == "Ban users"
+    assert first["rights_flagged"] == 1
+
+    # Second sweep: still flagged, but nothing to notify about.
+    assert second["rights_degraded"] == []
+    assert second["rights_flagged"] == 0
+
+
+@pytest.mark.asyncio
+async def test_plain_member_is_not_in_the_detection_payload(patched_db_conn, clean_db):
+    """The DM is for the degraded-administrator class only (HQ's narrowing).
+
+    A plain member already gets a message at the leave; a detection DM as well
+    would be a second customer message nobody asked for.
+    """
+    from app.database.group_operations import (
+        SyncReport,
+        sweep_group_administrators,
+    )
+
+    group_id = -1003078404548
+    await _seed_group(clean_db, group_id)
+
+    async def fake_sync(chat_id, *, apply):
+        return SyncReport(
+            chat_id=chat_id,
+            title="member group",
+            telegram=1,
+            known=1,
+            new=0,
+            demoted=0,
+            applied=apply,
+        )
+
+    with (
+        patch(
+            "app.database.group_operations.sync_group_administrators",
+            side_effect=fake_sync,
+        ),
+        patch(
+            "app.database.group_operations.probe_bot_moderation_rights",
+            new_callable=AsyncMock,
+            return_value=BotRights(
+                status="member", can_delete_messages=False, can_restrict_members=False
+            ),
+        ),
+    ):
+        summary = await sweep_group_administrators()
+
+    assert summary["rights_flagged"] == 1
+    assert summary["rights_degraded"] == []
+
+
+@pytest.mark.asyncio
+async def test_rights_detection_reaches_the_operator_as_an_error(
+    patched_db_conn, clean_db, caplog
+):
+    """Close condition 4: ERROR, because the Telegram handler sits at WARNING."""
+    import logging
+
+    from app.common.telegram_logging_handler import TelegramLogHandler
+    from app.database.group_operations import reconcile_bot_rights
+
+    # The receipt for "ERROR is enough": the handler drops anything below it.
+    # Read from a REAL handler, not from the source — the level is set in the
+    # constructor body (`super().__init__(level=WARNING)`), so an argument
+    # default would not show it.
+    handler = TelegramLogHandler(bot=MagicMock(), chat_id=1)
+    assert handler.level == logging.WARNING
+
+    group_id = -1002496127723
+    await _seed_group(clean_db, group_id)
+
+    with patch(
+        "app.database.group_operations.probe_bot_moderation_rights",
+        new_callable=AsyncMock,
+        return_value=_bot_admin(can_delete=False, can_restrict=True),
+    ):
+        with caplog.at_level(logging.INFO, logger="app.database.group_operations"):
+            result = await reconcile_bot_rights(group_id, clock_set=False)
+
+    assert result.started is True
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert errors, [r.getMessage() for r in caplog.records]
+    assert "can_delete_messages" in errors[0].getMessage()
+    assert str(group_id) in errors[0].getMessage()

@@ -124,7 +124,7 @@ async def test_administrator_without_rights_flags_the_clock(patched_db_conn, cle
     with _probe(_administrator(can_delete=False, can_restrict=False)):
         bucket = await reconcile_bot_rights(GROUP, clock_set=False)
 
-    assert bucket == "flagged"
+    assert bucket.bucket == "flagged"
     assert await _clock(clean_db) is not None
 
 
@@ -135,7 +135,7 @@ async def test_demoted_member_flags_the_clock(patched_db_conn, clean_db):
     with _probe(types.ChatMemberMember(user=_bot_user())):
         bucket = await reconcile_bot_rights(GROUP, clock_set=False)
 
-    assert bucket == "flagged"
+    assert bucket.bucket == "flagged"
     assert await _clock(clean_db) is not None
 
 
@@ -147,7 +147,7 @@ async def test_fully_privileged_clears_a_stale_clock(patched_db_conn, clean_db):
     with _probe(_administrator(can_delete=True, can_restrict=True)):
         bucket = await reconcile_bot_rights(GROUP, clock_set=True)
 
-    assert bucket == "cleared"
+    assert bucket.bucket == "cleared"
     assert await _clock(clean_db) is None
 
 
@@ -165,7 +165,7 @@ async def test_healthy_group_with_no_clock_writes_nothing(patched_db_conn, clean
     ):
         bucket = await reconcile_bot_rights(GROUP, clock_set=False)
 
-    assert bucket == "ok"
+    assert bucket.bucket == "ok"
     mock_clear.assert_not_awaited()
 
 
@@ -175,9 +175,13 @@ async def test_second_sweep_does_not_churn_the_clock(patched_db_conn, clean_db):
     await _seed_group(clean_db)
 
     with _probe(_administrator(can_delete=False, can_restrict=False)):
-        assert await reconcile_bot_rights(GROUP, clock_set=False) == "flagged"
+        assert (
+            await reconcile_bot_rights(GROUP, clock_set=False)
+        ).bucket == "flagged"
         first = await _clock(clean_db)
-        assert await reconcile_bot_rights(GROUP, clock_set=True) == "held"
+        assert (
+            await reconcile_bot_rights(GROUP, clock_set=True)
+        ).bucket == "held"
         second = await _clock(clean_db)
 
     assert first == second
@@ -198,7 +202,7 @@ async def test_probe_failure_never_reads_as_health(patched_db_conn, clean_db):
     ):
         bucket = await reconcile_bot_rights(GROUP, clock_set=True)
 
-    assert bucket == "unverified"
+    assert bucket.bucket == "unverified"
     # The stale clock SURVIVES: an unreadable answer is not a restoration.
     assert await _clock(clean_db) is not None
 
@@ -215,5 +219,5 @@ async def test_probe_failure_does_not_invent_a_flag(patched_db_conn, clean_db):
     ):
         bucket = await reconcile_bot_rights(GROUP, clock_set=False)
 
-    assert bucket == "unverified"
+    assert bucket.bucket == "unverified"
     assert await _clock(clean_db) is None

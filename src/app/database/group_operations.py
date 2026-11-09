@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 from datetime import UTC, datetime
-from typing import NamedTuple, cast
+from typing import Any, NamedTuple, cast
 
 from aiogram import types
 from aiogram.exceptions import (
@@ -529,11 +529,21 @@ async def migrate_group(old_id: int, new_id: int) -> bool:
     return changed
 
 
-async def set_no_rights_detected_at(group_id: int) -> None:
-    """Set no_rights_detected_at = NOW() only if currently NULL (first detection)."""
+async def set_no_rights_detected_at(group_id: int) -> bool:
+    """Start the no-rights clock, only on the first detection.
+
+    Returns True when THIS call made the `NULL → NOW()` transition, False when
+    the clock was already running.
+
+    The return is load-bearing (#144): the detection notification must fire
+    exactly once per clock, and "the write happened" is the only proof of that
+    which cannot race. A caller that inferred the transition from an earlier
+    read would send a second DM to a customer whenever two writers interleave,
+    and a duplicate customer message is the defect this flow exists to avoid.
+    """
     pool = await get_pool()
     async with pool.acquire() as conn:
-        await conn.execute(
+        result = await conn.execute(
             """
             UPDATE groups
             SET no_rights_detected_at = NOW()
@@ -541,6 +551,7 @@ async def set_no_rights_detected_at(group_id: int) -> None:
             """,
             group_id,
         )
+    return _affected_rows(result) > 0
 
 
 async def clear_no_rights_detected_at(group_id: int) -> None:
@@ -594,6 +605,27 @@ class BotRights(NamedTuple):
         ]
         return ", ".join(absent)
 
+    @property
+    def missing_human(self) -> str:
+        """The shortfall in the words Telegram's own UI uses (#144).
+
+        `missing` names the API fields, which is right for an operator log line
+        and wrong for the message an admin receives: nobody opens the
+        Administrators panel looking for `can_restrict_members`. This is the
+        same fact in the vocabulary of the checkbox they have to tick.
+        """
+        if self.status != "administrator":
+            return "administrator rights"
+        absent = [
+            label
+            for label, granted in (
+                ("Delete messages", self.can_delete_messages),
+                ("Ban users", self.can_restrict_members),
+            )
+            if not granted
+        ]
+        return " and ".join(absent)
+
 
 async def probe_bot_moderation_rights(group_id: int) -> BotRights:
     """Ask Telegram what the BOT ITSELF may do in this chat (issue #143).
@@ -633,7 +665,25 @@ async def probe_bot_moderation_rights(group_id: int) -> BotRights:
     )
 
 
-async def reconcile_bot_rights(group_id: int, *, clock_set: bool) -> str:
+class RightsReconciliation(NamedTuple):
+    """What `reconcile_bot_rights` did, and what it learned doing it (#144).
+
+    `bucket` is the summary counter. `rights` is the probe's answer, kept so a
+    caller can classify the failure WITHOUT a second API call — the detection
+    message has to name the missing right, and re-probing to find out would be
+    a second request per group per sweep.
+
+    `started` is True only when THIS call made the `NULL → NOW()` transition.
+    That is the notification trigger: one DM per detection, never one per
+    sweep, and never a DM for a group that was already flagged.
+    """
+
+    bucket: str
+    rights: BotRights | None
+    started: bool
+
+
+async def reconcile_bot_rights(group_id: int, *, clock_set: bool) -> RightsReconciliation:
     """Drive the no-rights clock from the bot's own rights (issue #143).
 
     `clock_set` is the row's `no_rights_detected_at IS NOT NULL`, read by the
@@ -662,28 +712,28 @@ async def reconcile_bot_rights(group_id: int, *, clock_set: bool) -> str:
             f"{type(exc).__name__}: {exc}; no_rights clock left "
             f"{'set' if clock_set else 'unset'}"
         )
-        return "unverified"
+        return RightsReconciliation("unverified", None, started=False)
 
     if rights.can_moderate:
         if not clock_set:
-            return "ok"
+            return RightsReconciliation("ok", rights, started=False)
         await clear_no_rights_detected_at(group_id)
         logger.info(
             f"bot-rights: {format_chat_log(group_id)} holds full moderation "
             "rights — no_rights clock cleared"
         )
-        return "cleared"
+        return RightsReconciliation("cleared", rights, started=False)
 
     if clock_set:
-        return "held"
-    await set_no_rights_detected_at(group_id)
+        return RightsReconciliation("held", rights, started=False)
+    started = await set_no_rights_detected_at(group_id)
     logger.error(
         f"bot-rights: {format_chat_log(group_id)} is advertised as moderated "
         f"but the bot cannot moderate it — {rights.missing}. No_rights clock "
         "started; the grace job notifies the admins and pauses the group on "
         "its own clock."
     )
-    return "flagged"
+    return RightsReconciliation("flagged", rights, started=started)
 
 
 async def get_groups_with_no_rights_past_grace(grace_days: int) -> list[int]:
@@ -1653,7 +1703,7 @@ DORMANT_AFTER_DAYS = 90
 
 async def sweep_group_administrators(
     concurrency: int = 5, limit: int = 500
-) -> dict[str, int]:
+) -> dict[str, Any]:
     """Re-sync every active group's roster from Telegram (the daily writer).
 
     The two event-driven writers (bot-add, `chat_member`) only fire while the
@@ -1728,6 +1778,7 @@ async def sweep_group_administrators(
             "rights_cleared": 0,
             "rights_unverified": 0,
             "total": 0,
+            "rights_degraded": [],
         }
 
     counts = {
@@ -1743,6 +1794,10 @@ async def sweep_group_administrators(
         "rights_cleared": 0,
         "rights_unverified": 0,
     }
+    # #144: groups whose bot is a DEGRADED ADMINISTRATOR, detected for the first
+    # time on this sweep. The grace job will never tell these admins anything
+    # (it never reaches them), so the message is owed here or nowhere.
+    degraded: list[dict] = []
     sem = asyncio.Semaphore(concurrency)
 
     async def act(group_id: int, exc: Exception) -> str:
@@ -1839,11 +1894,30 @@ async def sweep_group_administrators(
             rights = await reconcile_bot_rights(
                 group_id, clock_set=row["no_rights_detected_at"] is not None
             )
-            if rights == "flagged":
+            if rights.bucket == "flagged":
                 counts["rights_flagged"] += 1
-            elif rights == "cleared":
+                # #144: a NEW detection of the degraded-administrator class is
+                # the one event that gets a customer message, because this class
+                # never enters the grace job's leave branch and so would
+                # otherwise never be told. Collected here and sent by
+                # `background_jobs.no_rights` — this module cannot import the
+                # notification helpers (`common.notifications` imports THIS
+                # module), and the layering is the reason, not an accident.
+                if (
+                    rights.started
+                    and rights.rights is not None
+                    and rights.rights.status == "administrator"
+                ):
+                    degraded.append(
+                        {
+                            "group_id": group_id,
+                            "title": report.title,
+                            "missing": rights.rights.missing_human,
+                        }
+                    )
+            elif rights.bucket == "cleared":
                 counts["rights_cleared"] += 1
-            elif rights == "unverified":
+            elif rights.bucket == "unverified":
                 counts["rights_unverified"] += 1
             # Dormant is counted only for groups we actually synced: a retired or
             # migrated row is not a live quiet group, and counting it would
@@ -1852,8 +1926,14 @@ async def sweep_group_administrators(
                 counts["dormant"] += 1
 
     await asyncio.gather(*(sync_one(row) for row in rows))
-    summary = {**counts, "total": len(rows)}
-    logger.info(f"sweep_group_administrators: {summary}")
+    summary = {**counts, "total": len(rows), "rights_degraded": degraded}
+    # Log the COUNTS, not the payload: the degraded list carries group titles,
+    # and this line is the sweep's health summary, not its work order.
+    logger.info(
+        f"sweep_group_administrators: "
+        f"{ {k: v for k, v in summary.items() if k != 'rights_degraded'} } "
+        f"rights_degraded={len(degraded)}"
+    )
     return summary
 
 
