@@ -337,6 +337,70 @@ async def cleanup_group_data(
     )
 
 
+async def pause_group_preserving_data(
+    group_id: int,
+    reason: str,
+) -> bool:
+    """Pause a group WITHOUT destroying its mappings (#145). True if the row changed.
+
+    The third member of the family, and the one the no-rights hold needs:
+
+    * `cleanup_group_data` — status transition AND hard-deletes
+      `group_administrators` + `approved_members`. Right when the bot is leaving.
+    * `retire_group` / `_retire_group` — status transition, mappings kept,
+      but stamps `bot_removed_at`. Right when the chat is genuinely gone.
+    * this — status transition only. Right when the bot is STAYING but cannot
+      act: the mappings are the thing worth preserving (a re-add restores no
+      `approved_members`), and `bot_removed_at` would be a false record because
+      the bot never leaves.
+
+    `last_active` is deliberately NOT touched — it means last message activity.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        old_row = await conn.fetchrow(
+            "SELECT * FROM groups WHERE group_id = $1",
+            group_id,
+        )
+        if old_row is None:
+            logger.info(
+                f"pause_group_preserving_data: group {format_chat_log(group_id)} "
+                "not found — skipping"
+            )
+            return False
+
+        # $N in ascending text order (SQLite test adapter rewrites positionally).
+        result = await conn.execute(
+            """
+            UPDATE groups
+            SET status = $1
+            WHERE group_id = $2 AND status <> $3
+            """,
+            GroupStatus.PAUSED.value,
+            group_id,
+            GroupStatus.PAUSED.value,
+        )
+        if _affected_rows(result) == 0:
+            # Already paused: idempotent, and no second event (D7).
+            return False
+
+        await conn.execute(
+            """
+            INSERT INTO entity_events (entity_type, entity_id, action, reason, old_row)
+            VALUES ('group', $1, $2, $3, $4)
+            """,
+            group_id,
+            "group_paused",
+            reason,
+            json.dumps(dict(old_row), default=str),
+        )
+
+    logger.info(
+        f"Paused group {format_chat_log(group_id)} without leaving "
+        f"(mappings preserved, status={GroupStatus.PAUSED.value})"
+    )
+    return True
+
 async def _retire_group(
     conn,
     group_id: int,
@@ -1056,10 +1120,12 @@ async def update_group_admins(
             # "removed, then still removed" to anything that inspects it, and
             # `is_pre_existing_candidate` would see a removal it must distrust.
             # Issue #41: reactivation must ALSO restore moderation_enabled.
-            # A row with status != active can only have come from
-            # cleanup_group_data, i.e. the bot left the group — the low-balance
-            # leave disables moderation first (handle_deactivation), the
-            # no-rights leave leaves the flag alone. Either way the customer is
+            # A row with status != active has one of two provenances:
+            # `cleanup_group_data` (the bot left — the low-balance leave disables
+            # moderation first via handle_deactivation, the no-rights leave leaves
+            # the flag alone) or `pause_group_preserving_data` (#145: a protected
+            # channel held in place, bot still a member, moderation untouched).
+            # Either way the customer is
             # coming back and wants moderation. Without this, the row
             # reactivated to status=active with moderation_enabled=false and
             # `validation` dropped every message: bot present, rights intact,
@@ -1329,6 +1395,22 @@ async def get_protected_channel_ids() -> list[int]:
         "WHERE linked_channel_id IS NOT NULL"
     )
     return [row["linked_channel_id"] for row in rows]
+
+async def get_discussion_group_id(channel_id: int) -> int | None:
+    """Return the discussion group registered against `channel_id`, if any.
+
+    The reverse of `get_protected_channel_ids` (#145): a channel is protected
+    BECAUSE some group row names it as its linked channel, and the operator log
+    for a refused leave has to name that group — the channel row itself is
+    vestigial, and "we kept channel X" means nothing to a human without the
+    discussion group it keeps alive.
+    """
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT group_id FROM groups WHERE linked_channel_id = $1 LIMIT 1",
+        channel_id,
+    )
+    return row["group_id"] if row is not None else None
 
 
 async def heal_bare_group_rows(

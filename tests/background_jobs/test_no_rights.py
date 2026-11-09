@@ -9,6 +9,31 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from app.background_jobs.no_rights import leave_no_rights_groups
 
 
+@pytest.fixture(autouse=True)
+def _no_protected_channels_by_default():
+    """#145: the grace job now reads the protected-channel set once per run.
+
+    Default it to EMPTY so every pre-existing test keeps asserting exactly what
+    it asserted before — a non-protected group past grace still leaves. That
+    also makes the positive control implicit: if the guard ever disabled the
+    leave leg outright, these tests would fail. A test that exercises the
+    protected branch patches this itself, inside its own `with` block.
+    """
+    with (
+        patch(
+            "app.background_jobs.no_rights.get_protected_channel_ids",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
+            "app.background_jobs.no_rights.get_discussion_group_id",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+    ):
+        yield
+
+
 @pytest.mark.asyncio
 async def test_leave_no_rights_groups_clears_flag_when_rights_restored():
     """When bot has rights, clear_no_rights_detected_at is called and no leave."""

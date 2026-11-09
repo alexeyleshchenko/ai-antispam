@@ -35,7 +35,10 @@ from ..common.utils import (
 from ..database import get_admin, get_group
 from ..database.group_operations import (
     clear_no_rights_detected_at,
+    get_discussion_group_id,
     get_groups_with_no_rights_past_grace,
+    get_protected_channel_ids,
+    pause_group_preserving_data,
 )
 from ..i18n import resolve_lang, t
 
@@ -142,6 +145,10 @@ async def leave_no_rights_groups() -> None:
     bot_info = await bot.me()
     bot_user_id = bot_info.id
 
+    # #145: the protected set is read ONCE per run, not per group — it is one
+    # query and the set cannot change mid-run in a way that matters.
+    protected_channels = set(await get_protected_channel_ids())
+
     # Collect admin_id -> list of (group_id, display) for groups we leave
     admin_to_left_groups: dict[int, list[tuple[int, str]]] = {}
 
@@ -154,6 +161,41 @@ async def leave_no_rights_groups() -> None:
             username = getattr(chat, "username", None)
         except Exception:  # noqa: BLE001
             title = username = None
+
+        if group_id in protected_channels:
+            # #145: never leave a protected channel. A channel in the protected
+            # set is the linked channel of a discussion group the bot protects,
+            # so a leave cascades into losing that group — the same hazard
+            # `handle_channel_post` already refuses (Valeri trace / #34).
+            #
+            # STATUS-ONLY on purpose: `cleanup_group_data` hard-deletes
+            # `group_administrators` and `approved_members`, which is precisely
+            # what this hold exists to preserve (SV CHAT carries 58 approved
+            # members, and a re-add restores none of them). `retire_group` is
+            # equally wrong: it stamps `bot_removed_at`, false here because
+            # the bot never leaves.
+            discussion_group_id = await get_discussion_group_id(group_id)
+            await pause_group_preserving_data(
+                group_id,
+                reason="no_rights_protected_channel",
+            )
+            # Clear the clock so tomorrow's run stops re-enqueuing it. Clearing
+            # is what makes this one-shot; the row stays paused, so #138's close
+            # condition (`status != 'active'`) is still satisfied.
+            await clear_no_rights_detected_at(group_id)
+            # One-shot by construction, not by wording: both populations filter
+            # `status = 'active'` (grace job `get_groups_with_no_rights_past_grace`,
+            # sweep `sweep_group_administrators`), so the pause above removes this
+            # row from BOTH. The clock would be re-stamped otherwise — that was
+            # the 7-day loop the status-only write exists to end.
+            logger.warning(
+                f"NOT leaving protected channel {format_chat_log(group_id, title, username)}: "
+                f"it is the linked channel of discussion group {discussion_group_id}, "
+                "whose protection would end with the leave. "
+                "Status=paused, mappings preserved, clock cleared — terminal, "
+                "no further sweep will revisit it"
+            )
+            continue
 
         try:
             member = await bot.get_chat_member(group_id, bot_user_id)

@@ -8,6 +8,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from app.database import (
     Administrator,
     add_member,
+    cleanup_group_data,
     clear_no_rights_detected_at,
     deduct_credits_from_admins,
     get_admin_group_ids,
@@ -23,6 +24,7 @@ from app.database import (
     is_trusted_member,
     mark_admins_not_admin,
     migrate_group,
+    pause_group_preserving_data,
     refund_credits,
     remove_member_from_group,
     retire_group,
@@ -1762,3 +1764,117 @@ def test_every_billing_site_composes_the_one_shared_predicate():
     assert "is_admin_now" not in roster_predicates.REGISTERED_SEAT, (
         "the ownership predicate must fail OPEN — see roster_predicates"
     )
+
+
+@pytest.mark.asyncio
+async def test_pause_group_preserving_data_keeps_mappings(patched_db_conn, clean_db):
+    """#145 close condition 5: the hold pauses WITHOUT destroying mappings.
+
+    SV CLUB (the protected channel) and SV CHAT (its discussion group, 58
+    approved members) are seeded as they are live. Pausing the channel must
+    leave every mapping row in place and must NOT stamp `bot_removed_at`, since
+    the bot never leaves.
+
+    The second half is the positive control: `cleanup_group_data` — the path the
+    first version of this guard used — deletes exactly these rows. A test that
+    could not observe that destruction would be certifying nothing.
+    """
+    sv_club = -1002107631154
+    sv_chat = -1002021099836
+    admin_id = 882155584
+    approved = 58
+
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO administrators (admin_id, username, credits) VALUES ($1, 'sv', 67)",
+            admin_id,
+        )
+        # Each $N used ONCE: the SQLite test adapter rewrites $N -> ? in text
+        # order, so a reused $1 becomes two placeholders for one argument.
+        await conn.execute(
+            """
+            INSERT INTO groups (group_id, title, moderation_enabled, status, linked_channel_id)
+            VALUES ($1, 'SV CLUB', TRUE, 'active', $2),
+                   ($3, 'SV CHAT', TRUE, 'active', $4)
+            """,
+            sv_club,
+            sv_chat,
+            sv_chat,
+            sv_club,
+        )
+        await conn.execute(
+            "INSERT INTO group_administrators (group_id, admin_id) VALUES ($1, $2)",
+            sv_chat,
+            admin_id,
+        )
+        for member_id in range(1, approved + 1):
+            await conn.execute(
+                "INSERT INTO approved_members (group_id, member_id) VALUES ($1, $2)",
+                sv_chat,
+                member_id,
+            )
+
+    changed = await pause_group_preserving_data(
+        sv_club, reason="no_rights_protected_channel"
+    )
+    assert changed is True
+
+    async with clean_db.acquire() as conn:
+        club = await conn.fetchrow(
+            "SELECT status, moderation_enabled, bot_removed_at FROM groups WHERE group_id = $1",
+            sv_club,
+        )
+        chat = await conn.fetchrow(
+            "SELECT status, moderation_enabled, bot_removed_at FROM groups WHERE group_id = $1",
+            sv_chat,
+        )
+        roster = await conn.fetchval(
+            "SELECT count(*) FROM group_administrators WHERE group_id = $1", sv_chat
+        )
+        members = await conn.fetchval(
+            "SELECT count(*) FROM approved_members WHERE group_id = $1", sv_chat
+        )
+        event = await conn.fetchrow(
+            "SELECT action, reason FROM entity_events WHERE entity_id = $1", sv_club
+        )
+
+    # The channel is paused, but not retired and not stripped.
+    assert club["status"] == "paused"
+    assert club["bot_removed_at"] is None, "a hold must not record a leave"
+    # The discussion group is untouched in every respect.
+    assert chat["status"] == "active"
+    # bool(): asyncpg returns True, the SQLite test adapter returns 1.
+    assert bool(chat["moderation_enabled"]) is True
+    assert chat["bot_removed_at"] is None
+    assert roster == 1, "roster row destroyed by the pause"
+    assert members == approved, "approved members destroyed by the pause"
+    assert event["action"] == "group_paused"
+    assert event["reason"] == "no_rights_protected_channel"
+
+    # Idempotent: a second pause changes nothing and writes no second event.
+    assert await pause_group_preserving_data(sv_club, reason="again") is False
+    async with clean_db.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT count(*) FROM entity_events WHERE entity_id = $1", sv_club
+            )
+            == 1
+        )
+
+    # POSITIVE CONTROL: the destructive sibling DOES remove both mapping sets,
+    # so the assertions above are capable of failing.
+    await cleanup_group_data(sv_chat, status="paused", reason="control")
+    async with clean_db.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT count(*) FROM approved_members WHERE group_id = $1", sv_chat
+            )
+            == 0
+        )
+        assert (
+            await conn.fetchval(
+                "SELECT count(*) FROM group_administrators WHERE group_id = $1", sv_chat
+            )
+            == 0
+        )
+
