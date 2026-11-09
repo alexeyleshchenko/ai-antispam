@@ -222,12 +222,6 @@ async def count_groups_awaiting_moderation_restore(admin_id: int) -> int:
     return (await describe_moderation_restore(admin_id)).restored
 
 
-async def record_successful_payment(admin_id: int, stars_amount: int) -> int:
-    """Record a successful Stars payment: add credits, record transaction, enable moderation.
-
-    Returns the number of groups whose moderation this payment restored, so the
-    caller can report a zero (issue #41).
-    """
 async def record_successful_payment(
     admin_id: int, stars_amount: int
 ) -> ModerationRestore:
