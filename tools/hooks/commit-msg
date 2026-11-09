@@ -65,6 +65,33 @@ from pathlib import Path
 GATE_RELATIVE = "tests/test_ledger_commit_cites_no_rows.py"
 PREDICATE_NAME = "subject_cites_rows"
 
+# The SECOND predicate, and the one whose absence let the class fire three more times
+# (#94). GitHub's closing-keyword parser reads the commit message at push time, so
+# `fix: #142 …` closes #142 with no human decision — and this clone pushes to two repos
+# whose numbers are independent namespaces. Loaded from the gate by path for the same
+# reason as the row-citation predicate: one implementation, two call sites.
+CLOSE_GATE_RELATIVE = "tests/test_commit_close_keyword.py"
+CLOSE_PREDICATE_NAME = "closes_issue"
+
+CLOSE_REMEDY = """commit-msg: REFUSED — this message would CLOSE an issue on push.
+
+  offending: {hits}
+
+GitHub's closing-keyword parser reads the whole message, so `fix: #142` in a subject or
+`this fixes #142` in a body closes that issue the moment the push lands — before a lane
+has decided anything. This clone pushes to TWO repos whose issue numbers are independent
+namespaces, so one push can close an unrelated item on the mirror (measured: f758758
+closed canonical #46 and mirror #46 five seconds apart; the mirror's #46 was unrelated
+and had to be reopened by hand).
+
+Put the reference FIRST, which the parser does not read as a closing keyword:
+
+    #142: edit deliveries get their own dimension     (or)     refs #142
+
+Do not rely on the word "issue" or a colon to defuse it — `fixes issue #142` closes it
+too. The message was NOT rewritten — edit it and commit again."""
+
+
 # The session the commit is made in, and the trailer it is recorded under. The
 # daemon exports the variable into every tool subprocess it spawns, so this is a
 # READ of something already known rather than a new obligation on the lane.
@@ -125,21 +152,28 @@ def subject_of(message_path: Path) -> str:
     return ""
 
 
-def load_predicate(top: Path):
-    """`subject_cites_rows` from the gate module, or None if it cannot be read.
+def load_predicate(top: Path, gate_relative: str, predicate_name: str):
+    """A named predicate from a gate module, or None if it cannot be read.
 
     Imported by path rather than by package: this file lives in `tools/hooks/` and
-    the gate in `tests/`, and neither directory is a package.
+    the gates in `tests/`, and neither directory is a package.
+
+    Parameterised rather than bound to one gate: this hook now carries TWO laws
+    (#47's row-citation clause and #56's closing-keyword clause), and a second
+    hardcoded copy of the loader would be two implementations of one mechanism —
+    the drift class this repo rules against. Each caller passes its own gate and
+    predicate, and each refusal names its own law.
     """
-    gate = top / GATE_RELATIVE
+    gate = top / gate_relative
     if not gate.is_file():
         return None
-    spec = importlib.util.spec_from_file_location("oc_ledger_clause_gate", gate)
+    module_name = "oc_hook_" + predicate_name
+    spec = importlib.util.spec_from_file_location(module_name, gate)
     if spec is None or spec.loader is None:
         return None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return getattr(module, PREDICATE_NAME, None)
+    return getattr(module, predicate_name, None)
 
 
 def session_id() -> str:
@@ -206,7 +240,7 @@ def main(argv: list[str]) -> int:
         )
         return 0
 
-    predicate = load_predicate(top)
+    predicate = load_predicate(top, GATE_RELATIVE, PREDICATE_NAME)
     if predicate is None:
         print(
             f"commit-msg: WARNING — could not load {PREDICATE_NAME} from "
@@ -214,13 +248,35 @@ def main(argv: list[str]) -> int:
             "clause. tools/audit.py still carries the gate.",
             file=sys.stderr,
         )
-        return 0
+
+    close_predicate = load_predicate(top, CLOSE_GATE_RELATIVE, CLOSE_PREDICATE_NAME)
+    if close_predicate is None:
+        print(
+            f"commit-msg: WARNING — could not load {CLOSE_PREDICATE_NAME} from "
+            f"{CLOSE_GATE_RELATIVE}; the message was NOT checked against the "
+            "closing-keyword clause. tools/audit.py still carries the gate.",
+            file=sys.stderr,
+        )
 
     message_path = Path(argv[1])
     subject = subject_of(message_path)
-    if predicate(subject):
+    if predicate is not None and predicate(subject):
         print(REMEDY.format(subject=subject), file=sys.stderr)
         return 1
+
+    # The closing-keyword clause reads the WHOLE message: GitHub parses the body too,
+    # so `this fixes #121` in prose closes #121 exactly as a subject does. Checking the
+    # subject alone is the gap #94's own close condition invited.
+    if close_predicate is not None:
+        try:
+            full_text = message_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            full_text = ""
+        hits = close_predicate(full_text)
+        if hits:
+            print(CLOSE_REMEDY.format(hits=", ".join(hits)), file=sys.stderr)
+            return 1
+
 
     # The subject is lawful, so the commit proceeds — and the trailer is written HERE
     # rather than before the check, so a REFUSED commit is never touched. A refusal

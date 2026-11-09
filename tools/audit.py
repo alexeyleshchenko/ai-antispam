@@ -1607,6 +1607,8 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
         gates_to_run.append([sys.executable, "tests/test_brain_metrics.py"])
     if (repo_root / "tests/test_close_row_revision.py").is_file():
         gates_to_run.append([sys.executable, "tests/test_close_row_revision.py"])
+    if (repo_root / "tests/test_commit_close_keyword.py").is_file():
+        gates_to_run.append([sys.executable, "tests/test_commit_close_keyword.py"])
     if (repo_root / "tests/test_commit_pair_hook.py").is_file():
         gates_to_run.append([sys.executable, "tests/test_commit_pair_hook.py"])
     if (repo_root / "tests/test_commit_session_trailer.py").is_file():
