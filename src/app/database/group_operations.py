@@ -926,17 +926,78 @@ async def update_group_admins(
             # Save or update admin with username if provided
             admin = await admin_operations.get_admin(admin_id)
             if admin is None:
-                # Create new admin
-                admin = admin_operations.Administrator(
-                    admin_id=admin_id,
-                    username=username,
-                    credits=admin_operations.INITIAL_CREDITS,
-                    moderation_mode=admin_operations.ModerationMode.NOTIFY,
+                # Bot-add is a BILLING writer: the admin who adds the bot has
+                # a private chat with it by construction. So this grants
+                # INITIAL_CREDITS *and records the grant* — a real `initial`
+                # transaction plus a non-NULL `activated_at` — on this same
+                # connection, in this same transaction as the seat.
+                #
+                # Recording it is what stops the double grant.
+                # `initialize_new_admin` keys on `activated_at`: left NULL, the
+                # admin's first `/start` would claim the row and add a SECOND
+                # INITIAL_CREDITS — 200 credits against one 100-credit grant.
+                # The boot backfill used to hide that by stamping the row
+                # before the user could open the bot; it is a migration step
+                # now and no longer runs on boot, so the record has to be real.
+                #
+                # `DO NOTHING`, never `DO UPDATE`: the test harness rewrites an
+                # upsert into INSERT OR REPLACE, which deletes and re-inserts
+                # the row and resets every column the INSERT list does not
+                # name — and a blind overwrite would zero a balance someone
+                # topped up. RETURNING rather than `_affected_rows`, which
+                # parses "UPDATE n" and reads an INSERT's OID field instead.
+                inserted = await conn.fetchrow(
+                    """
+                    INSERT INTO administrators (
+                        admin_id, username, credits, moderation_mode,
+                        is_active, activated_at, created_at, last_active
+                    ) VALUES ($1, $2, $3, 'notify', TRUE, NOW(), NOW(), NOW())
+                    ON CONFLICT DO NOTHING
+                    RETURNING admin_id
+                    """,
+                    admin_id,
+                    username,
+                    admin_operations.INITIAL_CREDITS,
                 )
-            elif admin.username is None and username is not None:
-                admin.username = username
-
-            await admin_operations.save_admin(admin)
+                if inserted is not None:
+                    await conn.execute(
+                        """
+                        INSERT INTO transactions (admin_id, amount, type, description)
+                        VALUES ($1, $2, 'initial', 'Initial credits (bot added to group)')
+                        """,
+                        admin_id,
+                        admin_operations.INITIAL_CREDITS,
+                    )
+                else:
+                    # Raced with another writer between the read and the
+                    # insert: the existing row keeps its balance and its
+                    # activation, and only a missing username is filled in.
+                    await conn.execute(
+                        """
+                        UPDATE administrators SET username = COALESCE($1, username)
+                        WHERE admin_id = $2
+                        """,
+                        username,
+                        admin_id,
+                    )
+            else:
+                # A KNOWN admin. Only a missing username is worth writing, and
+                # it is written as ONE column — never `save_admin`, which is a
+                # whole-row INSERT ... ON CONFLICT DO UPDATE. Two reasons:
+                # `save_admin` rewrites `credits` and `moderation_mode` from a
+                # snapshot read a moment ago (a re-add must not undo a top-up
+                # that landed in between), and the test harness rewrites that
+                # upsert into INSERT OR REPLACE, which deletes the row and
+                # re-inserts it — silently clearing `activated_at`, the very
+                # column that proves the grant. Postgres would keep it; the
+                # harness would not, and a test that cannot see the column
+                # cannot prove the invariant.
+                if admin.username is None and username is not None:
+                    await conn.execute(
+                        "UPDATE administrators SET username = $1 WHERE admin_id = $2",
+                        username,
+                        admin_id,
+                    )
 
             # Add as group administrator
             await conn.execute(
@@ -1206,9 +1267,19 @@ async def upsert_group_admin(
     to the rewrite: IGNORE never fires on an existing row, and the UPDATE
     touches exactly one column.
 
-    The insert seeds `is_registered = FALSE`: a Telegram admin we discovered is
-    roster-only — skipped from moderation, never billed, never DM'd — until a
-    billing writer (bot-add, payment restore) says otherwise.
+    The insert seeds `is_registered` from the holder's OWN record rather than
+    from a constant. A Telegram admin we discovered is roster-only — skipped
+    from moderation, never billed, never DM'd — *unless* they have already
+    proved they are reachable: an `activated_at`, a balance, or the `initial`
+    transaction that is the grant record. Those three are the whole billing
+    evidence in this schema, and the balance and grant terms are there because
+    the legacy bot-add rows carry one or the other with no activation at all.
+
+    A bare 0-credit / NULL-`activated_at` holder still seeds `FALSE`, so a
+    stranger discovered in an admin list is not silently turned into a billing
+    contact. The value is read in Python rather than as a subquery inside
+    `VALUES`: that construct is the one most likely to pass Postgres and fail
+    the SQLite harness.
 
     The `administrators` row is seeded FIRST, here rather than at each call
     site, because `group_administrators.admin_id` carries a foreign key to it:
@@ -1217,15 +1288,30 @@ async def upsert_group_admin(
     fails on the first real promotion.
     """
     await seed_administrator_row(conn, admin_id)
+    registered = await conn.fetchval(
+        """
+        SELECT (
+            activated_at IS NOT NULL
+            OR credits > 0
+            OR EXISTS (
+                SELECT 1 FROM transactions t
+                WHERE t.admin_id = administrators.admin_id AND t.type = 'initial'
+            )
+        ) AS registered
+        FROM administrators WHERE admin_id = $1
+        """,
+        admin_id,
+    )
     await conn.execute(
         """
         INSERT INTO group_administrators
             (group_id, admin_id, is_registered, is_admin_now)
-        VALUES ($1, $2, FALSE, $3)
+        VALUES ($1, $2, $3, $4)
         ON CONFLICT DO NOTHING
         """,
         group_id,
         admin_id,
+        bool(registered),
         is_admin_now,
     )
     await conn.execute(
@@ -1645,3 +1731,250 @@ async def get_paid_groups_with_moderation_off() -> list[dict]:
             GroupStatus.ACTIVE.value,
         )
     return [dict(row) for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# #130 one-shot repair — reset the boot-stamped strangers, promote the proven
+# ---------------------------------------------------------------------------
+
+def _in_placeholders(values: list[int], start: int = 1) -> str:
+    """`$1, $2, …` for an IN clause; pass the values in the same order."""
+    return ", ".join(f"${i}" for i in range(start, start + len(values)))
+
+
+def roster_repair_guard_failures(report: dict) -> list[str]:
+    """The independent guards that must read 0 before the repair writes.
+
+    Both are checks on the RESET cohort, and either one means the predicate is
+    reaching rows it has no business touching: a row carrying any transaction
+    has a billing history, and a row holding a registered seat is somebody's
+    current payer. A refusal, never a warning.
+    """
+    failures = []
+    if report["reset_with_any_transaction"]:
+        failures.append(
+            f"{report['reset_with_any_transaction']} reset candidate(s) carry a "
+            "transaction — the predicate is reaching billing history"
+        )
+    if report["reset_with_registered_seat"]:
+        failures.append(
+            f"{report['reset_with_registered_seat']} reset candidate(s) hold a "
+            "registered seat — they are someone's payer"
+        )
+    return failures
+
+
+#: A row this predicate matches was never activated by its holder: no grant
+#: record (`initial` transaction) and no balance. Both guards are POSITIVE
+#: evidence, and both are load-bearing — the balance guard is what protects
+#: the legacy rows the old bot-add branch paid without writing a transaction.
+ROSTER_RESET_PREDICATE = """
+    a.activated_at IS NOT NULL
+      AND a.credits = 0
+      AND NOT EXISTS (
+          SELECT 1 FROM transactions t
+          WHERE t.admin_id = a.admin_id AND t.type = 'initial'
+      )
+"""
+
+
+async def collect_roster_repair(
+    conn, group_ids: list[int] | None = None
+) -> dict:
+    """Read the repair's two cohorts. Writes nothing.
+
+    The ONE read the dry run and `--apply` both use, so the preview and the
+    write agree by construction rather than by a second counting path.
+
+    The promote cohort EXCLUDES the reset cohort on purpose. In the live state
+    those rows still carry `activated_at`, so a promote read taken before the
+    reset counts them too (62 seats instead of 6) and promises a write the
+    apply would refuse. Subtracting them here is what makes the dry run's
+    number the apply's number.
+    """
+    scope_params: list[int] = []
+    reset_scope = promote_scope = ""
+    if group_ids:
+        placeholders = _in_placeholders(group_ids)
+        reset_scope = (
+            " AND a.admin_id IN (SELECT admin_id FROM group_administrators "
+            f"WHERE group_id IN ({placeholders}))"
+        )
+        promote_scope = f" AND ga.group_id IN ({placeholders})"
+        scope_params = list(group_ids)
+
+    reset_rows = await conn.fetch(
+        f"""
+        SELECT a.admin_id, a.created_at
+        FROM administrators a
+        WHERE {ROSTER_RESET_PREDICATE} {reset_scope}
+        ORDER BY a.admin_id
+        """,
+        *scope_params,
+    )
+    reset_ids = [row["admin_id"] for row in reset_rows]
+
+    cohort: dict[str, int] = {}
+    for row in reset_rows:
+        key = str(row["created_at"])
+        cohort[key] = cohort.get(key, 0) + 1
+
+    reset_seats = reset_groups = 0
+    reset_with_any_transaction = reset_with_registered_seat = 0
+    if reset_ids:
+        placeholders = _in_placeholders(reset_ids)
+        reset_seats = await conn.fetchval(
+            "SELECT COUNT(*) FROM group_administrators "
+            f"WHERE admin_id IN ({placeholders})",
+            *reset_ids,
+        )
+        reset_groups = await conn.fetchval(
+            "SELECT COUNT(DISTINCT group_id) FROM group_administrators "
+            f"WHERE admin_id IN ({placeholders})",
+            *reset_ids,
+        )
+        # Independent second guard: a reset candidate carrying ANY transaction
+        # has a billing history and must not be touched.
+        reset_with_any_transaction = await conn.fetchval(
+            "SELECT COUNT(DISTINCT admin_id) FROM transactions "
+            f"WHERE admin_id IN ({placeholders})",
+            *reset_ids,
+        )
+        # Third guard: a candidate holding a REGISTERED seat is someone's
+        # current payer. Reset would drop them out of billing silently.
+        reset_with_registered_seat = await conn.fetchval(
+            "SELECT COUNT(DISTINCT admin_id) FROM group_administrators "
+            f"WHERE is_registered AND admin_id IN ({placeholders})",
+            *reset_ids,
+        )
+
+    exclude_reset = ""
+    promote_params = list(scope_params)
+    if reset_ids:
+        exclude_reset = (
+            " AND ga.admin_id NOT IN "
+            f"({_in_placeholders(reset_ids, len(promote_params) + 1)})"
+        )
+        promote_params.extend(reset_ids)
+
+    promote_rows = await conn.fetch(
+        f"""
+        SELECT ga.group_id, ga.admin_id, a.username, g.title
+        FROM group_administrators ga
+        JOIN administrators a ON a.admin_id = ga.admin_id
+        LEFT JOIN groups g ON g.group_id = ga.group_id
+        WHERE NOT ga.is_registered
+          AND ga.is_admin_now
+          AND a.activated_at IS NOT NULL
+          {promote_scope} {exclude_reset}
+        ORDER BY ga.group_id, ga.admin_id
+        """,
+        *promote_params,
+    )
+
+    # What a promote run WITHOUT the reset first would take. Printed beside the
+    # real number so the ordering is visible in every run, not just in a memo.
+    promote_without_reset = await conn.fetchval(
+        f"""
+        SELECT COUNT(*)
+        FROM group_administrators ga
+        JOIN administrators a ON a.admin_id = ga.admin_id
+        WHERE NOT ga.is_registered
+          AND ga.is_admin_now
+          AND a.activated_at IS NOT NULL
+          {promote_scope}
+        """,
+        *scope_params,
+    )
+
+    return {
+        "reset_admin_ids": reset_ids,
+        "reset_admins": len(reset_ids),
+        "reset_seats": reset_seats,
+        "reset_groups": reset_groups,
+        "reset_created_at": cohort,
+        "reset_with_any_transaction": reset_with_any_transaction,
+        "reset_with_registered_seat": reset_with_registered_seat,
+        "promote_rows": [dict(row) for row in promote_rows],
+        "promote_seats": len(promote_rows),
+        "promote_admins": len({row["admin_id"] for row in promote_rows}),
+        "promote_groups": len({row["group_id"] for row in promote_rows}),
+        "promote_without_reset": promote_without_reset,
+        "applied": False,
+        "promote_written": 0,
+        "after": None,
+    }
+
+
+async def repair_roster_activation(
+    conn, *, apply: bool = False, group_ids: list[int] | None = None
+) -> dict:
+    """Run the #130 repair. Read-only unless `apply` is true.
+
+    Two phases in ONE transaction, **reset first**. The order is load-bearing:
+    promoting before the reset would make the boot-stamped strangers billing
+    contacts, because at that moment they still carry `activated_at`.
+
+    After the writes the same read runs again inside the transaction, so the
+    report says what the state became rather than what the statements were
+    expected to do. A second `--apply` therefore reads `0 / 0` by itself.
+
+    A tripped guard REFUSES: the report carries `refused` and nothing is
+    written. Both guards are on the reset cohort, and either one means the
+    predicate is reaching rows it has no business touching.
+    """
+    if not apply:
+        report = await collect_roster_repair(conn, group_ids)
+        failures = roster_repair_guard_failures(report)
+        if failures:
+            report["refused"] = failures
+        return report
+
+    async with conn.transaction():
+        report = await collect_roster_repair(conn, group_ids)
+
+        failures = roster_repair_guard_failures(report)
+        if failures:
+            report["refused"] = failures
+            return report
+
+        reset_ids = report["reset_admin_ids"]
+        if reset_ids:
+            await conn.execute(
+                "UPDATE administrators SET activated_at = NULL "
+                f"WHERE admin_id IN ({_in_placeholders(reset_ids)})",
+                *reset_ids,
+            )
+
+        # The design's statement, verbatim: after the reset the boot-stamped
+        # rows read NULL, so `activated_at IS NOT NULL` is the whole filter.
+        promote_scope = ""
+        promote_params: list[int] = []
+        if group_ids:
+            promote_scope = (
+                f" AND group_id IN ({_in_placeholders(group_ids)})"
+            )
+            promote_params = list(group_ids)
+        result = await conn.execute(
+            f"""
+            UPDATE group_administrators SET is_registered = TRUE
+            WHERE NOT is_registered
+              AND is_admin_now
+              AND admin_id IN (
+                  SELECT admin_id FROM administrators
+                  WHERE activated_at IS NOT NULL
+              )
+              {promote_scope}
+            """,
+            *promote_params,
+        )
+        report["promote_written"] = _affected_rows(result)
+
+        after = await collect_roster_repair(conn, group_ids)
+        report["applied"] = True
+        report["after"] = {
+            "reset_admins": after["reset_admins"],
+            "reset_seats": after["reset_seats"],
+            "promote_seats": after["promote_seats"],
+        }
+        return report

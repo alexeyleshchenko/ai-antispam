@@ -380,6 +380,25 @@ async def initialize_new_admin(
             INITIAL_CREDITS,
         )
 
+        # Activation is the other half of the roster invariant. A seat written
+        # BEFORE this user activated was seeded roster-only, because at that
+        # moment nothing proved they could be reached. Now something does — the
+        # grant above — so the seats they already hold become billing and
+        # `/stats` rows. Single column, idempotent, a no-op for a user with no
+        # seats, and in the same transaction as the grant, so a seat can never
+        # read registered without the `initial` row behind it.
+        #
+        # `is_admin_now` is in the predicate because a promotion is about a
+        # CURRENT admin: a seat for someone Telegram no longer lists is left
+        # alone rather than turned into a billing contact.
+        await conn.execute(
+            """
+            UPDATE group_administrators SET is_registered = TRUE
+            WHERE admin_id = $1 AND is_admin_now
+            """,
+            admin_id,
+        )
+
         return True
 
 async def cycle_moderation_mode(admin_id: int) -> ModerationMode | None:

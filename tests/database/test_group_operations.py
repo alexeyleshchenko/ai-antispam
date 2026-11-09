@@ -897,6 +897,12 @@ class _RecordingConn:
         self.statements.append(query)
         return "UPDATE 0"
 
+    async def fetchval(self, query: str, *args):
+        self.statements.append(query)
+
+    async def fetchrow(self, query: str, *args):
+        self.statements.append(query)
+
 
 async def _seed_group_and_admin(conn, group_id: int, admin_id: int) -> None:
     """Idempotent: several admins share one group row."""
@@ -1405,3 +1411,139 @@ async def test_migrate_group_does_not_clobber_an_existing_destination_row(
     assert bool(dest["moderation_enabled"]) is False
     # ...but the missing seat is still added
     assert [s["admin_id"] for s in seats] == [admin_id]
+
+
+@pytest.mark.asyncio
+async def test_bot_add_grants_and_records_the_grant_once(patched_db_conn, clean_db):
+    """The bot-add branch pays 100 credits AND leaves the grant record behind.
+
+    Recording it is what stops the double grant. `initialize_new_admin` keys on
+    `activated_at`, so a bot-add that paid without stamping it let the admin's
+    first `/start` add a SECOND `INITIAL_CREDITS` — 200 against one grant. The
+    boot backfill used to hide that; it is a migration step now, so the record
+    has to be real.
+
+    The second call is the control: a re-add of the same group must neither pay
+    again nor overwrite a balance the admin topped up.
+    """
+    from app.database.constants import INITIAL_CREDITS
+
+    group_id, admin_id = 880101, 880111
+    await update_group_admins(group_id, [admin_id], ["fresh"])
+
+    async with clean_db.acquire() as conn:
+        first = await conn.fetchrow(
+            "SELECT credits, activated_at FROM administrators WHERE admin_id = $1",
+            admin_id,
+        )
+        grants = await conn.fetchval(
+            "SELECT COUNT(*) FROM transactions "
+            "WHERE admin_id = $1 AND type = 'initial'",
+            admin_id,
+        )
+
+        assert first["credits"] == INITIAL_CREDITS
+        assert first["activated_at"] is not None, "the grant was not recorded"
+        assert grants == 1
+
+        # A top-up between the two adds must survive the second one.
+        await conn.execute(
+            "UPDATE administrators SET credits = 150 WHERE admin_id = $1", admin_id
+        )
+
+    await update_group_admins(group_id, [admin_id], ["fresh"])
+
+    async with clean_db.acquire() as conn:
+        second = await conn.fetchrow(
+            "SELECT credits, activated_at FROM administrators WHERE admin_id = $1",
+            admin_id,
+        )
+        grants = await conn.fetchval(
+            "SELECT COUNT(*) FROM transactions "
+            "WHERE admin_id = $1 AND type = 'initial'",
+            admin_id,
+        )
+
+    assert second["credits"] == 150, "the re-add overwrote a topped-up balance"
+    assert second["activated_at"] is not None
+    assert grants == 1, "the re-add paid a second initial grant"
+
+
+@pytest.mark.asyncio
+async def test_upsert_group_admin_seeds_registered_from_the_holders_record(
+    patched_db_conn, clean_db
+):
+    """A discovered seat is billing iff its holder already proved reachability.
+
+    Three positive proofs, one per row, and one bare stranger as the control:
+    a NULL-`activated_at`, 0-credit, transaction-less holder is a stranger
+    discovered in an admin list, and seeding them TRUE would make a person who
+    never opened the bot a billing contact.
+    """
+    group_id = 880102
+    activated, funded, granted, stranger = 880121, 880122, 880123, 880124
+
+    async with clean_db.acquire() as conn:
+        await conn.execute("INSERT INTO groups (group_id) VALUES ($1)", group_id)
+        await conn.execute(
+            "INSERT INTO administrators (admin_id, credits, activated_at) "
+            "VALUES ($1, 0, NOW())",
+            activated,
+        )
+        await conn.execute(
+            "INSERT INTO administrators (admin_id, credits) VALUES ($1, 40)", funded
+        )
+        await conn.execute(
+            "INSERT INTO administrators (admin_id, credits) VALUES ($1, 0)", granted
+        )
+        await conn.execute(
+            "INSERT INTO transactions (admin_id, amount, type) VALUES ($1, 100, 'initial')",
+            granted,
+        )
+        await conn.execute(
+            "INSERT INTO administrators (admin_id, credits) VALUES ($1, 0)", stranger
+        )
+
+        for admin_id in (activated, funded, granted, stranger):
+            await upsert_group_admin(conn, group_id, admin_id, True)
+
+        rows = await conn.fetch(
+            "SELECT admin_id, is_registered FROM group_administrators "
+            "WHERE group_id = $1",
+            group_id,
+        )
+
+    seeded = {row["admin_id"]: bool(row["is_registered"]) for row in rows}
+    assert seeded[activated] is True, "an activated holder's seat stayed roster-only"
+    assert seeded[funded] is True, "a funded holder's seat stayed roster-only"
+    assert seeded[granted] is True, "a grant-record holder's seat stayed roster-only"
+    assert seeded[stranger] is False, "a stranger was seeded as a billing contact"
+
+
+@pytest.mark.asyncio
+async def test_upsert_group_admin_never_flips_a_registered_seat_back(
+    patched_db_conn, clean_db
+):
+    """Demotion (`is_admin_now` FALSE) must not unregister a paying seat."""
+    group_id, admin_id = 880103, 880131
+
+    async with clean_db.acquire() as conn:
+        await _seed_group_and_admin(conn, group_id, admin_id)
+        await conn.execute(
+            "UPDATE administrators SET activated_at = NOW() WHERE admin_id = $1",
+            admin_id,
+        )
+        await upsert_group_admin(conn, group_id, admin_id, True)
+
+        await upsert_group_admin(conn, group_id, admin_id, False)
+        await upsert_group_admin(conn, group_id, admin_id, True)
+
+        row = await conn.fetchrow(
+            "SELECT is_registered, is_admin_now FROM group_administrators "
+            "WHERE group_id = $1 AND admin_id = $2",
+            group_id,
+            admin_id,
+        )
+
+    assert bool(row["is_registered"]) is True
+    assert bool(row["is_admin_now"]) is True

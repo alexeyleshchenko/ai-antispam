@@ -598,3 +598,75 @@ async def test_initialize_new_admin_preserves_existing_balance(patched_db_conn, 
     _, credits, initials = await _activation_state(clean_db, admin_id)
     assert credits == 7 + INITIAL_CREDITS
     assert initials == 1
+
+
+async def _seed_seat(clean_db, group_id: int, admin_id: int, *, is_admin_now: bool):
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO groups (group_id) VALUES ($1) ON CONFLICT DO NOTHING", group_id
+        )
+        await conn.execute(
+            "INSERT INTO group_administrators "
+            "(group_id, admin_id, is_registered, is_admin_now) "
+            "VALUES ($1, $2, FALSE, $3)",
+            group_id,
+            admin_id,
+            is_admin_now,
+        )
+
+
+async def _seat_state(clean_db, group_id: int, admin_id: int) -> bool:
+    async with clean_db.acquire() as conn:
+        value = await conn.fetchval(
+            "SELECT is_registered FROM group_administrators "
+            "WHERE group_id = $1 AND admin_id = $2",
+            group_id,
+            admin_id,
+        )
+    return bool(value)
+
+
+@pytest.mark.asyncio
+async def test_activation_promotes_the_seats_the_holder_already_has(
+    patched_db_conn, clean_db
+):
+    """The other half of the roster invariant.
+
+    A seat discovered before its holder activated is roster-only — skipped from
+    moderation, never billed, never DM'd — and nothing ever flipped it back.
+    Activation is the proof they are reachable, so their current seats become
+    billing rows in the same transaction as the grant.
+    """
+    admin_id = 789201
+    await _seed_prefilled_admin(clean_db, admin_id)
+    await _seed_seat(clean_db, -1007001, admin_id, is_admin_now=True)
+    await _seed_seat(clean_db, -1007002, admin_id, is_admin_now=True)
+    assert await _seat_state(clean_db, -1007001, admin_id) is False
+
+    async with clean_db.acquire() as conn:
+        assert await initialize_new_admin(admin_id) is True
+
+    assert await _seat_state(clean_db, -1007001, admin_id) is True
+    assert await _seat_state(clean_db, -1007002, admin_id) is True
+    # ...and the grant is still exactly one.
+    _, credits, initials = await _activation_state(clean_db, admin_id)
+    assert credits == INITIAL_CREDITS
+    assert initials == 1
+
+
+@pytest.mark.asyncio
+async def test_activation_leaves_an_absent_admins_seat_alone(patched_db_conn, clean_db):
+    """A promotion is about a CURRENT admin.
+
+    A seat whose holder Telegram no longer lists is not a billing contact; the
+    `is_admin_now` term in the predicate is the whole discriminator, so this
+    test and the one above differ in exactly that column.
+    """
+    admin_id = 789202
+    await _seed_prefilled_admin(clean_db, admin_id)
+    await _seed_seat(clean_db, -1007003, admin_id, is_admin_now=False)
+
+    async with clean_db.acquire() as conn:
+        assert await initialize_new_admin(admin_id) is True
+
+    assert await _seat_state(clean_db, -1007003, admin_id) is False
