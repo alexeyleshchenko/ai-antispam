@@ -83,3 +83,35 @@ plain `ON CONFLICT ... DO UPDATE` to `INSERT OR REPLACE` (`tests/conftest.py:281
 which deletes and re-inserts the row and restores every column the branch would have
 set. The branch is fully masked there, so the test certified nothing. The invariant
 rests on the source, not on that test.
+
+## Runtime dispositions at grace=0 (measured 2026-11-09 19:49Z–19:52Z)
+
+Read with `get_chat_member(gid, bot.id)` from inside the deployed container
+(`767e98c`), then the grace job's own branch condition applied to the result. This
+is the table condition 4 will be judged against.
+
+| group_id | title | bot's ChatMember class | verdict |
+|---|---|---|---|
+| -1002107631154 | SV CLUB | `TelegramBadRequest` (unreadable) | **PAUSE** — protected |
+| -1003751652625 | Сервер Shadowraze | administrator `del=T res=F` | **HOLD+STAY** (#144) |
+| -1002496127723 | блатные чупани | administrator `del=F res=F` | **HOLD+STAY** (#144) |
+| -1003078404548 | Квантовые технологии | `ChatMemberMember` | leave |
+| -1002509060912 | ش كش محادثة | `ChatMemberMember` | leave |
+
+**1 pause, 2 holds, 2 leaves** — not 1 pause / 4 leaves. The two held groups are the
+degraded-administrator class #144 was closed to hold; `-1002496127723` is the paying
+one (96 credits, 2 approved members) and Сервер Shadowraze carries 1 approved member.
+A leave would hard-delete both rosters.
+
+### Probe-artefact warning
+
+An earlier ledger row (`n=405`) reported these five as "1 pause, 4 leave". That
+disposition column was a **probe artefact, not a measurement**: the probe did not
+evaluate the `get_chat_member` branch, so every non-protected group fell through to
+the leave path. The probe was a heredoc and left no artifact, so the exact mechanism
+is unrecoverable; the authoritative read is the direct `get_chat_member` table above,
+which HQ reproduced independently. The row is corrected by a later row.
+
+**Do not read "grace=0 dry run" as a suppressed production run.** The probe suppressed
+every action, but a real run at grace=0 would have left the two `member` groups. The
+hold and the pause are what keep the other three out of that path.
