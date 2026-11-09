@@ -477,6 +477,7 @@ async def create_sqlite_schema(conn):
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             chat_id INTEGER NOT NULL,
             message_id INTEGER NOT NULL,
+            edit_date BIGINT NOT NULL DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'pending',
             is_spam INTEGER,
             confidence INTEGER,

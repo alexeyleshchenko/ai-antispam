@@ -88,6 +88,18 @@ ALTER TABLE classification_verdicts
     ADD COLUMN IF NOT EXISTS closed_reason TEXT
 """
 
+# #142: the delivery dimension. 0 means the original message; an edited message
+# carries its Telegram `edit_date` as a unix timestamp. A redelivery of the SAME
+# edit must serve the stored verdict, while a NEWER edit is a new unit of work -
+# so the column is COMPARED, not merely stored. NOT NULL with a default keeps the
+# unique key `(chat_id, message_id)` intact: a nullable column would make every
+# pre-existing row distinct under Postgres' NULL rules and silently drop the
+# original dedupe for unedited messages.
+VERDICT_EDIT_DATE_DDL = """
+ALTER TABLE classification_verdicts
+    ADD COLUMN IF NOT EXISTS edit_date BIGINT NOT NULL DEFAULT 0
+"""
+
 VERDICT_INDEX_DDL = """
 CREATE INDEX IF NOT EXISTS idx_classification_verdicts_created
     ON classification_verdicts(created_at)
@@ -100,6 +112,7 @@ async def ensure_verdict_table(conn) -> None:
     await conn.execute(VERDICT_ATTEMPTS_DDL)
     await conn.execute(VERDICT_CLOSED_AT_DDL)
     await conn.execute(VERDICT_CLOSED_REASON_DDL)
+    await conn.execute(VERDICT_EDIT_DATE_DDL)
     await conn.execute(VERDICT_INDEX_DDL)
 
 
@@ -109,8 +122,8 @@ async def claim_or_read(chat_id: int, message_id: int) -> dict | None:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT chat_id, message_id, status, is_spam, confidence, reason,
-                   result_id, moderated_at, attempts
+            SELECT chat_id, message_id, edit_date, status, is_spam, confidence,
+                   reason, result_id, moderated_at, attempts
             FROM classification_verdicts
             WHERE chat_id = $1 AND message_id = $2
             """,
@@ -122,6 +135,9 @@ async def claim_or_read(chat_id: int, message_id: int) -> dict | None:
     return {
         "chat_id": row["chat_id"],
         "message_id": row["message_id"],
+        # #142: the caller compares this against its own delivery. A stored row
+        # for an OLDER edit must not serve a newer one.
+        "edit_date": int(row["edit_date"] or 0),
         "status": row["status"],
         "is_spam": row["is_spam"],
         "confidence": row["confidence"],
@@ -132,24 +148,60 @@ async def claim_or_read(chat_id: int, message_id: int) -> dict | None:
     }
 
 
-async def claim_pending(chat_id: int, message_id: int) -> bool:
-    """Claim the right to classify this message. True if THIS caller won.
+async def claim_pending(chat_id: int, message_id: int, edit_date: int = 0) -> bool:
+    """Claim the right to classify this delivery. True if THIS caller won.
 
-    One statement decides the winner: `ON CONFLICT DO NOTHING RETURNING id`
-    returns a row only to the caller that actually inserted. A read-then-write
-    would be a race - two deliveries can both read `absent`.
+    Two one-statement claims, in order, because the store keeps ONE row per
+    message and a new edit is a new unit of work (#142):
+
+    1. **Adopt a newer edit** — an UPDATE gated on `edit_date < $3`, which resets
+       the row in place and hands this caller the claim. Monotonic by
+       construction: a LATE redelivery of an older edit can never roll the row
+       back, so an out-of-order Telegram delivery cannot re-charge an edit that
+       was already handled.
+    2. **Insert if absent** — `ON CONFLICT DO NOTHING RETURNING id`, unchanged.
+
+    Still no read-then-write. Two deliveries of the same edit race on step 1:
+    the winner moves `edit_date` to the new value, so the loser's `edit_date < $3`
+    no longer matches, it falls through to step 2, conflicts, and reads False.
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
+        adopted = await conn.fetchrow(
+            """
+            UPDATE classification_verdicts
+            SET status = 'pending',
+                edit_date = $1,
+                is_spam = NULL,
+                confidence = NULL,
+                reason = NULL,
+                result_id = NULL,
+                decided_at = NULL,
+                moderated_at = NULL,
+                closed_at = NULL,
+                closed_reason = NULL,
+                attempts = 0,
+                created_at = NOW()
+            WHERE chat_id = $2 AND message_id = $3 AND edit_date < $4
+            RETURNING id
+            """,
+            edit_date,
+            chat_id,
+            message_id,
+            edit_date,
+        )
+        if adopted is not None:
+            return True
         row = await conn.fetchrow(
             """
-            INSERT INTO classification_verdicts (chat_id, message_id, status)
-            VALUES ($1, $2, 'pending')
+            INSERT INTO classification_verdicts (chat_id, message_id, edit_date, status)
+            VALUES ($1, $2, $3, 'pending')
             ON CONFLICT (chat_id, message_id) DO NOTHING
             RETURNING id
             """,
             chat_id,
             message_id,
+            edit_date,
         )
     return row is not None
 
@@ -159,6 +211,7 @@ async def reclaim_failed(
     message_id: int,
     cooldown: timedelta | None = None,
     max_attempts: int = DEFAULT_VERDICT_RETRY_ATTEMPTS,
+    edit_date: int = 0,
 ) -> bool:
     """Claim a retry of a FAILED classification. True if THIS caller won.
 
@@ -181,14 +234,16 @@ async def reclaim_failed(
             UPDATE classification_verdicts
             SET status = 'pending'
             WHERE chat_id = $1 AND message_id = $2
+              AND edit_date = $3
               AND status = 'failed'
               AND closed_at IS NULL
-              AND attempts < $3
-              AND decided_at < $4
+              AND attempts < $4
+              AND decided_at < $5
             RETURNING id
             """,
             chat_id,
             message_id,
+            edit_date,
             max_attempts,
             cutoff,
         )
@@ -201,8 +256,9 @@ async def store_verdict(
     is_spam: bool,
     confidence: int,
     reason: str,
+    edit_date: int = 0,
 ) -> None:
-    """Record a decided verdict."""
+    """Record a decided verdict for THIS delivery of the message."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
@@ -213,17 +269,18 @@ async def store_verdict(
                 confidence = $2,
                 reason = $3,
                 decided_at = NOW()
-            WHERE chat_id = $4 AND message_id = $5
+            WHERE chat_id = $4 AND message_id = $5 AND edit_date = $6
             """,
             is_spam,
             confidence,
             reason,
             chat_id,
             message_id,
+            edit_date,
         )
 
 
-async def mark_failed(chat_id: int, message_id: int) -> int | None:
+async def mark_failed(chat_id: int, message_id: int, edit_date: int = 0) -> int | None:
     """Record that every leg was exhausted for this attempt.
 
     Increments `attempts` so `reclaim_failed` can bound the retries, and returns
@@ -245,20 +302,23 @@ async def mark_failed(chat_id: int, message_id: int) -> int | None:
             SET status = 'failed',
                 decided_at = NOW(),
                 attempts = attempts + 1
-            WHERE chat_id = $1 AND message_id = $2
+            WHERE chat_id = $1 AND message_id = $2 AND edit_date = $3
             RETURNING attempts
             """,
             chat_id,
             message_id,
+            edit_date,
         )
     return int(row["attempts"]) if row is not None else None
 
 
-async def claim_moderation(chat_id: int, message_id: int) -> bool:
-    """Claim the right to moderate this message. True if THIS caller won.
+async def claim_moderation(chat_id: int, message_id: int, edit_date: int = 0) -> bool:
+    """Claim the right to moderate this delivery. True if THIS caller won.
 
     The `moderated_at IS NULL` guard is the whole mechanism: N deliveries of the
-    same update produce exactly one moderation action.
+    same update produce exactly one moderation action. `edit_date` scopes it to
+    the delivery this run claimed, so a run still in flight for an older edit
+    cannot moderate a row that a newer edit has since reset (#142).
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -266,16 +326,20 @@ async def claim_moderation(chat_id: int, message_id: int) -> bool:
             """
             UPDATE classification_verdicts
             SET moderated_at = NOW()
-            WHERE chat_id = $1 AND message_id = $2 AND moderated_at IS NULL
+            WHERE chat_id = $1 AND message_id = $2 AND edit_date = $3
+              AND moderated_at IS NULL
             RETURNING id
             """,
             chat_id,
             message_id,
+            edit_date,
         )
     return row is not None
 
 
-async def release_moderation_claim(chat_id: int, message_id: int) -> None:
+async def release_moderation_claim(
+    chat_id: int, message_id: int, edit_date: int = 0
+) -> None:
     """Undo a moderation claim. Used only when the moderation action raised,
     so a later delivery can retry it instead of the message being stuck."""
     pool = await get_pool()
@@ -284,14 +348,17 @@ async def release_moderation_claim(chat_id: int, message_id: int) -> None:
             """
             UPDATE classification_verdicts
             SET moderated_at = NULL, result_id = NULL
-            WHERE chat_id = $1 AND message_id = $2
+            WHERE chat_id = $1 AND message_id = $2 AND edit_date = $3
             """,
             chat_id,
             message_id,
+            edit_date,
         )
 
 
-async def store_result_id(chat_id: int, message_id: int, result_id: str) -> None:
+async def store_result_id(
+    chat_id: int, message_id: int, result_id: str, edit_date: int = 0
+) -> None:
     """Record the id of the moderation result (e.g. the review message)."""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -299,15 +366,18 @@ async def store_result_id(chat_id: int, message_id: int, result_id: str) -> None
             """
             UPDATE classification_verdicts
             SET result_id = $1
-            WHERE chat_id = $2 AND message_id = $3
+            WHERE chat_id = $2 AND message_id = $3 AND edit_date = $4
             """,
             result_id,
             chat_id,
             message_id,
+            edit_date,
         )
 
 
-async def close_verdict(chat_id: int, message_id: int, reason: str) -> bool:
+async def close_verdict(
+    chat_id: int, message_id: int, reason: str, edit_date: int = 0
+) -> bool:
     """Close a failed row: nothing left to moderate. True if THIS caller won.
 
     Set by the recovery runner once it has PROVED the message cannot be
@@ -327,12 +397,14 @@ async def close_verdict(chat_id: int, message_id: int, reason: str) -> bool:
             UPDATE classification_verdicts
             SET closed_at = NOW(),
                 closed_reason = $1
-            WHERE chat_id = $2 AND message_id = $3 AND closed_at IS NULL
+            WHERE chat_id = $2 AND message_id = $3 AND edit_date = $4
+              AND closed_at IS NULL
             RETURNING id
             """,
             reason,
             chat_id,
             message_id,
+            edit_date,
         )
     return row is not None
 

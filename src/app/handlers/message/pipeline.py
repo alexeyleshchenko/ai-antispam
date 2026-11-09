@@ -1,6 +1,7 @@
 """Message moderation pipeline: validation, spam analysis, result processing."""
 
 import logging
+from datetime import datetime
 from typing import Any
 
 from aiogram import types
@@ -156,6 +157,21 @@ def _log_early_exit(
     )
 
 
+def _edit_stamp(message: types.Message) -> int:
+    """The delivery dimension for the verdict store (#142).
+
+    0 for an original message, the Telegram `edit_date` in unix seconds for an
+    edited one. An edit is a NEW delivery of changed content and must be
+    classified again; a redelivery of the SAME edit must not be.
+    """
+    edit_date = getattr(message, "edit_date", None)
+    if not isinstance(edit_date, datetime):
+        # aiogram types this as `datetime | None`; anything else is a test double
+        # and must read as "original", never as a fabricated stamp (#142).
+        return 0
+    return int(edit_date.timestamp())
+
+
 async def handle_moderated_message(
     message: types.Message, *, source: str = "new"
 ) -> str:
@@ -250,10 +266,15 @@ async def handle_moderated_message(
         )
         return result
 
-    if source == "new":
+    if source in ("new", "edit"):
         # Detached + verdict-gated: a redelivery serves the stored verdict
-        # instead of re-classifying, and moderation happens exactly once.
-        return await run_with_verdict(chat_id, message.message_id, _classify, _moderate)
+        # instead of re-classifying, and moderation happens exactly once per
+        # delivery. An edit is its OWN delivery (#142) — keyed on edit_date, so
+        # changed content is classified again while a redelivery of the same
+        # edit is served from the store instead of charging a second time.
+        return await run_with_verdict(
+            chat_id, message.message_id, _classify, _moderate, _edit_stamp(message)
+        )
 
     try:
         verdict = await _classify()
@@ -282,10 +303,14 @@ async def process_spam_or_approve(
 
     if is_spam:
         skip_auto_delete = confidence < threshold
-        if not skip_auto_delete and is_delete_expired(message):
+        if is_delete_expired(message):
             # Telegram refuses to delete messages older than 48h. Notify the
             # admins for manual handling and report the true state — never
             # charge a delete credit for an action that cannot happen (#48).
+            # The age check is NOT scoped to the auto-delete branch: a 7-day-old
+            # message cannot be deleted at ANY confidence, so a low-confidence
+            # verdict used to skip this guard and bill DELETE_PRICE for a delete
+            # that never happened (#142).
             await handle_spam(
                 message,
                 admin_ids,

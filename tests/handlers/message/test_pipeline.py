@@ -1,6 +1,6 @@
 """Tests for message processing pipeline."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -413,6 +413,52 @@ class TestSpamDeleteChargeGuards:
             assert mock_handle_spam.call_args[1]["skip_auto_delete"] is True
 
     @pytest.mark.asyncio
+    async def test_expired_message_never_charges_at_low_confidence(
+        self, mock_message, mock_message_context_result
+    ):
+        """#142 defect 2: a message Telegram will never delete is never billed.
+
+        The age guard used to be scoped behind `not skip_auto_delete`, so a
+        confidence-68 verdict (below the 90 threshold) skipped it entirely and
+        billed DELETE_PRICE for a delete that never happened — measured on
+        transactions 18256/18257 for a 7-day-old message. The guard now runs at
+        ANY confidence.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        mock_message.date = datetime.now(UTC) - timedelta(days=7)
+
+        with (
+            patch(
+                "src.app.handlers.message.pipeline.try_deduct_credits",
+                new_callable=AsyncMock,
+            ) as mock_deduct,
+            patch(
+                "src.app.handlers.message.pipeline.handle_spam",
+                new_callable=AsyncMock,
+            ) as mock_handle_spam,
+            patch(
+                "src.app.handlers.message.pipeline.load_config",
+            ) as mock_load_config,
+        ):
+            mock_load_config.return_value = DEFAULT_SPAM_CONFIG
+            mock_handle_spam.return_value = "spam_delete_expired"
+
+            result, _ = await process_spam_or_approve(
+                mock_message,
+                True,
+                68,
+                [123],
+                "reason",
+                mock_message_context_result,
+            )
+
+            assert result == "spam_delete_expired"
+            # No delete credit may be charged for a message older than 48h.
+            mock_deduct.assert_not_awaited()
+            assert mock_handle_spam.call_args[1]["skip_auto_delete"] is True
+
+    @pytest.mark.asyncio
     async def test_recent_message_still_charges_and_deletes(
         self, mock_message, mock_message_context_result
     ):
@@ -450,3 +496,101 @@ class TestSpamDeleteChargeGuards:
             assert result == "spam_auto_deleted"
             mock_deduct.assert_awaited_once()
             assert mock_handle_spam.call_args[1]["skip_auto_delete"] is False
+
+
+class TestEditDeliveryRouting:
+    """#142 defect 1: an edit must reach the verdict gate as its OWN delivery.
+
+    The gate was entered only for `source == "new"`, so an `edited_message`
+    update bypassed the verdict store completely: Telegram redelivers the same
+    edit and the admin is charged again (transactions 18256/18257, 42 s apart,
+    same chat/message/admin). These tests pin the routing, not the store.
+    """
+
+    @pytest.mark.asyncio
+    async def test_edited_message_reaches_the_gate_with_its_edit_stamp(
+        self, mock_message
+    ):
+        """The edit's delivery stamp is handed to the gate, not dropped."""
+        from datetime import UTC, datetime
+
+        from src.app.handlers.message.pipeline import handle_moderated_message
+
+        edited_at = datetime(2026, 11, 7, 7, 10, 21, tzinfo=UTC)
+        mock_message.edit_date = edited_at
+        mock_message.date = edited_at
+        group = MagicMock(admin_ids=[123], topic_description_short=None)
+
+        with (
+            patch(
+                "src.app.handlers.message.pipeline.is_member_in_group",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "src.app.handlers.message.pipeline.validate_group_and_check_early_exits",
+                new_callable=AsyncMock,
+                return_value=(group, ""),
+            ),
+            patch(
+                "src.app.handlers.message.pipeline.check_skip_bot_sender",
+                return_value=(False, ""),
+            ),
+            patch(
+                "src.app.handlers.message.pipeline.check_skip_channel_bot_message",
+                new_callable=AsyncMock,
+                return_value=(False, ""),
+            ),
+            patch(
+                "src.app.handlers.message.pipeline.run_with_verdict",
+                new_callable=AsyncMock,
+                return_value="message_user_approved",
+            ) as gate,
+        ):
+            result = await handle_moderated_message(mock_message, source="edit")
+
+        assert result == "message_user_approved"
+        gate.assert_awaited_once()
+        assert gate.call_args.args[4] == int(edited_at.timestamp())
+
+    @pytest.mark.asyncio
+    async def test_original_message_is_gated_with_the_zero_stamp(self, mock_message):
+        """Control: an unedited message keeps the original-message stamp."""
+        from datetime import UTC, datetime
+
+        from src.app.handlers.message.pipeline import handle_moderated_message
+
+        mock_message.edit_date = None
+        mock_message.date = datetime(2026, 11, 7, 7, 10, 21, tzinfo=UTC)
+        group = MagicMock(admin_ids=[123], topic_description_short=None)
+
+        with (
+            patch(
+                "src.app.handlers.message.pipeline.is_member_in_group",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "src.app.handlers.message.pipeline.validate_group_and_check_early_exits",
+                new_callable=AsyncMock,
+                return_value=(group, ""),
+            ),
+            patch(
+                "src.app.handlers.message.pipeline.check_skip_bot_sender",
+                return_value=(False, ""),
+            ),
+            patch(
+                "src.app.handlers.message.pipeline.check_skip_channel_bot_message",
+                new_callable=AsyncMock,
+                return_value=(False, ""),
+            ),
+            patch(
+                "src.app.handlers.message.pipeline.run_with_verdict",
+                new_callable=AsyncMock,
+                return_value="message_user_approved",
+            ) as gate,
+        ):
+            await handle_moderated_message(mock_message, source="new")
+
+        gate.assert_awaited_once()
+        assert gate.call_args.args[4] == 0

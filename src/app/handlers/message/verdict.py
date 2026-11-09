@@ -151,6 +151,7 @@ async def _moderate_and_record(
     confidence: int,
     reason: str,
     moderate: ModerateFn,
+    edit_date: int = 0,
 ) -> str:
     """Moderate from a known verdict, recording the result id.
 
@@ -165,14 +166,18 @@ async def _moderate_and_record(
             "releasing the claim so the next delivery retries"
         )
         await _store_call(
-            "release_moderation_claim", release_moderation_claim(chat_id, message_id)
+            "release_moderation_claim",
+            release_moderation_claim(chat_id, message_id, edit_date=edit_date),
         )
         row = await _store_call("claim_or_read", claim_or_read(chat_id, message_id))
         if row is not STORE_UNAVAILABLE and row is not None and row.get("result_id"):
             return row["result_id"]
         return RESULT_VERDICT_FAILED
 
-    await _store_call("store_result_id", store_result_id(chat_id, message_id, result))
+    await _store_call(
+        "store_result_id",
+        store_result_id(chat_id, message_id, result, edit_date=edit_date),
+    )
     return result
 
 async def _finish(
@@ -180,6 +185,7 @@ async def _finish(
     message_id: int,
     classify: ClassifyFn,
     moderate: ModerateFn,
+    edit_date: int = 0,
 ) -> str:
     """Classify, persist the verdict, then moderate exactly once.
 
@@ -189,7 +195,9 @@ async def _finish(
         is_spam, confidence, reason = await classify()
     except Exception as e:  # noqa: BLE001 - every leg was exhausted
         logger.warning(f"Classification failed for {chat_id}/{message_id}: {e!r}")
-        attempts = await _store_call("mark_failed", mark_failed(chat_id, message_id))
+        attempts = await _store_call(
+            "mark_failed", mark_failed(chat_id, message_id, edit_date=edit_date)
+        )
         if _retryable_after_failure(attempts):
             # This is the fast-failure half of the retry. FAILED maps to a 200,
             # which tells Telegram the update is consumed - so answering it here
@@ -207,30 +215,36 @@ async def _finish(
 
     stored = await _store_call(
         "store_verdict",
-        store_verdict(chat_id, message_id, is_spam, confidence, reason),
+        store_verdict(
+            chat_id, message_id, is_spam, confidence, reason, edit_date=edit_date
+        ),
     )
     if stored is STORE_UNAVAILABLE:
         # The verdict cannot be recorded, so nothing can serve it later.
         # Moderate now rather than lose the decision entirely.
         return await _moderate_and_record(
-            chat_id, message_id, is_spam, confidence, reason, moderate
+            chat_id, message_id, is_spam, confidence, reason, moderate, edit_date
         )
 
-    won = await _store_call("claim_moderation", claim_moderation(chat_id, message_id))
+    won = await _store_call(
+        "claim_moderation", claim_moderation(chat_id, message_id, edit_date=edit_date)
+    )
     if won is False:
-        # Another delivery already moderated this message.
+        # Another delivery already moderated this delivery.
         return RESULT_VERDICT_REPLAYED
     # True, or the store failed while claiming: moderate either way, because a
     # store failure must never leave a decided verdict unmoderated.
     return await _moderate_and_record(
-        chat_id, message_id, is_spam, confidence, reason, moderate
+        chat_id, message_id, is_spam, confidence, reason, moderate, edit_date
     )
 
 async def _moderate_decided(
-    chat_id: int, message_id: int, row: dict, moderate: ModerateFn
+    chat_id: int, message_id: int, row: dict, moderate: ModerateFn, edit_date: int = 0
 ) -> str:
     """Serve a stored verdict: moderate it, with no LLM call."""
-    won = await _store_call("claim_moderation", claim_moderation(chat_id, message_id))
+    won = await _store_call(
+        "claim_moderation", claim_moderation(chat_id, message_id, edit_date=edit_date)
+    )
     if won is False:
         return RESULT_VERDICT_REPLAYED
     return await _moderate_and_record(
@@ -240,6 +254,7 @@ async def _moderate_decided(
         int(row["confidence"]),
         row["reason"] or "",
         moderate,
+        edit_date,
     )
 
 async def _detach(
@@ -247,6 +262,7 @@ async def _detach(
     message_id: int,
     classify: ClassifyFn,
     moderate: ModerateFn,
+    edit_date: int = 0,
 ) -> str:
     """Run the work in its own task and wait only as long as the webhook may.
 
@@ -254,7 +270,9 @@ async def _detach(
     like the original: it survives the deadline, persists its verdict, and the
     caller answers 503 while it is still running.
     """
-    task = asyncio.create_task(_finish(chat_id, message_id, classify, moderate))
+    task = asyncio.create_task(
+        _finish(chat_id, message_id, classify, moderate, edit_date)
+    )
     _inflight.add(task)
     task.add_done_callback(_on_task_done)
 
@@ -280,6 +298,7 @@ async def _retry_failed(
     row: dict,
     classify: ClassifyFn,
     moderate: ModerateFn,
+    edit_date: int = 0,
 ) -> str:
     """Take a FAILED row back for another attempt, or refuse in a stated way.
 
@@ -290,7 +309,13 @@ async def _retry_failed(
     max_attempts, cooldown = _retry_policy()
     won = await _store_call(
         "reclaim_failed",
-        reclaim_failed(chat_id, message_id, cooldown=cooldown, max_attempts=max_attempts),
+        reclaim_failed(
+            chat_id,
+            message_id,
+            cooldown=cooldown,
+            max_attempts=max_attempts,
+            edit_date=edit_date,
+        ),
     )
     if won is STORE_UNAVAILABLE:
         # Cannot tell whether the row moved. Treat as exhausted rather than
@@ -301,7 +326,7 @@ async def _retry_failed(
             f"Reclaiming failed classification for {chat_id}/{message_id} "
             f"(attempt {int(row.get('attempts') or 0) + 1} of {max_attempts})"
         )
-        return await _detach(chat_id, message_id, classify, moderate)
+        return await _detach(chat_id, message_id, classify, moderate, edit_date)
 
     if int(row.get("attempts") or 0) >= max_attempts:
         return RESULT_VERDICT_FAILED
@@ -314,8 +339,14 @@ async def run_with_verdict(
     message_id: int,
     classify: ClassifyFn,
     moderate: ModerateFn,
+    edit_date: int = 0,
 ) -> str:
-    """Gate one message's classification and moderation on the verdict store.
+    """Gate one DELIVERY's classification and moderation on the verdict store.
+
+    `edit_date` is the delivery dimension (#142): 0 for the original message,
+    the Telegram `edit_date` (unix seconds) for an edited one. One message can
+    therefore be classified and charged once per edit, while a redelivery of the
+    same edit - the case that charged an admin twice - is served from the store.
 
     Returns the moderation result id, or one of the RESULT_VERDICT_*
     constants. Never raises for a store failure: the inline path is taken
@@ -326,19 +357,37 @@ async def run_with_verdict(
         return await _inline(classify, moderate)
 
     if row is not None:
-        status = row["status"]
-        if status == "pending":
-            return RESULT_VERDICT_PENDING
-        if status == "failed":
-            return await _retry_failed(chat_id, message_id, row, classify, moderate)
-        if status == "decided":
-            return await _moderate_decided(chat_id, message_id, row, moderate)
+        stored_edit = int(row.get("edit_date") or 0)
+        if stored_edit > edit_date:
+            # An OLDER edit arriving after a newer one was already handled.
+            # Telegram does not guarantee delivery order, so this is not a
+            # duplicate - it is a superseded delivery. The newer verdict stands
+            # and nothing may be charged for content that has already been
+            # replaced on the customer's screen.
+            return RESULT_VERDICT_REPLAYED
+        if stored_edit == edit_date:
+            status = row["status"]
+            if status == "pending":
+                return RESULT_VERDICT_PENDING
+            if status == "failed":
+                return await _retry_failed(
+                    chat_id, message_id, row, classify, moderate, edit_date
+                )
+            if status == "decided":
+                return await _moderate_decided(
+                    chat_id, message_id, row, moderate, edit_date
+                )
+        # stored_edit < edit_date: a NEW edit of a message we have already seen.
+        # Fall through to claim_pending, whose adopt-newer-edit UPDATE resets the
+        # row in place and hands this delivery the claim.
 
-    won = await _store_call("claim_pending", claim_pending(chat_id, message_id))
+    won = await _store_call(
+        "claim_pending", claim_pending(chat_id, message_id, edit_date)
+    )
     if won is STORE_UNAVAILABLE:
         return await _inline(classify, moderate)
     if won is False:
         # A concurrent delivery claimed it between the read and the insert.
         return RESULT_VERDICT_PENDING
 
-    return await _detach(chat_id, message_id, classify, moderate)
+    return await _detach(chat_id, message_id, classify, moderate, edit_date)
