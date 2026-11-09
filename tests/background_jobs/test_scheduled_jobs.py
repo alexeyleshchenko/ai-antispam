@@ -10,6 +10,26 @@ from aiogram.exceptions import (
 )
 
 from app.background_jobs.scheduled_tasks import run_scheduled_jobs
+from app.database.group_operations import BotRights
+
+
+@pytest.fixture(autouse=True)
+def _fully_privileged_bot():
+    """Default the #143 bot-rights probe to "the bot holds both rights".
+
+    Every sweep test below predates #143 and patches only the roster read, so
+    without this they would each reach api.telegram.org once per seeded group —
+    a real network call from a unit test, and a summary that depends on it.
+    The #143 tests override this inside their own body, which wins because the
+    fixture has already applied its patch.
+    """
+    full = BotRights("administrator", True, True)
+    with patch(
+        "app.database.group_operations.probe_bot_moderation_rights",
+        new_callable=AsyncMock,
+        return_value=full,
+    ):
+        yield
 
 
 @pytest.mark.asyncio
@@ -102,6 +122,9 @@ async def test_sweep_counts_a_failing_group_and_keeps_sweeping(
         "dormant": 0,
         "new": 4,
         "demoted": 0,
+        "rights_flagged": 0,
+        "rights_cleared": 0,
+        "rights_unverified": 0,
         "total": 3,
     }, summary
 
@@ -247,7 +270,6 @@ async def _seed_seat(clean_db, group_id, admin_id, *, registered=False, credits=
 async def test_sweep_retires_a_chat_not_found_group(patched_db_conn, clean_db):
     """A chat Telegram says is gone is RETIRED — status only, roster intact (D1)."""
     from app.database.group_operations import (
-        SyncReport,
         sweep_group_administrators,
     )
 
@@ -304,7 +326,6 @@ async def test_sweep_retires_a_chat_not_found_group(patched_db_conn, clean_db):
 async def test_sweep_migrates_an_upgraded_group(patched_db_conn, clean_db):
     """A Telegram upgrade is MIGRATED, not retired: the new id inherits the identity."""
     from app.database.group_operations import (
-        SyncReport,
         sweep_group_administrators,
     )
 
@@ -499,3 +520,219 @@ async def test_sweep_counts_dormant_only_for_synced_groups(patched_db_conn, clea
     assert summary["migrated"] == 0
     assert summary["no_rights"] == 0
     assert summary["failed"] == 1
+
+
+# --- #143: the sweep asserts the bot's own membership -----------------------
+
+
+def _bot_admin(*, can_delete: bool, can_restrict: bool) -> BotRights:
+    return BotRights(
+        status="administrator",
+        can_delete_messages=can_delete,
+        can_restrict_members=can_restrict,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sweep_flags_a_group_the_bot_cannot_moderate(patched_db_conn, clean_db):
+    """A readable roster says nothing about whether we can delete anything in it."""
+    from app.database.group_operations import (
+        SyncReport,
+        sweep_group_administrators,
+    )
+
+    group_id = -1001430001
+    await _seed_group(clean_db, group_id)
+
+    async def fake_sync(chat_id, *, apply):
+        return SyncReport(
+            chat_id=chat_id,
+            title="g",
+            telegram=1,
+            known=1,
+            new=0,
+            demoted=0,
+            applied=apply,
+        )
+
+    with (
+        patch(
+            "app.database.group_operations.sync_group_administrators",
+            side_effect=fake_sync,
+        ),
+        patch(
+            "app.database.group_operations.probe_bot_moderation_rights",
+            new_callable=AsyncMock,
+            return_value=_bot_admin(can_delete=False, can_restrict=False),
+        ),
+    ):
+        summary = await sweep_group_administrators()
+
+    assert summary["rights_flagged"] == 1
+    assert summary["rights_unverified"] == 0
+    async with clean_db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT status, no_rights_detected_at FROM groups WHERE group_id = $1",
+            group_id,
+        )
+    # Flagged, never retired: the grace job owns the pause, and status is not ours.
+    assert row["status"] == "active"
+    assert row["no_rights_detected_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_sweep_counts_an_unverified_probe_without_touching_the_row(
+    patched_db_conn, clean_db
+):
+    """ "We could not ask" is a number in the summary, not health and not a flag."""
+    from app.database.group_operations import (
+        SyncReport,
+        sweep_group_administrators,
+    )
+
+    group_id = -1001430002
+    await _seed_group(clean_db, group_id)
+
+    async def fake_sync(chat_id, *, apply):
+        return SyncReport(
+            chat_id=chat_id,
+            title="g",
+            telegram=1,
+            known=1,
+            new=0,
+            demoted=0,
+            applied=apply,
+        )
+
+    with (
+        patch(
+            "app.database.group_operations.sync_group_administrators",
+            side_effect=fake_sync,
+        ),
+        patch(
+            "app.database.group_operations.probe_bot_moderation_rights",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("api down"),
+        ),
+    ):
+        summary = await sweep_group_administrators()
+
+    assert summary["rights_unverified"] == 1
+    assert summary["rights_flagged"] == 0
+    async with clean_db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT no_rights_detected_at FROM groups WHERE group_id = $1", group_id
+        )
+    assert row["no_rights_detected_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_sweep_clears_the_clock_when_rights_return(patched_db_conn, clean_db):
+    """The restore path: a group that regained its rights leaves the grace flow."""
+    from app.database.group_operations import (
+        SyncReport,
+        sweep_group_administrators,
+    )
+
+    group_id = -1001430003
+    await _seed_group(clean_db, group_id)
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            "UPDATE groups SET no_rights_detected_at = '2026-11-01 00:00:00' "
+            "WHERE group_id = $1",
+            group_id,
+        )
+
+    async def fake_sync(chat_id, *, apply):
+        return SyncReport(
+            chat_id=chat_id,
+            title="g",
+            telegram=1,
+            known=1,
+            new=0,
+            demoted=0,
+            applied=apply,
+        )
+
+    with (
+        patch(
+            "app.database.group_operations.sync_group_administrators",
+            side_effect=fake_sync,
+        ),
+        patch(
+            "app.database.group_operations.probe_bot_moderation_rights",
+            new_callable=AsyncMock,
+            return_value=_bot_admin(can_delete=True, can_restrict=True),
+        ),
+    ):
+        summary = await sweep_group_administrators()
+
+    assert summary["rights_cleared"] == 1
+    async with clean_db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT no_rights_detected_at FROM groups WHERE group_id = $1", group_id
+        )
+    assert row["no_rights_detected_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_rights_monitor_reports_and_repairs_nothing(patched_db_conn, clean_db):
+    """The inverse report: moderated on, bot rightsless — and it must not write."""
+    from app.background_jobs.moderation_monitor import (
+        check_moderated_groups_without_bot_rights,
+    )
+
+    paying, unpaid, off = -1001430011, -1001430012, -1001430013
+    await _seed_group(clean_db, paying)
+    await _seed_seat(clean_db, paying, 1430011, registered=True, credits=96)
+    await _seed_group(clean_db, unpaid)
+    await _seed_group(clean_db, off)
+    async with clean_db.acquire() as conn:
+        await conn.execute(
+            "UPDATE groups SET no_rights_detected_at = '2026-11-09 12:00:00' "
+            "WHERE group_id = ANY($1)",
+            [paying, unpaid, off],
+        )
+        # A group with moderation OFF is #41's population, not this one's.
+        await conn.execute(
+            "UPDATE groups SET moderation_enabled = 0 WHERE group_id = $1", off
+        )
+
+    groups = await check_moderated_groups_without_bot_rights()
+
+    # Ordered by group_id, which sorts the two negative ids by magnitude.
+    assert [group["group_id"] for group in groups] == [unpaid, paying]
+    assert [group["has_paying_admin"] for group in groups] == [False, True]
+
+    # Report-only: nothing about the rows moved, and the grace job still owns them.
+    async with clean_db.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT group_id, status, moderation_enabled, no_rights_detected_at "
+            "FROM groups ORDER BY group_id"
+        )
+    assert [(r["group_id"], r["status"]) for r in rows] == [
+        (off, "active"),
+        (unpaid, "active"),
+        (paying, "active"),
+    ]
+    assert all(r["no_rights_detected_at"] is not None for r in rows)
+    # Same group_id order: `off` is the most negative of the three.
+    assert [r["moderation_enabled"] for r in rows] == [0, 1, 1]
+
+
+@pytest.mark.asyncio
+async def test_rights_monitor_is_wired_into_the_daily_bundle():
+    """The sweep sets the clock; this leg is the only thing that reads it out."""
+    with (
+        patch(
+            "app.background_jobs.scheduled_tasks.check_moderated_groups_without_bot_rights",
+            new_callable=AsyncMock,
+        ) as mock_monitor,
+        patch(
+            "app.background_jobs.scheduled_tasks.sweep_group_administrators",
+            new_callable=AsyncMock,
+        ),
+    ):
+        await run_scheduled_jobs()
+
+    mock_monitor.assert_awaited_once()

@@ -5,7 +5,10 @@ from .coverage_heartbeat import (
     coverage_heartbeat_loop,
 )
 from .low_balance import leave_sole_payer_groups, run_low_balance_checks
-from .moderation_monitor import check_unmoderated_paid_groups
+from .moderation_monitor import (
+    check_moderated_groups_without_bot_rights,
+    check_unmoderated_paid_groups,
+)
 from .no_rights import leave_no_rights_groups
 from .scheduled_tasks import (
     run_scheduled_jobs,
@@ -15,6 +18,7 @@ from .scheduled_tasks import (
 )
 
 __all__ = [
+    "check_moderated_groups_without_bot_rights",
     "check_unmoderated_paid_groups",
     "coverage_heartbeat_cadence_seconds",
     "coverage_heartbeat_loop",

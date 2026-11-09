@@ -4,6 +4,7 @@ import logging
 from datetime import UTC, datetime
 from typing import NamedTuple, cast
 
+from aiogram import types
 from aiogram.exceptions import (
     TelegramAPIError,
     TelegramBadRequest,
@@ -554,6 +555,135 @@ async def clear_no_rights_detected_at(group_id: int) -> None:
             """,
             group_id,
         )
+
+
+class BotRights(NamedTuple):
+    """What the BOT's own membership in one chat allows (issue #143).
+
+    `status` is Telegram's word (`administrator`, `member`, `restricted`, …),
+    kept verbatim because the two failure shapes need different sentences: a
+    bot that was never promoted stopped receiving the group's messages, while
+    an `administrator` with the rights withheld still receives every one of
+    them and reads healthy on any check that looks at status alone.
+    """
+
+    status: str
+    can_delete_messages: bool
+    can_restrict_members: bool
+
+    @property
+    def can_moderate(self) -> bool:
+        return (
+            self.status == "administrator"
+            and self.can_delete_messages
+            and self.can_restrict_members
+        )
+
+    @property
+    def missing(self) -> str:
+        """The membership's shortfall, named for an operator line."""
+        if self.status != "administrator":
+            return f"not an administrator (status={self.status})"
+        absent = [
+            name
+            for name, granted in (
+                ("can_delete_messages", self.can_delete_messages),
+                ("can_restrict_members", self.can_restrict_members),
+            )
+            if not granted
+        ]
+        return ", ".join(absent)
+
+
+async def probe_bot_moderation_rights(group_id: int) -> BotRights:
+    """Ask Telegram what the BOT ITSELF may do in this chat (issue #143).
+
+    The roster read answers "who are the admins"; this answers "can we act on
+    what they send". Until #143 nothing asked the second question, and the
+    measured cost was 3 of 43 active, moderation-enabled groups that could not
+    delete a single message — one of them an `administrator` with both rights
+    false, so it received everything and looked healthy everywhere.
+
+    One request per group per sweep. `bot.id` is parsed from the token, so
+    asserting the bot's own identity costs nothing and can never be skipped
+    silently: a token that cannot be parsed raises here, and the caller reads
+    that as `unverified` rather than as health.
+    """
+    member = await bot.get_chat_member(chat_id=group_id, user_id=bot.id)
+    if isinstance(member, types.ChatMemberAdministrator):
+        return BotRights(
+            status="administrator",
+            can_delete_messages=bool(member.can_delete_messages),
+            can_restrict_members=bool(member.can_restrict_members),
+        )
+    if isinstance(member, types.ChatMemberOwner):
+        # Unreachable for a bot, but a creator holds every right by definition.
+        return BotRights(
+            status="creator",
+            can_delete_messages=True,
+            can_restrict_members=True,
+        )
+    # aiogram models `status` as a `ChatMemberStatus` enum; its `.value` is the
+    # plain word Telegram uses, and it is that word an operator line must carry
+    # (`status=member`, never `status=ChatMemberStatus.MEMBER`).
+    return BotRights(
+        status=getattr(member.status, "value", member.status),
+        can_delete_messages=False,
+        can_restrict_members=False,
+    )
+
+
+async def reconcile_bot_rights(group_id: int, *, clock_set: bool) -> str:
+    """Drive the no-rights clock from the bot's own rights (issue #143).
+
+    `clock_set` is the row's `no_rights_detected_at IS NOT NULL`, read by the
+    sweep in the same query that selected the group — so this costs no extra
+    query and, more importantly, writes only on a TRANSITION. A flagged group
+    stays flagged without a second UPDATE, and a healthy group with no clock
+    stays untouched: 39 of 43 groups write nothing on a normal sweep.
+
+    Returns one of:
+      "flagged"    — cannot moderate, clock was NULL: first detection
+      "held"       — cannot moderate, clock already running: no churn
+      "cleared"    — fully privileged and a stale clock was removed
+      "ok"         — fully privileged, nothing to clear
+      "unverified" — the probe failed; the clock is left EXACTLY as it was
+
+    "unverified" is the load-bearing case: "we could not ask" must never read
+    as "we asked and it is fine". The sweep counts it separately, so a probe
+    that stops working is visible as a number rather than laundered into
+    health — which is the whole defect class this closes.
+    """
+    try:
+        rights = await probe_bot_moderation_rights(group_id)
+    except Exception as exc:  # noqa: BLE001 — every probe failure is unverified
+        logger.warning(
+            f"bot-rights probe of {format_chat_log(group_id)} failed — "
+            f"{type(exc).__name__}: {exc}; no_rights clock left "
+            f"{'set' if clock_set else 'unset'}"
+        )
+        return "unverified"
+
+    if rights.can_moderate:
+        if not clock_set:
+            return "ok"
+        await clear_no_rights_detected_at(group_id)
+        logger.info(
+            f"bot-rights: {format_chat_log(group_id)} holds full moderation "
+            "rights — no_rights clock cleared"
+        )
+        return "cleared"
+
+    if clock_set:
+        return "held"
+    await set_no_rights_detected_at(group_id)
+    logger.error(
+        f"bot-rights: {format_chat_log(group_id)} is advertised as moderated "
+        f"but the bot cannot moderate it — {rights.missing}. No_rights clock "
+        "started; the grace job notifies the admins and pauses the group on "
+        "its own clock."
+    )
+    return "flagged"
 
 
 async def get_groups_with_no_rights_past_grace(grace_days: int) -> list[int]:
@@ -1403,6 +1533,7 @@ class SyncReport(NamedTuple):
             f"demoted={self.demoted}"
         )
 
+
 async def sync_group_administrators(chat_id: int, *, apply: bool = False) -> SyncReport:
     """Reconcile one group's admin roster against Telegram's own list.
 
@@ -1491,9 +1622,8 @@ async def sync_group_administrators(chat_id: int, *, apply: bool = False) -> Syn
         applied=apply,
     )
 
-async def set_admin_now(
-    conn, group_id: int, admin_id: int, is_admin_now: bool
-) -> int:
+
+async def set_admin_now(conn, group_id: int, admin_id: int, is_admin_now: bool) -> int:
     """Flip ONE seat's `is_admin_now`, never creating a row.
 
     The `chat_member` demotion path needs the update half of
@@ -1513,11 +1643,13 @@ async def set_admin_now(
     )
     return _affected_rows(result)
 
+
 # A group is DORMANT — quiet rather than dead — when nothing has happened in it
 # for this long AND no paying admin is attached. Dormancy is a report, never an
 # action (D4): a quiet group with a payer still gets its roster refreshed, and a
 # quiet group without one is named in the summary so an operator can decide.
 DORMANT_AFTER_DAYS = 90
+
 
 async def sweep_group_administrators(
     concurrency: int = 5, limit: int = 500
@@ -1547,7 +1679,12 @@ async def sweep_group_administrators(
 
     Returns:
         {"synced": n, "failed": n, "retired": n, "migrated": n, "no_rights": n,
-         "dormant": n, "new": n, "demoted": n, "total": n}.
+         "dormant": n, "new": n, "demoted": n, "rights_flagged": n,
+         "rights_cleared": n, "rights_unverified": n, "total": n}.
+
+        The three `rights_*` buckets are #143: the bot's OWN membership is
+        asserted once per group per sweep, because a readable member list says
+        nothing about whether we can delete anything in it.
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1559,6 +1696,7 @@ async def sweep_group_administrators(
         rows = await conn.fetch(
             f"""
             SELECT g.group_id,
+                   g.no_rights_detected_at,
                    (g.last_active < NOW() - INTERVAL '{DORMANT_AFTER_DAYS} days')
                        AS is_stale,
                    EXISTS (
@@ -1586,6 +1724,9 @@ async def sweep_group_administrators(
             "dormant": 0,
             "new": 0,
             "demoted": 0,
+            "rights_flagged": 0,
+            "rights_cleared": 0,
+            "rights_unverified": 0,
             "total": 0,
         }
 
@@ -1598,6 +1739,9 @@ async def sweep_group_administrators(
         "dormant": 0,
         "new": 0,
         "demoted": 0,
+        "rights_flagged": 0,
+        "rights_cleared": 0,
+        "rights_unverified": 0,
     }
     sem = asyncio.Semaphore(concurrency)
 
@@ -1663,9 +1807,7 @@ async def sweep_group_administrators(
                     exc_info=True,
                 )
                 return "failed"
-            logger.info(
-                f"sweep: retired {format_chat_log(group_id)} as inaccessible"
-            )
+            logger.info(f"sweep: retired {format_chat_log(group_id)} as inaccessible")
             return "retired"
         return "unknown"
 
@@ -1689,6 +1831,20 @@ async def sweep_group_administrators(
             counts["synced"] += 1
             counts["new"] += report.new
             counts["demoted"] += report.demoted
+            # #143: the roster read proves the LIST was readable, never that we
+            # can act on it. Assert the bot's own membership here — after the
+            # sync, so a probe failure cannot cost the group its roster
+            # refresh, and outside the sync's try, so a probe failure is
+            # `unverified` rather than a lifecycle event.
+            rights = await reconcile_bot_rights(
+                group_id, clock_set=row["no_rights_detected_at"] is not None
+            )
+            if rights == "flagged":
+                counts["rights_flagged"] += 1
+            elif rights == "cleared":
+                counts["rights_cleared"] += 1
+            elif rights == "unverified":
+                counts["rights_unverified"] += 1
             # Dormant is counted only for groups we actually synced: a retired or
             # migrated row is not a live quiet group, and counting it would
             # double-report the same groups the retirement buckets already name.
@@ -1699,6 +1855,7 @@ async def sweep_group_administrators(
     summary = {**counts, "total": len(rows)}
     logger.info(f"sweep_group_administrators: {summary}")
     return summary
+
 
 async def get_paid_groups_with_moderation_off() -> list[dict]:
     """Active groups with moderation off while a PAYING admin is attached (issue #41).
@@ -1737,9 +1894,51 @@ async def get_paid_groups_with_moderation_off() -> list[dict]:
     return [dict(row) for row in rows]
 
 
+async def get_moderated_groups_without_bot_rights() -> list[dict]:
+    """Active groups advertised as moderated whose bot cannot enforce it (issue #143).
+
+    The inverse of `get_paid_groups_with_moderation_off`, and the one state no
+    surface reported: `moderation_enabled = true` — so every dashboard, every
+    status-only check and the operator's own reading call the group protected —
+    while the bot's own membership cannot delete a message. Measured
+    2026-11-09: 3 of 43.
+
+    Reads the clock the sweep sets (`no_rights_detected_at`), never Telegram:
+    this is a report, and a report must not depend on the API being reachable
+    to describe what the last sweep found. `has_paying_admin` separates a
+    customer losing protection from a group nobody is paying for.
+
+    Returns one row per offending group, empty when healthy.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT g.group_id,
+                   g.title,
+                   g.no_rights_detected_at,
+                   EXISTS (
+                       SELECT 1
+                       FROM group_administrators ga
+                       JOIN administrators a ON a.admin_id = ga.admin_id
+                       WHERE ga.group_id = g.group_id
+                         AND {PAYING_SEAT}
+                   ) AS has_paying_admin
+            FROM groups g
+            WHERE g.status = $1
+              AND g.moderation_enabled = true
+              AND g.no_rights_detected_at IS NOT NULL
+            ORDER BY g.group_id
+            """,
+            GroupStatus.ACTIVE.value,
+        )
+    return [dict(row) for row in rows]
+
+
 # ---------------------------------------------------------------------------
 # #130 one-shot repair — reset the boot-stamped strangers, promote the proven
 # ---------------------------------------------------------------------------
+
 
 def _in_placeholders(values: list[int], start: int = 1) -> str:
     """`$1, $2, …` for an IN clause; pass the values in the same order."""
@@ -1782,9 +1981,7 @@ ROSTER_RESET_PREDICATE = """
 """
 
 
-async def collect_roster_repair(
-    conn, group_ids: list[int] | None = None
-) -> dict:
+async def collect_roster_repair(conn, group_ids: list[int] | None = None) -> dict:
     """Read the repair's two cohorts. Writes nothing.
 
     The ONE read the dry run and `--apply` both use, so the preview and the
@@ -1955,9 +2152,7 @@ async def repair_roster_activation(
         promote_scope = ""
         promote_params: list[int] = []
         if group_ids:
-            promote_scope = (
-                f" AND group_id IN ({_in_placeholders(group_ids)})"
-            )
+            promote_scope = f" AND group_id IN ({_in_placeholders(group_ids)})"
             promote_params = list(group_ids)
         result = await conn.execute(
             f"""

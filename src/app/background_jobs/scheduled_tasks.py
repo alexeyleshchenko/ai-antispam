@@ -34,7 +34,10 @@ from ..database.message_lookup import cleanup_old_lookup_entries
 from ..database.message_operations import cleanup_old_message_history
 from ..database.spam_examples import cleanup_pending_spam_examples
 from .low_balance import run_low_balance_checks
-from .moderation_monitor import check_unmoderated_paid_groups
+from .moderation_monitor import (
+    check_moderated_groups_without_bot_rights,
+    check_unmoderated_paid_groups,
+)
 from .no_rights import leave_no_rights_groups
 
 logger = logging.getLogger(__name__)
@@ -99,6 +102,14 @@ async def run_scheduled_jobs() -> None:
         await sweep_group_administrators()
     except Exception:
         logger.exception("admin roster sweep failed")
+
+    # #143: the inverse report, and it must run AFTER the sweep — the sweep is
+    # what sets the clock this reads. A moderated group whose bot cannot delete
+    # is the state nothing surfaced before #143.
+    try:
+        await check_moderated_groups_without_bot_rights()
+    except Exception:
+        logger.exception("bot-rights monitor failed")
 
     # Last: reports the SETTLED state, after the jobs above may have paused or
     # reactivated groups (issue #41).
