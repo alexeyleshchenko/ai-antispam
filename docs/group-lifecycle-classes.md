@@ -33,6 +33,52 @@ carry either marker, and a rights problem is recoverable while a missing chat is
 not. Retiring on a rights error would silently cancel a paying customer's
 protection: `-1001156881276` alone carries 7 registered seats.
 
+### The second detector: the bot's own membership (#143)
+
+`is_member_list_inaccessible_error` fires only when the member list cannot be
+**read**. That is one way to lack rights, and until #143 it was the only one
+anything looked for — so a group whose list reads perfectly while the bot holds
+neither `can_delete_messages` nor `can_restrict_members` sat `status='active'`,
+`moderation_enabled=true`, and passed every check the system had. Measured
+2026-11-09: 3 of 43 moderated groups, one of them an `administrator` with both
+rights false — which still receives every message, so it reads healthy on any
+check that looks at status alone.
+
+The sweep now asserts the bot's **own** membership once per group per sweep
+(`probe_bot_moderation_rights`, one `get_chat_member(bot_id)` call) and drives
+the same clock:
+
+| Probe result | `no_rights_detected_at` | Bucket |
+|---|---|---|
+| administrator with both rights | cleared if set, untouched otherwise | `rights_cleared` / — |
+| administrator missing either right | set on first detection | `rights_flagged` |
+| not an administrator (`member`, `restricted`, …) | set on first detection | `rights_flagged` |
+| the probe itself failed | **left exactly as it was** | `rights_unverified` |
+
+Three properties are deliberate:
+
+- **The probe runs after the roster sync, outside its `try`.** A probe failure
+  must not cost the group its roster refresh, and it must not be classified as a
+  lifecycle event — it is `unverified`, a number in the summary.
+- **A failed probe is never health.** It neither sets nor clears the clock. "We
+  could not ask" and "we asked and it is fine" are different answers, and
+  conflating them is the defect class this closes.
+- **Writes happen on a transition only.** The sweep selects
+  `no_rights_detected_at` in the same query that selects the group, so 39 of 43
+  healthy groups write nothing and a flagged group does not churn a fresh stamp
+  every day.
+
+The action is unchanged: the clock routes into the same 7-day grace, the same
+admin notification and the same pause. `reconcile_bot_rights` writes no
+`status` and no `moderation_enabled` — #141's ruling rejected every disposition
+that would have added a second writer of `status`.
+
+Operator visibility: one `ERROR` line at **first detection**, naming the group
+and which right is missing (the Telegram log handler sits at `WARNING`, so the
+`INFO` line the older path emitted reached nobody), plus a daily report-only
+count from `check_moderated_groups_without_bot_rights` — the inverse of the #41
+monitor, reading the clock the sweep sets and repairing nothing.
+
 ## The reason vocabulary is two strings
 
 `entity_events.reason` takes `sweep_inaccessible` (the sweep retired it) and
@@ -70,6 +116,10 @@ already the observation; a second row would duplicate it.
 `leave_no_rights_groups()` runs before the sweep (`scheduled_tasks.py:64` then
 `:99`). A group whose grace expired is left, and the sweep then sees the
 consequence rather than racing it.
+
+The two moderation monitors run **after** the sweep, and must: the #143 leg
+reports the clock the sweep is what sets, so running it first would describe
+yesterday's state. Both are reports — neither repairs.
 
 ## Rows
 
