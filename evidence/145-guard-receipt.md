@@ -115,3 +115,18 @@ which HQ reproduced independently. The row is corrected by a later row.
 **Do not read "grace=0 dry run" as a suppressed production run.** The probe suppressed
 every action, but a real run at grace=0 would have left the two `member` groups. The
 hold and the pause are what keep the other three out of that path.
+
+## Condition 4 is armed, not forgotten
+
+A one-shot cron verifies it: `ai-antispam-145-condition4`, id
+`a41957f6-b3cc-4601-83ab-802fb1b4b049`, fires **2026-11-17T12:00Z** and retires itself.
+
+Why the 17th and not the 16th: `scheduled_jobs_loop` runs jobs immediately on
+container entry then sleeps `SECONDS_PER_DAY`, so the tick is anchored to container
+start, not to a wall-clock hour. A container started one second BEFORE the expiry
+acts on nothing and next runs 24 h later at `2026-11-17T11:12:44Z` — the latest
+possible acting tick. 12:00Z clears that by 47m16s. Any restart at or after the
+expiry instant acts immediately, which is earlier still.
+
+The job reads this file's checklist rather than restating it, and if the tick has
+not yet fired it reports that and re-arms instead of declaring a failure.
