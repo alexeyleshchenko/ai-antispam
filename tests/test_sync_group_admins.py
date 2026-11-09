@@ -327,6 +327,34 @@ async def test_empty_admin_list_demotes_nobody(patched_db_conn, clean_db, monkey
 
 
 @pytest.mark.asyncio
+async def test_empty_admin_list_preview_promises_no_demotion(
+    patched_db_conn, clean_db, monkeypatch
+):
+    """The DRY RUN must not promise a write `--apply` refuses.
+
+    Measured on the live fleet 2026-11-09: three groups reported `demoted=1`
+    in the preview and `demoted=0` under `--apply`, because the empty-list
+    guard zeroed the count on the write path only. An operator reading that
+    preview would have expected three seats demoted that were never touched —
+    and the preview is the only thing they have to decide on.
+    """
+    group_id = -1001300011
+    async with clean_db.acquire() as conn:
+        await _seed_group(conn, group_id)
+        await _seed_seat(conn, group_id, 9802, registered=True)
+
+    _patch_admins(monkeypatch, [])
+
+    preview = await sync_group_administrators(group_id, apply=False)
+    written = await sync_group_administrators(group_id, apply=True)
+
+    assert preview.demoted == 0, "the preview must not promise a demotion it refuses"
+    assert preview.demoted == written.demoted, (
+        "preview and write must agree by construction, not only on the happy path"
+    )
+    assert (await _roster(clean_db, group_id))[9802] == (True, True)
+
+@pytest.mark.asyncio
 async def test_bot_only_admin_list_demotes_nobody(patched_db_conn, clean_db, monkeypatch):
     """The same trap one step in: a list of only bots is still not a real read."""
     group_id = -1001300010

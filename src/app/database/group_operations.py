@@ -1158,11 +1158,25 @@ async def sync_group_administrators(chat_id: int, *, apply: bool = False) -> Syn
         known = sum(1 for admin_id in seen if current.get(admin_id))
         # Predicted from the read, so a dry run counts exactly what --apply
         # will write.
-        demoted = sum(
-            1
-            for admin_id, is_admin in current.items()
-            if is_admin and admin_id not in seen_set
-        )
+        if seen:
+            demoted = sum(
+                1
+                for admin_id, is_admin in current.items()
+                if is_admin and admin_id not in seen_set
+            )
+        else:
+            # An empty (or bot-only) admin list is a failed read, not a group
+            # with no admins. Demoting the whole roster on it would blank the
+            # skip set for a live group — so NEITHER the write pass NOR the
+            # preview may report a demotion here. A dry run that promises a
+            # write `--apply` refuses is a preview that lies about the write,
+            # and that preview is the only thing standing between an operator
+            # and an irreversible roster change.
+            logger.warning(
+                f"sync_group_administrators: Telegram listed no human admins "
+                f"for {format_chat_log(chat_id)} — nothing to write"
+            )
+            demoted = 0
 
         if apply and seen:
             async with conn.transaction():
@@ -1170,15 +1184,6 @@ async def sync_group_administrators(chat_id: int, *, apply: bool = False) -> Syn
                     await upsert_group_admin(conn, chat_id, admin_id)
                 if demoted:
                     await mark_admins_not_admin(conn, chat_id, seen)
-        elif apply and not seen:
-            # An empty (or bot-only) admin list is a failed read, not a group
-            # with no admins. Demoting the whole roster on it would blank the
-            # skip set for a live group.
-            logger.warning(
-                f"sync_group_administrators: Telegram listed no human admins "
-                f"for {format_chat_log(chat_id)} — nothing written"
-            )
-            demoted = 0
 
     return SyncReport(
         chat_id=chat_id,
