@@ -1802,8 +1802,12 @@ async def test_pause_group_preserving_data_keeps_mappings(patched_db_conn, clean
             sv_chat,
             sv_club,
         )
+        # Both rows carry a roster row live (HQ, 2026-11-09): SV CLUB's is the
+        # 67-credit admin, SV CHAT's is the discussion-group mapping.
         await conn.execute(
-            "INSERT INTO group_administrators (group_id, admin_id) VALUES ($1, $2)",
+            "INSERT INTO group_administrators (group_id, admin_id) VALUES ($1, $2), ($3, $4)",
+            sv_club,
+            admin_id,
             sv_chat,
             admin_id,
         )
@@ -1828,6 +1832,9 @@ async def test_pause_group_preserving_data_keeps_mappings(patched_db_conn, clean
             "SELECT status, moderation_enabled, bot_removed_at FROM groups WHERE group_id = $1",
             sv_chat,
         )
+        club_roster = await conn.fetchval(
+            "SELECT count(*) FROM group_administrators WHERE group_id = $1", sv_club
+        )
         roster = await conn.fetchval(
             "SELECT count(*) FROM group_administrators WHERE group_id = $1", sv_chat
         )
@@ -1846,7 +1853,8 @@ async def test_pause_group_preserving_data_keeps_mappings(patched_db_conn, clean
     # bool(): asyncpg returns True, the SQLite test adapter returns 1.
     assert bool(chat["moderation_enabled"]) is True
     assert chat["bot_removed_at"] is None
-    assert roster == 1, "roster row destroyed by the pause"
+    assert club_roster == 1, "the channel's own roster row was destroyed by the pause"
+    assert roster == 1, "the discussion group's roster row was destroyed by the pause"
     assert members == approved, "approved members destroyed by the pause"
     assert event["action"] == "group_paused"
     assert event["reason"] == "no_rights_protected_channel"
