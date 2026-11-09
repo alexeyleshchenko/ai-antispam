@@ -1,8 +1,20 @@
 """
 No-rights grace period jobs.
 
-Scheduled daily. Leaves groups where bot has no required rights (delete_messages,
-restrict_members) after grace period. Notifies admins before leaving.
+Two jobs, one clock (`groups.no_rights_detected_at`):
+
+- `notify_degraded_admin_rights` fires ONCE per detection, for groups where the
+  bot is still an ADMINISTRATOR but has a right withheld (#144). Those groups
+  never reach the leave branch, so this is the only surface that tells their
+  admins anything at all.
+- `leave_no_rights_groups` runs daily and leaves the groups the bot genuinely
+  cannot act in (not an administrator, kicked, or unreadable) after the grace
+  period, notifying the admins on the way out.
+
+The split is #144's: leaving a degraded administrator destroys `approved_members`
+and `group_administrators` irreversibly, over one unticked checkbox in
+Telegram's own UI, while the bot still receives every update and can be
+repaired by a single permission change.
 """
 
 import logging
@@ -28,6 +40,65 @@ from ..database.group_operations import (
 from ..i18n import resolve_lang, t
 
 logger = logging.getLogger(__name__)
+
+
+async def notify_degraded_admin_rights(degraded: list[dict]) -> int:
+    """Tell the admins of a degraded-administrator group, once, at detection (#144).
+
+    `degraded` is the sweep's `rights_degraded` payload: the groups whose clock
+    went `NULL → NOW()` on THIS sweep while the bot was an administrator with a
+    right withheld. One entry per detection, so this is one-shot by
+    construction — the sweep only reports the transition, never the state.
+
+    Why it cannot ride the leave job: `admin_to_left_groups` is populated inside
+    the leave branch (`_leave_group_and_record_for_notification`), so a class
+    that stays would be notified about nothing. That is the whole reason this
+    function exists.
+
+    The message NAMES the missing right in Telegram's own words ("Delete
+    messages", "Ban users"): the admin has to tick a specific checkbox, and
+    "we lost rights" is not actionable. HQ's constraint, 2026-11-09.
+
+    Returns the number of admins actually messaged.
+    """
+    if not degraded:
+        return 0
+
+    sent = 0
+    for entry in degraded:
+        group_id = entry["group_id"]
+        group = await get_group(group_id)
+        admin_ids = list(group.admin_ids) if group and group.admin_ids else []
+        if not admin_ids:
+            logger.warning(
+                f"No-rights notify: {format_chat_log(group_id, entry.get('title'))} "
+                "is a degraded administrator with no known admin to tell"
+            )
+            continue
+
+        display = format_chat_or_channel_display(
+            entry.get("title") or str(group_id), None, t("en", "common.group")
+        )
+        for admin_id in admin_ids:
+            admin = await get_admin(admin_id)
+            if admin and not admin.is_active:
+                continue
+            lang = resolve_lang(None, admin)
+            text = t(
+                lang,
+                "no_rights.degraded_rights",
+                group=display,
+                missing=entry.get("missing") or t(lang, "no_rights.some_rights"),
+                add_to_group_url=get_add_to_group_url(),
+            )
+            if await send_admin_dm(admin_id, text, log_context="no-rights-degraded"):
+                sent += 1
+        logger.info(
+            f"No-rights notify: told {len(admin_ids)} admin(s) of "
+            f"{format_chat_log(group_id, entry.get('title'))} that the bot is an "
+            f"administrator without {entry.get('missing')}"
+        )
+    return sent
 
 
 async def _leave_group_and_record_for_notification(
@@ -86,15 +157,35 @@ async def leave_no_rights_groups() -> None:
 
         try:
             member = await bot.get_chat_member(group_id, bot_user_id)
-            if isinstance(member, ChatMemberAdministrator) and (
-                getattr(member, "can_delete_messages", False)
-                and getattr(member, "can_restrict_members", False)
-            ):
-                await clear_no_rights_detected_at(group_id)
-                logger.info(
-                    f"Rights restored in group {format_chat_log(group_id, title, username)}, cleared flag"
-                )
-                skip_leave = True
+            if isinstance(member, ChatMemberAdministrator):
+                can_delete = getattr(member, "can_delete_messages", False)
+                can_restrict = getattr(member, "can_restrict_members", False)
+                if can_delete and can_restrict:
+                    await clear_no_rights_detected_at(group_id)
+                    logger.info(
+                        f"Rights restored in group {format_chat_log(group_id, title, username)}, cleared flag"
+                    )
+                    skip_leave = True
+                else:
+                    # #144: still an ADMINISTRATOR, merely degraded. It receives
+                    # every update and one unticked checkbox repairs it, while
+                    # leaving would destroy approved_members irreversibly. Hold
+                    # the flag and stay; the detection DM already fired when the
+                    # clock started, so there is nothing to send here.
+                    withheld = ", ".join(
+                        name
+                        for name, granted in (
+                            ("can_delete_messages", can_delete),
+                            ("can_restrict_members", can_restrict),
+                        )
+                        if not granted
+                    )
+                    logger.info(
+                        f"Holding group {format_chat_log(group_id, title, username)}: "
+                        f"bot is an administrator without {withheld} — not leaving "
+                        "(repairable by permission change; flag kept)"
+                    )
+                    skip_leave = True
         except Exception as e:
             if is_group_inaccessible_error(e):
                 logger.info(

@@ -38,7 +38,7 @@ from .moderation_monitor import (
     check_moderated_groups_without_bot_rights,
     check_unmoderated_paid_groups,
 )
-from .no_rights import leave_no_rights_groups
+from .no_rights import leave_no_rights_groups, notify_degraded_admin_rights
 
 logger = logging.getLogger(__name__)
 SECONDS_PER_DAY = 86400
@@ -98,8 +98,14 @@ async def run_scheduled_jobs() -> None:
     # event writers cannot see — promotions made while the bot was absent, and
     # updates missed while it was down. Runs before the monitor below so the
     # report describes the post-sync state.
+    #
+    # #144: the sweep's `rights_degraded` payload is the detection event for a
+    # degraded administrator — the one class the grace job will never reach, so
+    # this is where its admins are told. One DM per detection, by construction:
+    # the sweep only reports the `NULL → NOW()` transition.
     try:
-        await sweep_group_administrators()
+        sweep = await sweep_group_administrators()
+        await notify_degraded_admin_rights(sweep.get("rights_degraded") or [])
     except Exception:
         logger.exception("admin roster sweep failed")
 

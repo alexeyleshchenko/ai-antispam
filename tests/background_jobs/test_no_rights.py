@@ -365,3 +365,280 @@ async def test_leave_no_rights_groups_falls_back_to_bare_id(caplog):
         "Left no-rights group" in r.getMessage() and "-100123" in r.getMessage()
         for r in caplog.records
     )
+
+
+# --- #144: the leave leg is split by membership class ------------------------
+#
+# The job used to answer one class with one action. A group where the bot is
+# still an ADMINISTRATOR with a right withheld receives every update and is one
+# checkbox away from repair, but `perform_complete_group_cleanup` deleted its
+# `approved_members` and `group_administrators` irreversibly. Measured
+# 2026-11-09: two of five flagged groups were that class, one of them paying
+# (96 credits, 2 approved members).
+
+
+def _bot_user():
+    from aiogram import types
+
+    return types.User(id=999, is_bot=True, first_name="bot")
+
+
+def _real_administrator(*, can_delete: bool, can_restrict: bool):
+    """A real aiogram administrator, so the isinstance branch is the production one."""
+    from aiogram import types
+
+    return types.ChatMemberAdministrator(
+        user=_bot_user(),
+        can_be_edited=False,
+        is_anonymous=False,
+        can_manage_chat=True,
+        can_delete_messages=can_delete,
+        can_manage_video_chats=True,
+        can_restrict_members=can_restrict,
+        can_promote_members=False,
+        can_change_info=True,
+        can_invite_users=True,
+        can_post_stories=False,
+        can_edit_stories=False,
+        can_delete_stories=False,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("can_delete", "can_restrict", "missing"),
+    [
+        (True, False, "can_restrict_members"),
+        (False, True, "can_delete_messages"),
+        (False, False, "can_delete_messages, can_restrict_members"),
+    ],
+)
+async def test_degraded_administrator_is_held_and_never_left(
+    can_delete, can_restrict, missing, caplog
+):
+    """Close condition 1: administrator-with-a-right-withheld stays, flag kept."""
+    import logging
+
+    with (
+        patch("app.background_jobs.no_rights.load_config") as mock_load,
+        patch(
+            "app.background_jobs.no_rights.get_groups_with_no_rights_past_grace"
+        ) as mock_get,
+        patch("app.background_jobs.no_rights.bot") as mock_bot,
+        patch(
+            "app.background_jobs.no_rights.perform_complete_group_cleanup",
+            new_callable=AsyncMock,
+        ) as mock_cleanup,
+        patch(
+            "app.background_jobs.no_rights.clear_no_rights_detected_at",
+            new_callable=AsyncMock,
+        ) as mock_clear,
+    ):
+        mock_load.return_value = {"billing": {"no_rights_grace_days": 7}}
+        mock_get.return_value = [-1002496127723]
+        mock_bot.me = AsyncMock(return_value=MagicMock(id=999, username="test_bot"))
+        mock_bot.get_chat = AsyncMock(
+            return_value=MagicMock(title="Degraded Group", username=None)
+        )
+        mock_bot.get_chat_member = AsyncMock(
+            return_value=_real_administrator(
+                can_delete=can_delete, can_restrict=can_restrict
+            )
+        )
+
+        with caplog.at_level(logging.INFO, logger="app.background_jobs.no_rights"):
+            await leave_no_rights_groups()
+
+        # The irreversible half must not run, and the clock must keep running so
+        # the group is not silently dropped from the flow.
+        mock_cleanup.assert_not_called()
+        mock_clear.assert_not_called()
+
+    assert any(
+        "Holding group" in r.getMessage() and missing in r.getMessage()
+        for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+
+
+@pytest.mark.asyncio
+async def test_plain_member_still_leaves():
+    """Close condition 2: the class that genuinely cannot act is still evicted."""
+    from aiogram import types
+
+    with (
+        patch("app.background_jobs.no_rights.load_config") as mock_load,
+        patch(
+            "app.background_jobs.no_rights.get_groups_with_no_rights_past_grace"
+        ) as mock_get,
+        patch("app.background_jobs.no_rights.bot") as mock_bot,
+        patch(
+            "app.background_jobs.no_rights.get_group",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "app.background_jobs.no_rights.perform_complete_group_cleanup",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as mock_cleanup,
+        patch("app.background_jobs.no_rights.send_admin_dm", new_callable=AsyncMock),
+    ):
+        mock_load.return_value = {"billing": {"no_rights_grace_days": 7}}
+        mock_get.return_value = [-1003078404548]
+        mock_bot.me = AsyncMock(return_value=MagicMock(id=999, username="test_bot"))
+        mock_bot.get_chat = AsyncMock(
+            return_value=MagicMock(title="Member Group", username=None)
+        )
+        mock_bot.get_chat_member = AsyncMock(
+            return_value=types.ChatMemberMember(user=_bot_user())
+        )
+
+        await leave_no_rights_groups()
+
+        mock_cleanup.assert_called_once_with(
+            -1003078404548,
+            "Member Group",
+            None,
+            status="paused",
+            reason="no_rights_past_grace",
+        )
+
+
+@pytest.mark.asyncio
+async def test_kicked_bot_still_leaves():
+    """Close condition 2: `kicked` is unrecoverable in place — still leaves."""
+    from aiogram import types
+
+    with (
+        patch("app.background_jobs.no_rights.load_config") as mock_load,
+        patch(
+            "app.background_jobs.no_rights.get_groups_with_no_rights_past_grace"
+        ) as mock_get,
+        patch("app.background_jobs.no_rights.bot") as mock_bot,
+        patch(
+            "app.background_jobs.no_rights.get_group",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "app.background_jobs.no_rights.perform_complete_group_cleanup",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as mock_cleanup,
+        patch("app.background_jobs.no_rights.send_admin_dm", new_callable=AsyncMock),
+    ):
+        mock_load.return_value = {"billing": {"no_rights_grace_days": 7}}
+        mock_get.return_value = [-1009999999999]
+        mock_bot.me = AsyncMock(return_value=MagicMock(id=999, username="test_bot"))
+        mock_bot.get_chat = AsyncMock(
+            return_value=MagicMock(title="Kicked Group", username=None)
+        )
+        mock_bot.get_chat_member = AsyncMock(
+            return_value=types.ChatMemberBanned(
+                user=_bot_user(), until_date=0, can_be_edited=False
+            )
+        )
+
+        await leave_no_rights_groups()
+
+        mock_cleanup.assert_called_once()
+
+
+# --- #144 close condition 3: the detection DM, one shot ----------------------
+
+
+@pytest.mark.asyncio
+async def test_detection_dm_names_the_missing_right():
+    """ "You removed Delete messages" is actionable; "we lost rights" is not."""
+    from app.background_jobs.no_rights import notify_degraded_admin_rights
+
+    with (
+        patch(
+            "app.background_jobs.no_rights.get_group", new_callable=AsyncMock
+        ) as mock_get_group,
+        patch(
+            "app.background_jobs.no_rights.get_admin",
+            new_callable=AsyncMock,
+            return_value=MagicMock(is_active=True, language_code="en"),
+        ),
+        patch(
+            "app.background_jobs.no_rights.send_admin_dm",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as mock_send,
+    ):
+        from app.database.models import Group
+
+        mock_get_group.return_value = Group(
+            group_id=-1002496127723,
+            admin_ids=[5272438221],
+            moderation_enabled=True,
+            member_ids=[],
+            created_at=datetime.now(UTC),
+            last_updated=datetime.now(UTC),
+        )
+
+        sent = await notify_degraded_admin_rights(
+            [
+                {
+                    "group_id": -1002496127723,
+                    "title": "блатные чупани",
+                    "missing": "Delete messages and Ban users",
+                }
+            ]
+        )
+
+    assert sent == 1
+    body = mock_send.call_args.args[1]
+    assert "Delete messages and Ban users" in body
+    assert "блатные чупани" in body
+    # It must say the bot is STAYING: this class is not being evicted.
+    assert "stay in the group" in body
+
+
+@pytest.mark.asyncio
+async def test_detection_dm_is_silent_when_nothing_was_detected():
+    """No transition, no customer message — the list is the trigger."""
+    from app.background_jobs.no_rights import notify_degraded_admin_rights
+
+    with patch(
+        "app.background_jobs.no_rights.send_admin_dm", new_callable=AsyncMock
+    ) as mock_send:
+        assert await notify_degraded_admin_rights([]) == 0
+
+    mock_send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_detection_dm_skips_inactive_admins():
+    """A deactivated admin is not a recipient, however the roster reads."""
+    from app.background_jobs.no_rights import notify_degraded_admin_rights
+
+    with (
+        patch(
+            "app.background_jobs.no_rights.get_group", new_callable=AsyncMock
+        ) as mock_get_group,
+        patch(
+            "app.background_jobs.no_rights.get_admin",
+            new_callable=AsyncMock,
+            return_value=MagicMock(is_active=False, language_code="en"),
+        ),
+        patch(
+            "app.background_jobs.no_rights.send_admin_dm", new_callable=AsyncMock
+        ) as mock_send,
+    ):
+        from app.database.models import Group
+
+        mock_get_group.return_value = Group(
+            group_id=-1002496127723,
+            admin_ids=[5272438221],
+            moderation_enabled=True,
+            member_ids=[],
+            created_at=datetime.now(UTC),
+            last_updated=datetime.now(UTC),
+        )
+        assert await notify_degraded_admin_rights(
+            [{"group_id": -1002496127723, "title": "g", "missing": "Ban users"}]
+        ) == 0
+
+    mock_send.assert_not_called()

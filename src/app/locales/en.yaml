@@ -351,6 +351,8 @@ low_balance:
   left_groups: "⚠️ <b>Bot left groups</b>\n\nNo payment received. Groups:\n• {groups}\n\nYour training examples are preserved. Top up via /buy and add the bot again.\n\nBuy: {ref_link}\nAdd to group: <a href=\"{add_to_group_url}\">Add to group</a> — you'll pick the group from a list."
 
 no_rights:
+  some_rights: "the required permissions"
+  degraded_rights: "⚠️ <b>Moderation is degraded in {group}</b>\n\nI am still an administrator there, but I am missing: <b>{missing}</b>.\n\nUntil that is restored I cannot delete spam or ban spammers, so the group is effectively unprotected even though the bot is present.\n\nFix it in the group's settings → Administrators → my name → enable the missing permission. Nothing else is needed, and I will stay in the group.\n\nAdd to group: <a href=\"{add_to_group_url}\">Add to group</a>"
   left_groups: "⚠️ <b>Bot left groups</b>\n\nI had no permission to delete messages or ban users. Groups:\n• {groups}\n\nGrant me admin rights and add again to restore protection.\n\nAdd to group: <a href=\"{add_to_group_url}\">Add to group</a> — you'll pick the group, and permissions will be set automatically."
 
 lang:
