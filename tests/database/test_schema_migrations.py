@@ -182,3 +182,41 @@ async def test_activated_at_backfill_and_its_idempotency():
         assert await conn.execute(ADMINISTRATORS_ACTIVATED_AT_BACKFILL) == "UPDATE 0"
     finally:
         await raw.close()
+
+
+@pytest.mark.asyncio
+async def test_a_boot_after_the_column_exists_does_not_stamp_a_stranger():
+    """The backfill is a MIGRATION, not a boot step.
+
+    A roster prefill creates rows with `activated_at` NULL *after* the column
+    exists. Run on every boot, the backfill stamped them as activated, and
+    `initialize_new_admin` — which keys the welcome and the 100 credits on that
+    column — denied them both, permanently. Measured on production 2026-11-09:
+    55 administrators / 56 seats, all stamped 07:08:22–24Z by the boot that
+    followed the prefill.
+
+    The pair with `test_activated_at_backfill_and_its_idempotency` is the
+    discriminating control: the SAME call stamps a row when it creates the
+    column and must not stamp one when the column is already there. Without
+    the guard both tests read identically, so neither proves anything.
+    """
+    raw, conn = await _legacy_conn()
+    try:
+        # First call: the column is absent, so this IS the migration.
+        await ensure_trust_tables(conn)
+
+        # A prefill row, created after the column exists, never activated.
+        await conn.execute(
+            "INSERT INTO administrators (admin_id, credits) VALUES (7002, 0)"
+        )
+
+        # Second call: a boot. It must not stamp the stranger.
+        await ensure_trust_tables(conn)
+
+        row = await conn.fetchrow(
+            "SELECT activated_at FROM administrators WHERE admin_id = 7002"
+        )
+        assert row is not None
+        assert row[0] is None, "a boot stamped a row its holder never activated"
+    finally:
+        await raw.close()

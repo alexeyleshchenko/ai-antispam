@@ -113,12 +113,49 @@ ADMINISTRATORS_ACTIVATED_AT_DDL = """
 ALTER TABLE administrators ADD COLUMN IF NOT EXISTS activated_at TIMESTAMPTZ
 """
 
-# Backfill: everyone already registered activated the bot by definition, or
-# their credits ran to zero and a NULL would read as "never activated" and
-# grant a second 100 credits on their next /start. Idempotent by predicate.
+# MIGRATION STEP, NOT A BOOT STEP. It exists to stamp the users who predate
+# the column: everyone already registered activated the bot by definition, and
+# a NULL would read as "never activated" and grant a second 100 credits on
+# their next /start.
+#
+# It must run ONLY when this call is the one creating the column. Run on every
+# boot it stamps the rows the roster prefill creates AFTERWARDS — people who
+# have never opened the bot — and `initialize_new_admin` keys the welcome and
+# the initial credits on `activated_at`, so the next restart silently denies
+# them both, permanently. `ensure_trust_tables` therefore reads the column's
+# existence first and skips this when it already exists.
 ADMINISTRATORS_ACTIVATED_AT_BACKFILL = """
 UPDATE administrators SET activated_at = created_at WHERE activated_at IS NULL
 """
+
+async def _column_exists(conn, table: str, column: str) -> bool:
+    """Whether `table`.`column` exists right now. Never cached, on purpose.
+
+    The dialect pair is the one `_has_delete_spam_column` proves: Postgres
+    answers through `information_schema`, and the SQLite test adapter raises
+    and answers through `PRAGMA table_info`. Unlike that function this one
+    keeps NO module-level cache: its caller needs the state *before* its own
+    ALTER runs, so a cached answer from an earlier call would report the
+    column as present and skip a migration that still has to happen.
+    """
+    try:
+        val = await conn.fetchval(
+            """
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = $1
+              AND column_name = $2
+            """,
+            table,
+            column,
+        )
+    except Exception:  # noqa: BLE001
+        rows = await conn.fetch(f"PRAGMA table_info({table})")
+        # Index access, not `r["name"]`: the SQLite adapter hands back plain
+        # tuples on a connection without `row_factory` (the migration tests
+        # build exactly that), and both tuples and `aiosqlite.Row` answer to
+        # `r[1]` — PRAGMA's column-name position.
+        val = next((1 for r in rows if r[1] == column), None)
+    return val is not None
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
@@ -179,8 +216,15 @@ async def ensure_trust_tables(conn) -> None:
     await conn.execute(APPROVED_MEMBERS_TRUSTED_UNTIL_DDL)
     await conn.execute(GROUP_ADMIN_IS_REGISTERED_DDL)
     await conn.execute(GROUP_ADMIN_IS_ADMIN_NOW_DDL)
+    # Read BEFORE the ALTER: this call creates the column only on a genuinely
+    # legacy DB, and the backfill belongs to that migration, never to a boot.
+    # Afterwards `activated_at IS NULL` is true for every row the roster
+    # prefill creates, so an unguarded run stamps strangers as activated and
+    # denies them the welcome and the initial credits for good.
+    activated_at_preexisting = await _column_exists(conn, "administrators", "activated_at")
     await conn.execute(ADMINISTRATORS_ACTIVATED_AT_DDL)
-    await conn.execute(ADMINISTRATORS_ACTIVATED_AT_BACKFILL)
+    if not activated_at_preexisting:
+        await conn.execute(ADMINISTRATORS_ACTIVATED_AT_BACKFILL)
 
 async def record_join(
     group_id: int, member_id: int, source: str = JOIN_SOURCE_SERVICE_MESSAGE
