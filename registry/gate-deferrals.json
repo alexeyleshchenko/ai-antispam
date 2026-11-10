@@ -62,28 +62,12 @@
       "reason": "PORT OWED. The kit ships this gate and this tree does not carry it. Not taken in the #107 pass: that pass was scoped to making the registration leg itself green, and each port needs its own closure read and its own discriminating control before it can be trusted green. The absence is declared here so the population is PRINTED, because the gate's own FAIL message truncates at 90 characters and 54 undeclared absences read exactly like one."
     },
     {
-      "path": "test_hygiene_branch_occupancy.py",
-      "reason": "PORT OWED. The gate's SUBJECT exists in this tree: tools/hygiene.py is carried and registered, and two sibling hygiene gates (test_hygiene_inflight.py, test_hygiene_namespace.py) are present and green. So this is a genuine coverage gap rather than a structural one. Not taken in the #107 pass because each port needs its own closure and its own control before it can be trusted green."
-    },
-    {
-      "path": "test_hygiene_build_residue.py",
-      "reason": "PORT OWED. The gate's SUBJECT exists in this tree: tools/hygiene.py is carried and registered, and two sibling hygiene gates (test_hygiene_inflight.py, test_hygiene_namespace.py) are present and green. So this is a genuine coverage gap rather than a structural one. Not taken in the #107 pass because each port needs its own closure and its own control before it can be trusted green."
-    },
-    {
-      "path": "test_hygiene_declaration_sweep.py",
-      "reason": "PORT OWED. The gate's SUBJECT exists in this tree: tools/hygiene.py is carried and registered, and two sibling hygiene gates (test_hygiene_inflight.py, test_hygiene_namespace.py) are present and green. So this is a genuine coverage gap rather than a structural one. Not taken in the #107 pass because each port needs its own closure and its own control before it can be trusted green."
-    },
-    {
       "path": "test_hygiene_evidence_supersession.py",
-      "reason": "PORT OWED. The gate's SUBJECT exists in this tree: tools/hygiene.py is carried and registered, and two sibling hygiene gates (test_hygiene_inflight.py, test_hygiene_namespace.py) are present and green. So this is a genuine coverage gap rather than a structural one. Not taken in the #107 pass because each port needs its own closure and its own control before it can be trusted green."
+      "reason": "PORT OWED — PARAMETERIZE FIRST. tools/hygiene.py is carried and the leg's 12 BEHAVIOURAL arms pass; the 2 failures are live-tree facts of the KIT's tree. test_the_live_insights_TIE_is_read_as_current names evidence/instrument-census-insights-2026-09-28{,-refused}.md, which this tree does not carry, and test_the_live_tree_is_NON_VACUOUS demands len(by_convention) > 0 — i.e. that the G7 gap be LIVE here, which it is not (measured: 1 dated artifact, 1 family, 0 by_convention, 0 superseded). Needs the tie arm re-pointed at a pair this tree carries, or a STATED SKIP."
     },
     {
       "path": "test_hygiene_placement.py",
-      "reason": "PORT OWED. The gate's SUBJECT exists in this tree: tools/hygiene.py is carried and registered, and two sibling hygiene gates (test_hygiene_inflight.py, test_hygiene_namespace.py) are present and green. So this is a genuine coverage gap rather than a structural one. Not taken in the #107 pass because each port needs its own closure and its own control before it can be trusted green."
-    },
-    {
-      "path": "test_hygiene_stale_dirs.py",
-      "reason": "PORT OWED. The gate's SUBJECT exists in this tree: tools/hygiene.py is carried and registered, and two sibling hygiene gates (test_hygiene_inflight.py, test_hygiene_namespace.py) are present and green. So this is a genuine coverage gap rather than a structural one. Not taken in the #107 pass because each port needs its own closure and its own control before it can be trusted green."
+      "reason": "PORT OWED — PARAMETERIZE FIRST. tools/hygiene.py is carried and the leg's 18 BEHAVIOURAL arms pass; the 4 failures are the KIT's live-tree declaration data, not a missing subject. (1) this tree's top-level directories certs, grafana, landing_page, scripts, spikes, src are named by neither PLACEMENT_MAP nor PLACEMENT_UNMAPPED; (2) two live mismatches — tests/linked_channel_test.csv (a data fixture sitting at the tests root, while `tests` declares python only) and evidence/.ledger.lock (a tracked zero-byte fixture, class unknown:.lock); (3) two .gitignore arms assert the KIT's runtime artifacts — evidence/.insights.lock, evidence/.ledger.lock and evidence/opencrabs-ledger.lock are not ignored in this tree (measured: git check-ignore rc=1 for the first two). Needs this tree's map entries, a class/skip disposition for the two mismatches, and the two arms re-pointed at this tree's own artifacts. The legs themselves are already printing their populations (224 files / 11 declared directories)."
     },
     {
       "path": "test_issue_routing_surfaces.py",
