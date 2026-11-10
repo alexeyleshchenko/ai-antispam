@@ -43,7 +43,7 @@ Exit: 0 the predicate rejects every closing spelling and accepts the safe ones.
 from __future__ import annotations
 
 import re
-import sys
+from pathlib import Path
 
 # GitHub's documented closing keywords. `fix(e[sd])?` covers fix/fixes/fixed;
 # `close[sd]?` covers close/closes/closed; `resolve[sd]?` covers resolve/resolves/resolved.
@@ -163,6 +163,50 @@ def _probe_bite() -> list[str]:
         return ["bite proof failed: the weakened predicate lost the `close #46` arm"]
     return []
 
+
+# --- pytest surface ---------------------------------------------------------
+# `main()` is what `tools/audit.py` runs: it invokes this file as a script by path.
+# These functions are what `pytest` collects. Measured 2026-11-10 — before they
+# existed, `pytest tests/test_commit_close_keyword.py` collected ZERO tests, so the
+# suite's "N passed" said nothing about the arms below. That left the arms to a single
+# runner, and the audit has hung to its 900 s timeout before. Both runners call the
+# same probes, so neither can drift from the other.
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+HOOK = REPO_ROOT / "tools" / "hooks" / "commit-msg"
+
+def test_every_closing_spelling_is_refused_and_every_lawful_subject_accepted() -> None:
+    problems = _probe_predicate()
+    assert not problems, "\n".join(problems)
+
+def test_the_message_body_is_a_closing_surface() -> None:
+    problems = _probe_body()
+    assert not problems, "\n".join(problems)
+
+def test_the_bite_proof_fails_a_weakened_predicate() -> None:
+    problems = _probe_bite()
+    assert not problems, "\n".join(problems)
+
+def test_the_hook_names_gate_files_that_exist_and_define_their_predicate() -> None:
+    """The hook loads both predicates by PATH and fails OPEN on a load error.
+
+    So the path is part of the guard: rename a gate file and the refusal degrades
+    silently to a warning — a broken instrument reporting a clean zero. This asserts
+    the contract, so a rename reds the suite instead of quietly disarming the hook.
+    """
+    assert HOOK.is_file(), f"the hook is missing: {HOOK}"
+    source = HOOK.read_text(encoding="utf-8")
+    paths = re.findall(r'^(?:CLOSE_)?GATE_RELATIVE\s*=\s*"([^"]+)"', source, re.MULTILINE)
+    names = re.findall(r'^(?:CLOSE_)?PREDICATE_NAME\s*=\s*"([^"]+)"', source, re.MULTILINE)
+    assert len(paths) == 2, f"expected two gate paths in the hook, found {paths}"
+    assert len(names) == 2, f"expected two predicate names in the hook, found {names}"
+    for relative, predicate in zip(paths, names):
+        target = REPO_ROOT / relative
+        assert target.is_file(), f"the hook loads a gate that does not exist: {relative}"
+        assert f"def {predicate}(" in target.read_text(encoding="utf-8"), (
+            f"{relative} does not define {predicate}(), so the hook's load fails OPEN "
+            "and this rule silently stops being enforced"
+        )
 
 def main() -> int:
     problems = _probe_predicate() + _probe_body() + _probe_bite()
