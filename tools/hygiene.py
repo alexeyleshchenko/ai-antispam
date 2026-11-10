@@ -62,14 +62,38 @@ The real contract, stated so nothing has to be inferred:
     silence: the closing invariant admits the second verdict
     `workspace_gate=blocked-by-unowned`, lawful only when the run NAMES the blocking paths,
     and never a forged clean.
+
+## Build residue is DECLARED OUT and PRINTED, never reaped (G3; q15, ruled 2026-09-30)
+
+pytest and ruff write a `.gitignore` containing `*` into the cache they create, so
+`__pycache__/`, `.pytest_cache/`, `.ruff_cache/` and `.audit.lock` are SELF-IGNORING:
+absent from `git status`, excluded from `registry/kit.json` as transient, and outside this
+tool's `/tmp`-only glob. They are invisible to every leg above -- the class that reads as
+clean because nothing looked, which is the one failure mode this instrument exists to
+catch.
+
+They are not reaped, and the ruling is why: a worktree's cache is that worktree's and dies
+with the tree, and a reap races a test that is running. What is owed instead is that the
+class be MEASURED, so "we chose not to reap it" can never read as "there is none". So
+`build_residue_leg()` prints the population on every run and declares `removes: no` -- the
+#220 shape (a report leg, never a widened glob), which G6 reuses for the same reason.
+
+**The bound travels with the number.** The walk is depth-bounded and the bound is
+MEASURED, not chosen: over the live census on 2026-10-02 the population by depth was
+1:42, 2:132, 3:48, 4+:0, so depth 3 carries the whole class and a deeper walk buys nothing.
+Cost is the argument for `find` over `os.walk` -- the same 222 items took 0.19-0.49s warm
+through one `find` where an unbounded Python walk took 7.0s cold, against a cap of a few
+seconds; a gate KILLED by its own budget reads to every reader as a red.
 """
 
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -78,8 +102,8 @@ from pathlib import Path
 
 # A gate may only glob a namespace this factory OWNS.
 #
-# `/tmp` is shared. Another factory's tooling writes its own prefix there — the
-# OpenCrabs dev tools leave `oc-snap-*` behind by the thousand. Globbing a
+# `/tmp` is shared. Another factory's tooling writes its own prefix there — a
+# busy sibling can leave thousands of scratch files under a prefix it owns. Globbing a
 # foreign prefix makes this gate measure someone else's litter: it goes RED for
 # work this factory did not do, the mirror of a false green and just as
 # corrosive, because a gate that cries wolf gets ignored and then reverted.
@@ -210,6 +234,1284 @@ def reap_stale_scratch(
 
     return (len(found) if dry_run else reaped), found
 
+# --- Worktree census: ONE `git worktree list`, shared by the G3 and G6 legs -----------
+
+"""The tree census both worktree-reading legs share, and why it lives this high up.
+
+`build_residue_leg` takes `registered_worktrees` as a DEFAULT ARGUMENT, and Python
+evaluates a default at definition time -- so the census has to be bound before that
+`def` runs, not merely before the leg is called. One census for both legs is also the
+point: two `git worktree list` calls would be two populations free to disagree between
+themselves, and the G3 leg would then report a residue count over a tree set the G6 leg
+had never seen.
+"""
+
+WORKTREE_STALE_HOURS = 24.0
+
+def worktree_records(root: Path | None = None) -> tuple[list[dict], str | None]:
+    """(records, error) for every tree `git worktree list` reports.
+
+    Each record carries the path git reports, the tree's HEAD, its branch when it is on
+    one, and git's own `prunable` reason when it declares one. The census is git's OWN,
+    never a `/tmp` glob: a scratch prefix would miss the MAIN tree and every tree named
+    outside the namespace, and would sweep a directory belonging to nobody -- the
+    #174/#220 class this factory files against. An unreadable census is an ERROR and never
+    an empty one: "no trees" and "the instrument failed" must not render as one verdict.
+    """
+    root = root or repo_root()
+    try:
+        proc = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=str(root), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+    except OSError as exc:
+        return [], f"`git worktree list` could not run: {exc}"
+    if proc.returncode != 0:
+        return [], f"`git worktree list` exited {proc.returncode}: {proc.stderr.strip()}"
+    records: list[dict] = []
+    for block in proc.stdout.strip().split("\n\n"):
+        if not block.strip():
+            continue
+        record: dict = {"path": None, "head": None, "branch": None,
+                        "detached": False, "prunable": None}
+        for line in block.splitlines():
+            if line.startswith("worktree "):
+                record["path"] = line[len("worktree "):].strip()
+            elif line.startswith("HEAD "):
+                record["head"] = line[len("HEAD "):].strip()
+            elif line.startswith("branch "):
+                record["branch"] = line[len("branch "):].strip()
+            elif line.startswith("detached"):
+                record["detached"] = True
+            elif line.startswith("prunable"):
+                record["prunable"] = line[len("prunable"):].strip() or "prunable"
+        if record["path"]:
+            records.append(record)
+    if not records:
+        return [], "`git worktree list` reported no tree, which a repository cannot do"
+    return records, None
+
+def registered_worktrees(root: Path | None = None) -> tuple[list[str], str | None]:
+    """(paths, error) -- the path half of `worktree_records`.
+
+    Kept as its own name because the build-residue leg reads only the paths, and both legs
+    share ONE census: two `git worktree list` calls would be two populations that could
+    disagree between them.
+    """
+    records, error = worktree_records(root)
+    if error:
+        return [], error
+    return [record["path"] for record in records], None
+
+# --- Build residue: DECLARED OUT, PRINTED (G3; q15, ruled 2026-09-30) -----------------
+#
+# The class pytest and ruff create and then HIDE: each writes a `.gitignore` containing `*`
+# into the cache it makes, so the directory is self-ignoring -- absent from `git status`,
+# excluded from the manifest as transient, and outside this tool's `/tmp`-only glob. It is
+# invisible to every leg above, which is why it is PRINTED rather than swept: the debt is
+# the silence, not the bytes.
+#
+# NOT reaped, by ruling: a worktree's cache is that worktree's and dies with the tree, and
+# a reap races a test that is running. The #220 shape -- a report leg, `removes: no`, never
+# a widened glob -- is what G6 reuses for the same reason.
+BUILD_RESIDUE_NAMES = ("__pycache__", ".pytest_cache", ".ruff_cache", ".audit.lock")
+
+# MEASURED, not chosen (2026-10-02, live census): the population by depth was 1:42, 2:132,
+# 3:48, 4+:0 -- so depth 3 carries the whole class and a deeper walk buys nothing while
+# costing the gate's budget. `find` rather than `os.walk` for the same reason: the same 222
+# items read in 0.19-0.49s warm through one `find` where an unbounded Python walk took 7.0s
+# cold, and a gate KILLED by its own cap reads to every reader as a red.
+BUILD_RESIDUE_MAXDEPTH = 3
+
+# Never descended: a nested checkout or an installed environment is not THIS tree's
+# residue, and following one would report another repository's caches as ours.
+BUILD_RESIDUE_PRUNE = (".git", "node_modules", ".venv", "venv")
+
+def _find_residue(roots: list[str]) -> list[str]:
+    """The residue names under `roots`, by ONE bounded `find`.
+
+    One process for every root, not one per root: the cost is in the spawn, and the same
+    population read in a single `find` is what keeps this leg inside the gate's cap.
+    """
+    if not roots:
+        return []
+    names: list[str] = []
+    for name in BUILD_RESIDUE_NAMES:
+        names += ["-name", name, "-o"]
+    names = names[:-1]
+    prune: list[str] = []
+    for name in BUILD_RESIDUE_PRUNE:
+        prune += ["-name", name, "-prune", "-o"]
+    cmd = [
+        "find", *roots, "-maxdepth", str(BUILD_RESIDUE_MAXDEPTH),
+        *prune, "(", "(", *names, ")", "-print", ")",
+    ]
+    try:
+        proc = subprocess.run(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
+    except OSError:
+        return []
+    return [line for line in proc.stdout.splitlines() if line]
+
+def build_residue_leg(
+    worktrees_fn=registered_worktrees,
+    find_fn=_find_residue,
+) -> dict:
+    """The build-residue report leg: the population, PRINTED, and `removes: no`.
+
+    DECLARED OUT rather than reaped (q15). The report IS the mechanism, so this leg holds
+    no removal path at all, and `removes` is asserted False here so a reader of the REPORT
+    is told the same thing the code does (#220). Both the census and the walk are injected
+    so a probe can drive the leg over a throwaway tree rather than the live host.
+    """
+    paths, error = worktrees_fn()
+    coverage: dict = {
+        "class": "build residue (pytest/ruff caches, .audit.lock)",
+        "predicate": (
+            f"one `find <worktree> -maxdepth {BUILD_RESIDUE_MAXDEPTH}` per census, for "
+            f"{', '.join(BUILD_RESIDUE_NAMES)}"
+        ),
+        "maxdepth": BUILD_RESIDUE_MAXDEPTH,
+        "worktrees_total": len(paths),
+        "removes": False,
+    }
+    if error:
+        # An unreadable census is NOT RUN with its reason, never a clean zero: a leg that
+        # cannot see its population must not print one.
+        coverage["status"] = "NOT RUN"
+        coverage["reason"] = error
+        return coverage
+
+    live = [p for p in paths if os.path.isdir(p)]
+    found = find_fn(live)
+    counts = {name: 0 for name in BUILD_RESIDUE_NAMES}
+    for item in found:
+        base = os.path.basename(item)
+        if base in counts:
+            counts[base] += 1
+    coverage["status"] = "ASSERTED"
+    coverage["items"] = len(found)
+    coverage["counts"] = counts
+    coverage["paths"] = found
+    return coverage
+
+def render_build_residue(coverage: dict) -> str:
+    """The leg's one line, carrying its population AND its `removes: no`.
+
+    The counts are printed BY NAME and only where non-zero, so a clean run still states
+    which class was read rather than rendering a bare zero a reader cannot attribute.
+    """
+    if coverage.get("status") != "ASSERTED":
+        return (
+            "hygiene build residue: NOT RUN — "
+            f"{coverage.get('reason') or 'reason not stated'}"
+        )
+    counts = coverage["counts"]
+    parts = ", ".join(f"{name} {counts[name]}" for name in BUILD_RESIDUE_NAMES if counts[name])
+    return (
+        f"hygiene build residue: {coverage['items']} item(s) over "
+        f"{coverage['worktrees_total']} worktree(s) — {parts or 'none of the four names'} "
+        f"(declared out, q15; removes: no)"
+    )
+
+# --- Declaration surfaces: an entry whose target is gone is a STALE DEBT (G2) ---------
+#
+# The class this file's OWN docstring names and nothing acted on: "the exemption
+# surfaces, where an unmatched entry is a stale debt" (`load_declaration` above). Each
+# surface's own tool reads its own file and checks it for READABILITY; not one of them
+# asks whether the thing an entry POINTS AT still exists. So an exemption left behind by a
+# rename or a deletion sits here looking live, and every surface still reads green.
+#
+# REPORT-ONLY, and it holds no write path: each surface's own tool owns its own file, and
+# a second writer over one population is the defect this factory files against. The leg's
+# job is to make the debt VISIBLE on every run, so "we checked" and "nobody looked" stop
+# rendering as the same output.
+#
+# TWO TARGET KINDS, and the choice is stated rather than implied. An entry is swept where
+# its target is a PATH in this tree or a COMMIT in this history: both are LOCAL, both are
+# decidable without the network, and both go stale in exactly the way this gap describes.
+# Every family whose entries name something ELSE is DECLARED below with its reason, so the
+# population is every family in the table and a zero on any line is a verdict rather than a
+# silence. The count is deliberately NOT written here: it was, and it read "all fifteen"
+# against a table that had grown to twenty-three — a number in prose nobody re-reads is a
+# stale claim waiting to happen, and the table is its own population.
+DECL_PATH = "path"
+DECL_COMMIT = "commit"
+
+# (family, live file, probes, note). A probe is (container, field, kind): `container` None
+# means the file's TOP LEVEL, and `field` None means the container's own KEYS are the
+# targets. `note` is REQUIRED on a family with no probes -- it is what makes an unswept
+# family a declaration rather than an omission.
+DECLARATION_SURFACES: tuple[
+    tuple[str, str, tuple[tuple[str | None, str | None, str], ...], str], ...
+] = (
+    ("audit-rates-exemptions", "docs/audit-rates-exemptions.json", (),
+     "entries name a ledger row `n` and a BOARD ISSUE (`subject`); the ledger is "
+     "append-only, so a row cannot be stranded by a rename"),
+    ("close-board-exemptions", "docs/close-board-exemptions.json", (),
+     "entries name a BOARD ISSUE (`subject`) and a ledger row `n`, neither of which this "
+     "leg can read offline"),
+    ("commit-subject-issue-refs", "docs/commit-subject-issue-refs.json",
+     (("exemptions", "sha", DECL_COMMIT),), ""),
+    ("criterion-path-exemptions", "docs/criterion-path-exemptions.json", (),
+     "entries name a PATH and the path is absent BY CONSTRUCTION -- that is what the "
+     "exemption asserts -- so a `path` probe would report every correct entry as stale "
+     "debt, the false positive inverted. The criterion-path leg reconciles every entry "
+     "against a LIVE read of the board instead, and an entry matching no live absence is "
+     "an ERROR on that leg (`tools/patrol_host_state.py::criterion_path_leg`)"),
+    ("duty-receipt-exemptions", "docs/duty-receipt-exemptions.json", (),
+     "entries name a CRON JOB (`job`), a registry label rather than a tree path, and the "
+     "duty-receipt leg reconciles them against a LIVE read of the enabled cron rows"),
+    ("harness-bindings", "docs/harness-bindings.json",
+     (("bindings", "repo_path", DECL_PATH),), ""),
+    ("hygiene-protected", "docs/hygiene-protected.json", (),
+     "a PREVENTION surface by its own docstring -- an unmatched entry is legal, not a "
+     "debt -- and its targets are absolute /tmp paths, not tree paths"),
+    ("landing-route-debt", "docs/landing-route-debt.json", (),
+     "entries name a CRON JOB (`job`), a registry label rather than a tree path, and the "
+     "gate reconciles them against a LIVE read of `registry/state.json`"),
+    ("law-uuid-exemptions", "docs/law-uuid-exemptions.json",
+     (("exempt", "path", DECL_PATH),), ""),
+    ("ledger-authorizations", "docs/ledger-authorizations.json", (),
+     "entries name LANES (actors and by_event values), not a path or a commit"),
+    ("ledger-commit-exemptions", "docs/ledger-commit-exemptions.json",
+     (("exemptions", "sha", DECL_COMMIT),), ""),
+    ("ledger-citation-exemptions", "docs/ledger-citation-exemptions.json", (),
+     "entries name a ledger ROW (`row`) and the ledger is append-only, so no number here "
+     "can be stranded by a rename; the citation gate reconciles every entry against a "
+     "LIVE read of the ledger's own rows, where an entry naming a row that carries no "
+     "bare citation is a STALE exemption and an ERROR"),
+    ("ledger-close-board-exemptions", "docs/ledger-close-board-exemptions.json", (),
+     "entries are keyed by ledger ROW IDENTITY (`n` + `ts`) and the ledger is "
+     "append-only, so no entry here can be stranded by a rename; the close-board gate "
+     "reconciles every entry against a LIVE read of the ledger's own rows"),
+    ("ledger-exemptions", "docs/ledger-exemptions.json", (),
+     "entries name a BOARD ISSUE (`subject`), which this leg cannot read offline"),
+    ("ledger-invariants", "docs/ledger-invariants.json", (),
+     "entries are dates and ledger row numbers, neither of which a rename can strand"),
+    ("ledger-no-shrink-exemptions", "docs/ledger-no-shrink-exemptions.json",
+     (("exemptions", "sha", DECL_COMMIT),), ""),
+    ("ledger-ref-roles-exemptions", "docs/ledger-ref-roles-exemptions.json", (),
+     "entries name a ledger ROW (`row`, `asserted`, `asserted_row`) and the ledger is "
+     "append-only, so no number here can be stranded by a rename; the ref-role leg "
+     "reconciles every entry against a LIVE read of the ledger"),
+    ("ledger-subject-form-exemptions", "docs/ledger-subject-form-exemptions.json", (),
+     "entries name a ledger ROW (`row`) and the ledger is append-only, so no number here "
+     "can be stranded by a rename; the subject-form gate reconciles every entry against a "
+     "LIVE read of the ledger's own rows, where an entry naming a row whose subject is not "
+     "a bare integer is a STALE exemption and an ERROR"),
+    ("ledger-refs-kinds", "docs/ledger-refs-kinds.json", (),
+     "entries are ledger VOCABULARY names (kinds and events), not a target object"),
+    ("ledger-renumbers", "docs/ledger-renumbers.json", (),
+     "entries are DECLARED subject renumbers (an old board number and its successor); "
+     "the ledger gate reconciles them against the board, and neither half is a tree "
+     "path a rename could strand"),
+    ("ledger-retirements", "docs/ledger-retirements.json", (),
+     "entries name LEDGER ROWS, and the ledger is append-only -- a row cannot be stranded"),
+    ("ledger-schema-exemptions", "docs/ledger-schema-exemptions.json", (),
+     "entries are keyed by ledger row `n`; the same append-only reason as above"),
+    ("mechanism-splits", "docs/mechanism-splits.json", (),
+     "entries name a RETIRED test file that is absent BY CONSTRUCTION -- declaring a split "
+     "asserts the undivided file is gone -- so a `path` probe would report every correct "
+     "entry as stale debt, the false positive inverted. The gate-registry leg reconciles "
+     "every entry against a LIVE read of the tree and the audit instead "
+     "(`tests/gate_registry.py::law_coverage_problems`): each successor must exist under "
+     "`tests/` AND be registered, an entry whose retired file is still present is an "
+     "ERROR, and a one-successor entry is refused as a rename"),
+    ("ontology-exemptions", "docs/ontology-exemptions.json",
+     (("exemptions", "path", DECL_PATH),), ""),
+    ("products", "docs/products.json", (),
+     "entries are product records, whose `id` is an internal label and not a tree object"),
+    ("rework-relative-revision-exemptions",
+     "docs/rework-relative-revision-exemptions.json", (),
+     "entries name a BOARD ISSUE (`subject`), which this leg cannot read offline"),
+    ("ruling-board-exemptions", "docs/ruling-board-exemptions.json", (),
+     "entries name a GITHUB RULING COMMENT id (`comment`), which this leg cannot read "
+     "offline -- the id is the exemption's whole key, so it is deliberately not a tree "
+     "path a rename could strand"),
+    ("shipped-audit-skips", "docs/shipped-audit-skips.json",
+     (("skips", None, DECL_PATH),), ""),
+    ("shipped-mechanism-law", "docs/shipped-mechanism-law.json",
+     ((None, "law", DECL_PATH), ("required_clauses", "mechanism", DECL_PATH)), ""),
+    ("skill-version-exemptions", "docs/skill-version-exemptions.json",
+     (("exempt", "path", DECL_PATH), ("exempt", "sha", DECL_COMMIT)), ""),
+)
+
+def declaration_families_on_disk(root: Path | None = None) -> list[str]:
+    """The live declaration families THIS tree carries.
+
+    A family is the stem of a `docs/*.json` that is neither an `.example` skeleton nor a
+    schema. This is the population the sweep must COVER, and it is read from the tree
+    rather than from `DECLARATION_SURFACES` on purpose: a map that is its own population
+    cannot notice a sixteenth family appearing beside it, which is the drift this
+    function exists to make visible.
+    """
+    root = root or repo_root()
+    families = set()
+    for path in (root / "docs").glob("*.json"):
+        name = path.name
+        if name.endswith(".example.json") or name.endswith(".schema.json"):
+            continue
+        families.add(name[: -len(".json")])
+    return sorted(families)
+
+def _declaration_probe_targets(data, container: str | None, field: str | None) -> list[str]:
+    """The target strings one probe names, or [] where its coordinate is absent.
+
+    An absent container is NOT an error: a family may legitimately omit a section, and
+    the population this leg reads is whatever the file declares.
+    """
+    node = data if container is None else data.get(container)
+    if node is None:
+        return []
+    if field is None:
+        return [key for key in node if isinstance(key, str)] if isinstance(node, dict) else []
+    if not isinstance(node, list):
+        return []
+    return [
+        entry[field] for entry in node
+        if isinstance(entry, dict) and isinstance(entry.get(field), str)
+    ]
+
+def _path_exists(root: Path, target: str) -> bool:
+    return (root / target).exists()
+
+def _commit_exists(root: Path, target: str) -> bool | None:
+    """True/False, or None where the instrument could not answer at all.
+
+    None is a THIRD state on purpose: a missing `git` is not a missing commit, and
+    collapsing the two would let a broken instrument report every exemption as dead debt.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "cat-file", "-e", f"{target}^{{commit}}"],
+            cwd=str(root), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return None
+    return proc.returncode == 0
+
+def declaration_sweep_leg(
+    root: Path | None = None,
+    path_fn=_path_exists,
+    commit_fn=_commit_exists,
+) -> dict:
+    """The cross-sweep: every declaration family, its targets, and the ones now unmatched.
+
+    REPORT-ONLY and `removes: False`: this leg reads and prints, and the surface's own
+    tool keeps its write path. Both checkers are injected so a probe can drive the leg
+    over a throwaway tree rather than the live one.
+    """
+    root = root or repo_root()
+    families: list[dict] = []
+    for family, rel, probes, note in DECLARATION_SURFACES:
+        path = root / rel
+        record: dict = {"family": family, "file": rel, "note": note, "probes": len(probes)}
+        if not path.is_file():
+            record.update(present=False, targets=0, unmatched=[], status="absent")
+            families.append(record)
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            record.update(
+                present=True, targets=0, unmatched=[], status="NOT RUN",
+                reason=f"{rel} exists but cannot be read: {exc}",
+            )
+            families.append(record)
+            continue
+        if not isinstance(data, dict):
+            record.update(
+                present=True, targets=0, unmatched=[], status="NOT RUN",
+                reason=f"{rel} is not a JSON object",
+            )
+            families.append(record)
+            continue
+
+        targets: list[tuple[str, str]] = []
+        for container, field, kind in probes:
+            targets += [
+                (target, kind)
+                for target in _declaration_probe_targets(data, container, field)
+            ]
+        unmatched: list[str] = []
+        unanswerable = False
+        for target, kind in targets:
+            if kind == DECL_PATH:
+                alive: bool | None = path_fn(root, target)
+            else:
+                alive = commit_fn(root, target)
+            if alive is None:
+                unanswerable = True
+            elif not alive:
+                unmatched.append(f"{kind}:{target}")
+        if unanswerable:
+            record.update(
+                present=True, targets=len(targets), unmatched=unmatched, status="NOT RUN",
+                reason="the commit instrument could not answer (git unavailable here)",
+            )
+        else:
+            record.update(
+                present=True, targets=len(targets), unmatched=unmatched, status="swept"
+            )
+        families.append(record)
+
+    undeclared = sorted(set(declaration_families_on_disk(root)) - {f for f, *_ in DECLARATION_SURFACES})
+    return {
+        "class": "declaration / exemption surfaces",
+        "predicate": (
+            "for every declared family: each entry whose target is a tree PATH or a "
+            "COMMIT, checked against the live tree; an unmatched target is a stale debt"
+        ),
+        "removes": False,
+        "root": str(root),
+        "families": families,
+        "undeclared": undeclared,
+        "live_files": sum(1 for f in families if f["present"]),
+        "targets": sum(f["targets"] for f in families),
+        "unmatched": sum(len(f["unmatched"]) for f in families),
+    }
+
+def render_declaration_sweep(leg: dict) -> str:
+    """One line per family, plus the summary that makes the population readable.
+
+    A family that could not be READ is `NOT RUN` with its reason, never a clean zero, and
+    a family with no path/commit target says so rather than printing a zero that would
+    read as agreement.
+    """
+    families = leg["families"]
+    lines = [
+        f"hygiene declaration sweep: {len(families)} family(ies) over "
+        f"{leg['live_files']} live file(s) — {leg['targets']} target(s), "
+        f"{leg['unmatched']} unmatched (removes: no)"
+    ]
+    width = max((len(f["family"]) for f in families), default=0)
+    for record in families:
+        name = record["family"].ljust(width)
+        if record["status"] == "absent":
+            verdict = "absent (no live file)"
+        elif record["status"] == "NOT RUN":
+            verdict = f"NOT RUN — {record['reason']}"
+        elif record["note"]:
+            verdict = f"not swept — {record['note']}"
+        else:
+            verdict = f"{record['targets']} target(s), {len(record['unmatched'])} unmatched"
+            if record["unmatched"]:
+                verdict += " — " + ", ".join(record["unmatched"])
+        lines.append(f"  {name}  {verdict}")
+    if leg["undeclared"]:
+        lines.append(
+            "  UNDECLARED  " + ", ".join(leg["undeclared"])
+            + " — a family this tree carries that DECLARATION_SURFACES does not name, so "
+              "nothing sweeps it"
+        )
+    return "\n".join(lines)
+
+"""## Placement: a file lives where its content belongs, and its name says what it is (G5; q13)
+
+The owner's own bullet names this surface -- "files grouped/regrouped in folders, proper
+naming consistent with the contents" -- and `ONTOLOGY.md` states the naming half only as
+*patterns* (`## Naming law`). Nothing answered the placement question at all, so a file
+could sit in a directory its content does not belong to and no leg would notice: the name
+census (`tools/kit_names.py`) answers a different question -- one name meaning two things
+across TREES -- and is cited here, not replaced.
+
+This leg is the smallest predicate that bites: a **declared map of directory -> content
+class**, checked against the tree. The map is a declaration, not a measurement, which is
+the point -- it says what each directory is FOR, so a file whose class is not allowed there
+is a placement decision nobody made. Three properties keep it honest:
+
+  * **an unmapped directory states its reason** -- never silently exempt, the same
+    discipline the declaration sweep applies to its unswept families;
+  * **a mapped directory that is absent is `absent`, not clean** -- a bootstrapped factory
+    has no `evidence/`, and a missing directory that read as zero mismatches would be the
+    exempt-by-silence surface this factory refuses;
+  * **a mapped directory is checked in BOTH trees** where `TEMPLATE/<rel>` exists, because
+    `TEMPLATE/` is the shipped mirror of the root by construction.
+
+`evidence/scores/` additionally carries the one tree-path naming pattern `ONTOLOGY.md`
+actually states -- `evidence/scores/YYYY-MM-DD.md` -- so the naming half is read from the
+law rather than invented here.
+"""
+
+PLACEMENT_CLASS: dict[str, str] = {
+    ".py": "python",
+    ".md": "markdown",
+    ".json": "json",
+    ".jsonl": "jsonl",
+    ".sh": "shell",
+    ".tmpl": "template",
+    ".mjs": "javascript",
+    ".service": "unit",
+    ".path": "unit",
+    ".txt": "text",
+    ".log": "log",
+    ".bak": "backup",
+}
+
+# (directory, allowed content classes, where the expectation comes from)
+PLACEMENT_MAP: tuple[tuple[str, tuple[str, ...], str], ...] = (
+    ("registry", ("json",),
+     "a machine-read register: every file is parsed, never read as prose"),
+    ("registry/factories", ("json",),
+     "the same register grain, one file per member"),
+    ("skills/meta-factory", ("markdown",),
+     "a skill is prose law, read by an agent"),
+    ("tests", ("python",),
+     "a gate is a program; the fixtures it plants live in subdirectories"),
+    ("docs", ("markdown", "json"),
+     "prose, plus the declaration JSONs the instruments read"),
+    ("docs/instruments", ("markdown",), "one law doc per instrument"),
+    ("docs/methodology", ("markdown",), "prose"),
+    ("docs/projects", ("markdown",), "prose"),
+    ("docs/proposals", ("markdown",), "prose"),
+    ("docs/stories", ("markdown",), "prose"),
+    ("docs/subject", ("markdown",), "prose"),
+    ("evidence", ("markdown", "jsonl"),
+     "a dated record, plus the append-only ledger"),
+    ("evidence/scores", ("markdown",), "one score record per day"),
+    ("evidence/deliverables", ("markdown",), "prose"),
+    ("evidence/reviews", ("markdown",), "prose"),
+    ("TEMPLATE", ("template", "markdown"),
+     "the shipped mirror: templates, plus its own README"),
+    # `roles/` is a TOP-LEVEL member-factory directory, not a TEMPLATE-only one: BOOTSTRAP.md
+    # has every bootstrapped factory split its own procedure into `roles/`, and
+    # `tests/test_commit_pathspec_law.py` names `roles/<role>.md` as a path a factory carries.
+    # It was declared ONLY as `TEMPLATE/roles`, so the undeclared scan -- which reads the map's
+    # TOP-LEVEL segments -- reported `roles` as undeclared in the shipped tree, where REPO IS
+    # the TEMPLATE directory. Nothing is lost by moving the declaration up: the mirror branch
+    # below generates `TEMPLATE/roles` from this entry whenever that directory exists.
+    ("roles", ("markdown",), "one role file per lane; the template ships the four cards"),
+    ("tools", ("python", "shell", "javascript", "text", "json"),
+     "an executable instrument; python is the house language, shell/js are permitted, and a "
+     "JS asset carries its dependency manifest as JSON -- npm's format, with no alternative "
+     "(#520's `questions-render.package.json` is the first such asset: it is copied beside "
+     "`questions-render.mjs` at render time, and a JS toolchain cannot declare its "
+     "dependencies in any other format)"),
+    ("tools/box", ("unit", "shell", "markdown"),
+     "systemd units, the script that drives them, and a README"),
+    ("tools/hooks", ("text",),
+     "git invokes these by their bare names (`commit-msg`, `pre-commit`), so a suffix is "
+     "not expressible"),
+)
+
+# Directories that hold files but are deliberately NOT mapped, each with its reason.
+PLACEMENT_UNMAPPED: tuple[tuple[str, str], ...] = (
+    ("reviews", "a container of per-review subdirectories; no file sits directly under it"),
+    ("skills", "a container of per-skill subdirectories; the skill itself is mapped below it"),
+)
+
+# (directory, the ONTOLOGY naming pattern, the law sentence it comes from)
+PLACEMENT_NAMING: tuple[tuple[str, str, str], ...] = (
+    ("evidence/scores", r"^\d{4}-\d{2}-\d{2}(-[a-z0-9-]+)?\.md$",
+     "ONTOLOGY.md `## Naming law`: `evidence/scores/YYYY-MM-DD.md`"),
+)
+
+# `.audit.lock` is here because the module docstring ABOVE already declares it SELF-IGNORING
+# and invisible to every leg -- `BUILD_RESIDUE_NAMES` carries it, the residue leg prints it --
+# and `placement_leg` was the one leg that forgot it. Measured 2026-10-02: the nested shipped
+# audit creates `TEMPLATE/.audit.lock` and never unlinks it (a `flock` file persists by
+# design, `tools/audit.py::acquire_run_lock`), so the ROOT placement gate reported it as
+# `unknown:.lock` in a directory that allows only `template`/`markdown` -- a mismatch raised
+# by an artifact the tool's own contract says no leg can see. `rm -f` before the audit does
+# NOT help: `tests/test_shipped_audit_runs.py` is registered BEFORE this gate and recreates it.
+PLACEMENT_SKIP = frozenset(
+    {".git", "__pycache__", ".pytest_cache", ".ruff_cache", ".audit.lock", ".venv", "venv",
+     "node_modules"}
+)
+
+
+def content_class(name: str) -> str:
+    """The content class a file's own name declares, or `unknown:<suffix>`.
+
+    An unrecognised suffix is reported as unknown rather than defaulted to a class the
+    map might allow: a silent default is how a `.log` in `docs/` would pass a check it
+    should fail.
+    """
+    suffix = Path(name).suffix.lower()
+    if not suffix:
+        return "text"
+    return PLACEMENT_CLASS.get(suffix, f"unknown:{suffix}")
+
+
+def _gitignored(root: Path, rels: list[str]) -> tuple[set[str], str, str]:
+    """(ignored, status, reason) for repo-relative paths, read from git's OWN declaration.
+
+    THE TREE'S OWN DECLARATION, not a list this tool keeps (#282). `.gitignore` is where the
+    repo states which artifacts it CREATES but does not track, so the placement predicate
+    reads that declaration instead of growing an allowlist. The allowlist form was refused by
+    name in this instrument's law -- *exempting one path removes that case and leaves the
+    general one* -- and that is exactly how `PLACEMENT_SKIP` accreted: `.audit.lock` was
+    appended one path at a time, and each patch left the next case uncaught. Measured
+    2026-10-03 on a working checkout, the live leg reported three paths the repo itself
+    writes and gitignores (`evidence/.insights.lock`, `evidence/.ledger-index.sqlite`, and
+    the ledger's append lock at its fail-open anchor `evidence/opencrabs-ledger.lock`), so
+    the gate was RED on a clean tree -- which trains lanes to ignore a red gate. The ledger
+    lock has TWO anchors and only the fail-open one is walkable (#348): the NORMAL lock is
+    `<git-common-dir>/opencrabs-ledger.lock`, inside the git dir and out of every walk, and
+    `evidence/.ledger.lock` is the name a FIXTURE takes -- no live write path touches it.
+
+    Three outcomes, and the middle one is why this returns a triple rather than a bool:
+
+      * `rc=0` -- git reported at least one ignored path; the set is returned, `APPLIED`.
+      * `rc=1` -- git reported NONE ignored. A VALID EMPTY, not an error: the predicate ran
+        and found nothing, which is a different statement from the one below.
+      * `rc=128` (or git absent) -- NOT A REPOSITORY at this root, so the predicate could not
+        be applied. Returned as `NOT APPLIED` with its reason and NEVER as "nothing is
+        ignored", because a clean zero from a dead instrument is the surface this module
+        refuses. A bootstrapped factory and the shipped `TEMPLATE/` tree both take this path,
+        and the report says so rather than reading clean by silence.
+
+    `-z` on BOTH sides -- NUL-terminated input and output -- so a path carrying a space or a
+    newline cannot be mis-split. ONE batched call for the whole tree: a subprocess per file
+    would make the leg quadratic on a tree this size.
+    """
+    if not rels:
+        return set(), "APPLIED", ""
+    payload = b"".join(rel.encode("utf-8") + b"\0" for rel in rels)
+    try:
+        proc = subprocess.run(
+            ["git", "check-ignore", "-z", "--stdin"],
+            cwd=str(root),
+            input=payload,
+            capture_output=True,
+        )
+    except OSError as exc:
+        return set(), "NOT APPLIED", f"git could not be run ({exc.__class__.__name__})"
+    if proc.returncode == 0:
+        return {chunk.decode("utf-8") for chunk in proc.stdout.split(b"\0") if chunk}, "APPLIED", ""
+    if proc.returncode == 1:
+        return set(), "APPLIED", ""
+    detail = [line for line in proc.stderr.decode("utf-8", "replace").splitlines() if line.strip()]
+    reason = detail[0] if detail else f"git check-ignore exited {proc.returncode}"
+    return set(), "NOT APPLIED", reason
+
+def placement_leg(root: Path | None = None) -> dict:
+    """Check every mapped directory against its declared content classes.
+
+    Report-only (`removes: False`): a mismatch is a decision nobody made, so it is
+    PRINTED for a human to make, never moved or deleted by this leg.
+    """
+    root = Path(root) if root is not None else repo_root()
+    leg: dict = {
+        "class": "placement",
+        "predicate": "a file's content class is allowed in the directory that holds it",
+        "removes": False,
+        "root": str(root),
+        "directories": [],
+        "unmapped": [],
+        "undeclared": [],
+        "mismatches": [],
+        "naming": [],
+        "ignored": [],
+        "ignore_status": "APPLIED",
+        "ignore_reason": "",
+        "files": 0,
+    }
+    if not root.is_dir():
+        leg["status"] = "NOT RUN"
+        leg["reason"] = f"{root} is not a directory"
+        return leg
+
+    # A mapped directory is judged in BOTH trees when the shipped mirror carries it, so a
+    # divergence between root and TEMPLATE is a placement mismatch like any other.
+    targets: list[tuple[str, str, tuple[str, ...], str]] = []
+    for rel, classes, basis in PLACEMENT_MAP:
+        targets.append((rel, rel, classes, basis))
+        if (root / "TEMPLATE" / rel).is_dir():
+            targets.append((f"TEMPLATE/{rel}", f"TEMPLATE/{rel}", classes, basis))
+
+    # The ignored set is computed ONCE for the whole tree, before the per-directory walk,
+    # because `git check-ignore` is a subprocess and one call per file would be quadratic.
+    candidates: list[str] = []
+    for _shown, _rel, _classes, _basis in targets:
+        _directory = root / _rel
+        if not _directory.is_dir():
+            continue
+        for _entry in sorted(_directory.iterdir()):
+            if _entry.is_file():
+                candidates.append(str(_entry.relative_to(root)))
+    ignored, ignore_status, ignore_reason = _gitignored(root, candidates)
+    leg["ignore_status"] = ignore_status
+    leg["ignore_reason"] = ignore_reason
+
+    for shown, rel, classes, basis in targets:
+        directory = root / rel
+        if not directory.is_dir():
+            leg["directories"].append(
+                {"dir": shown, "status": "absent", "files": 0, "allowed": list(classes)}
+            )
+            continue
+        found = 0
+        bad = 0
+        for entry in sorted(directory.iterdir()):
+            if not entry.is_file() or entry.name in PLACEMENT_SKIP:
+                continue
+            relpath = str(entry.relative_to(root))
+            if relpath in ignored:
+                # OUT of the placement population, PRINTED BY NAME (#282). Silently dropping
+                # it would be the exempt-by-silence surface this factory files against, and
+                # the reader of the report is the only one who can say whether the tree's
+                # own .gitignore is the right place for that path.
+                leg["ignored"].append({"path": relpath, "dir": shown})
+                continue
+            found += 1
+            leg["files"] += 1
+            cls = content_class(entry.name)
+            if cls not in classes:
+                bad += 1
+                leg["mismatches"].append(
+                    {
+                        "path": str(entry.relative_to(root)),
+                        "dir": shown,
+                        "class": cls,
+                        "allowed": list(classes),
+                        "basis": basis,
+                    }
+                )
+        leg["directories"].append(
+            {"dir": shown, "status": "ok" if not bad else "MISMATCH",
+             "files": found, "allowed": list(classes)}
+        )
+
+    for rel, pattern, basis in PLACEMENT_NAMING:
+        directory = root / rel
+        if not directory.is_dir():
+            continue
+        compiled = re.compile(pattern)
+        for entry in sorted(directory.iterdir()):
+            if not entry.is_file() or entry.name in PLACEMENT_SKIP:
+                continue
+            if not compiled.match(entry.name):
+                leg["naming"].append(
+                    {"path": str(entry.relative_to(root)), "dir": rel, "pattern": pattern,
+                     "basis": basis}
+                )
+
+    for rel, reason in PLACEMENT_UNMAPPED:
+        if (root / rel).is_dir():
+            leg["unmapped"].append({"dir": rel, "reason": reason})
+
+    # A directory that holds files directly and is named NOWHERE is a placement decision
+    # nobody made -- the same bite the declaration sweep applies to an undeclared family.
+    declared = {rel.split("/")[0] for rel, _, _ in PLACEMENT_MAP}
+    declared |= {rel for rel, _ in PLACEMENT_UNMAPPED}
+    for entry in sorted(root.iterdir()):
+        if not entry.is_dir() or entry.name in PLACEMENT_SKIP or entry.name.startswith("."):
+            continue
+        if entry.name in declared:
+            continue
+        if any(child.is_file() for child in entry.iterdir()):
+            leg["undeclared"].append(entry.name)
+
+    leg["status"] = "ASSERTED"
+    return leg
+
+
+def render_placement(leg: dict) -> str:
+    """One summary line, then one line per declared directory (G5)."""
+    if leg.get("status") == "NOT RUN":
+        return f"hygiene placement: NOT RUN — {leg.get('reason', 'no reason recorded')}"
+    head = (
+        f"hygiene placement: {leg['files']} file(s) over "
+        f"{sum(1 for d in leg['directories'] if d['status'] != 'absent')} declared directory(ies)"
+        f" — {len(leg['mismatches'])} mismatch(es), {len(leg['naming'])} naming mismatch(es), "
+        f"{len(leg.get('ignored', []))} git-ignored (excluded) (removes: no)"
+    )
+    lines = [head]
+    if leg.get("ignore_status", "APPLIED") != "APPLIED":
+        # The predicate could not be applied -- NOT A CLEAN ZERO. Printed as its own line so
+        # a reader never mistakes "git could not answer" for "nothing is ignored" (#282).
+        lines.append(
+            f"  gitignore predicate NOT APPLIED — {leg.get('ignore_reason', 'no reason recorded')}"
+        )
+    for record in leg.get("ignored", []):
+        lines.append(
+            f"  IGNORED {record['path']} — the tree's own .gitignore declares this path, so it "
+            f"is OUT of the placement population (the repo creates it; it does not track it)"
+        )
+    for record in leg["directories"]:
+        if record["status"] == "absent":
+            lines.append(f"  {record['dir']:24} absent (no such directory)")
+        else:
+            lines.append(
+                f"  {record['dir']:24} {record['files']:3} file(s), "
+                f"{'|'.join(record['allowed'])}"
+            )
+    for record in leg["unmapped"]:
+        lines.append(f"  {record['dir']:24} unmapped — {record['reason']}")
+    for record in leg["undeclared"]:
+        lines.append(
+            f"  UNDECLARED {record} — a directory this tree carries that neither "
+            f"PLACEMENT_MAP nor PLACEMENT_UNMAPPED names, so nothing checks its contents"
+        )
+    for record in leg["mismatches"]:
+        lines.append(
+            f"  MISMATCH {record['path']} — {record['class']}, and `{record['dir']}` declares "
+            f"{'|'.join(record['allowed'])} ({record['basis']})"
+        )
+    for record in leg["naming"]:
+        lines.append(
+            f"  NAME {record['path']} — does not match `{record['pattern']}` "
+            f"({record['basis']})"
+        )
+    return "\n".join(lines)
+
+
+"""Stale directories OUTSIDE the namespace, PRINTED and never reclaimed (G6; q13).
+
+The reaper above globs `/tmp/<namespace>-*`, and that glob is the whole of its vision: a
+directory this factory created at a path that does not match it is invisible to every leg
+of this tool. `git worktree add` is the declared creation convention that produces exactly
+that class -- the path is the caller's choice, so `/tmp/af-223` and `/tmp/af-225/wt` are
+both worktrees this factory made and NEITHER matches the pattern. Measured 2026-10-02: 75
+registered trees, 75 of them outside the namespace, so a tree left behind by a killed lane
+survives indefinitely and no leg reports it.
+
+What this leg PRINTS is git's own census, plus three facts read from it:
+
+  * **prunable** -- git itself says the tree's gitdir points at a non-existent location.
+    This is the definitive stale class and the only one this leg ENUMERATES, because it is
+    a declaration by the tool that owns the data rather than an inference by this one;
+  * **outside the namespace** -- the structural fact that the reaper cannot see the tree at
+    all, reported as a count because it holds of every tree here and so cannot discriminate;
+  * **landed** and **age** -- reported as counts and never as a verdict. A tree's HEAD being
+    an ancestor of the primary branch means its WORK LANDED, NOT that the tree is abandoned:
+    a live lane sits on a landed commit between edits, and this very worktree did while the
+    leg was being written. Age is the discriminator this factory already uses for in-flight
+    versus stranded (#38), so both are printed BESIDE each other and the judgement is left
+    to a reader.
+
+`removes: no`, and the leg never reclaims: `git worktree prune` is a write, the tree may
+hold a peer lane's uncommitted work, and the shape established for this class by
+leshchenko1979/agent-factories#220 is a report that a human acts on.
+"""
+
+
+def _primary_reachable(root: Path) -> tuple[str | None, set[str] | None, str | None]:
+    """(revision, every commit reachable from it, error) for the landed test.
+
+    ONE `git rev-list` call rather than one `merge-base --is-ancestor` per tree: 75
+    subprocesses would cost more than this whole leg, and the reachable set answers the
+    same question for every tree at once. `origin/main` is preferred and the local `main`
+    is the fallback, because a factory with no remote still has a primary branch; when
+    NEITHER resolves the landed count is `NOT RUN` with its reason, never a zero.
+    """
+    for rev in ("origin/main", "main"):
+        proc = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"],
+            cwd=str(root), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            listed = subprocess.run(
+                ["git", "rev-list", rev],
+                cwd=str(root), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            if listed.returncode != 0:
+                return rev, None, (
+                    f"`git rev-list {rev}` exited {listed.returncode}: {listed.stderr.strip()}"
+                )
+            return rev, set(listed.stdout.split()), None
+    return None, None, "neither `origin/main` nor `main` resolves here"
+
+def stale_dirs_leg(
+    root: Path | None = None,
+    namespace: str | None = None,
+    records_fn=None,
+    reachable_fn=None,
+) -> dict:
+    """The population of directories this factory created outside its own scratch glob.
+
+    Report-only (`removes: False`): the tree may hold a peer lane's uncommitted work, so
+    the leg PRINTS and a human decides.
+    """
+    root = Path(root) if root is not None else repo_root()
+    namespace = namespace or NAMESPACE
+    pattern = f"/tmp/{namespace}-*"
+    records_fn = records_fn or worktree_records
+    reachable_fn = reachable_fn or _primary_reachable
+
+    leg: dict = {
+        "class": "stale-directories",
+        "predicate": "a directory this factory created is visible to the reaper that maintains it",
+        "removes": False,
+        "root": str(root),
+        "namespace": namespace,
+        "pattern": pattern,
+        "grace_hours": WORKTREE_STALE_HOURS,
+        "total": 0,
+        "outside": [],
+        "prunable": [],
+        "landed": [],
+        "aged": [],
+        "trees": [],
+        "reach_rev": None,
+        "reach_error": None,
+    }
+
+    records, error = records_fn(root)
+    if error:
+        leg["status"] = "NOT RUN"
+        leg["reason"] = error
+        return leg
+
+    rev, reachable, reach_error = reachable_fn(root)
+    leg["reach_rev"] = rev
+    leg["reach_error"] = reach_error
+
+    now = time.time()
+    for record in records:
+        path = record["path"]
+        try:
+            age = (now - os.path.getmtime(path)) / 3600.0
+        except OSError:
+            age = None
+        inside = fnmatch.fnmatch(path, pattern)
+        landed = None
+        if reachable is not None and record.get("head"):
+            landed = record["head"] in reachable
+        leg["trees"].append(
+            {
+                "path": path,
+                "head": record.get("head"),
+                "prunable": record.get("prunable"),
+                "inside_namespace": inside,
+                "age_hours": age,
+                "landed": landed,
+            }
+        )
+        if not inside:
+            leg["outside"].append(path)
+        if record.get("prunable"):
+            leg["prunable"].append(path)
+        if landed:
+            leg["landed"].append(path)
+        if age is not None and age > WORKTREE_STALE_HOURS:
+            leg["aged"].append(path)
+
+    leg["total"] = len(records)
+    leg["status"] = "ASSERTED"
+    return leg
+
+def render_stale_dirs(leg: dict) -> str:
+    """One summary line, then one line per PRUNABLE tree (G6)."""
+    if leg.get("status") == "NOT RUN":
+        return f"hygiene stale directories: NOT RUN — {leg.get('reason', 'no reason recorded')}"
+    bits = [
+        f"{leg['total']} tree(s)",
+        f"{len(leg['outside'])} outside the namespace `{leg['pattern']}`",
+        f"{len(leg['prunable'])} prunable",
+    ]
+    if leg.get("reach_error"):
+        bits.append(f"landed NOT RUN ({leg['reach_error']})")
+    else:
+        bits.append(f"{len(leg['landed'])} landed")
+    bits.append(f"{len(leg['aged'])} older than {leg['grace_hours']:.0f}h")
+    lines = ["hygiene stale directories: " + ", ".join(bits) + " (removes: no)"]
+    for path in leg["prunable"]:
+        why = next(
+            (tree["prunable"] for tree in leg["trees"] if tree["path"] == path), "prunable"
+        )
+        lines.append(f"  PRUNABLE {path} — git reports: {why}")
+    return "\n".join(lines)
+
+
+"""Branch occupancy: a branch checked out in MORE THAN ONE tree, REPORTED (G8; #504).
+
+The census above parses each tree's `branch` and NOTHING READ IT, so two trees on one
+branch was invisible to every leg of this tool -- while it silently corrupts the tree the
+whole factory reads.
+
+Measured 2026-10-17: `/tmp/af-487` was on branch `main`, the same branch the shared tree
+`/root/agent-factories` holds. When af-487 committed on `main` the branch ref moved, so the
+SHARED tree's HEAD re-pointed while its index still held the old blob -- and the new ledger
+row rendered as a STAGED DELETION in a tree that had lost nothing. The owning lane restored
+the "deleted" row twice and wrote the misdiagnosis into a ledger row before another lane
+found the mechanism. The class is silent by construction: every surface reports a
+deletion, and the truth is a stale checkout.
+
+`removes: no`. Detaching another lane's tree is the interference rule 22/23 forbids, and
+`git worktree prune` is a write, so the leg PRINTS and a human acts.
+
+The population is PRINTED beside the verdict (`N tree(s) on M branch(es), K branch(es)
+multiply held`), so an unread census cannot render as a clean one. A multiply-held branch
+is a FINDING; when that branch is the PRIMARY one -- the tree every lane reads -- it is a
+VIOLATION, because that is the corruption class and not a transient peer branch.
+"""
+
+def branch_occupancy_leg(records_fn=None, root: Path | None = None) -> dict:
+    """Branches held by more than one worktree, from the ONE shared census (G8; #504)."""
+    root = Path(root) if root is not None else repo_root()
+    records_fn = records_fn or worktree_records
+    leg: dict = {
+        "class": "branch-occupancy",
+        "predicate": "a branch is checked out in at most one worktree",
+        "removes": False,
+        "root": str(root),
+        "total": 0,
+        "branches": 0,
+        "multiply_held": [],
+        "primary_branch": None,
+        "primary_contended": False,
+    }
+
+    records, error = records_fn(root)
+    if error:
+        leg["status"] = "NOT RUN"
+        leg["reason"] = error
+        return leg
+
+    leg["total"] = len(records)
+    # `git worktree list` reports the MAIN tree first, so its branch is the primary one:
+    # that is the tree every lane reads, which is why its contention is the fault class.
+    primary = records[0].get("branch") if records else None
+    leg["primary_branch"] = primary
+
+    held: dict[str, list[str]] = {}
+    for record in records:
+        branch = record.get("branch")
+        # A detached tree occupies no branch, and a tree git could not classify is not
+        # evidence of contention: skip both rather than folding them into one bucket.
+        if record.get("detached") or not branch:
+            continue
+        held.setdefault(branch, []).append(record["path"])
+
+    leg["branches"] = len(held)
+    for branch in sorted(held):
+        paths = held[branch]
+        if len(paths) > 1:
+            leg["multiply_held"].append({"branch": branch, "paths": paths})
+            if branch == primary:
+                leg["primary_contended"] = True
+
+    leg["status"] = "ASSERTED"
+    return leg
+
+def _short_branch(branch: str | None) -> str:
+    """`refs/heads/main` -> `main`, for a line a human reads."""
+    if not branch:
+        return "(none)"
+    return branch[len("refs/heads/"):] if branch.startswith("refs/heads/") else branch
+
+def render_branch_occupancy(leg: dict) -> str:
+    """One summary line, then one line per multiply-held branch (G8; #504)."""
+    if leg.get("status") == "NOT RUN":
+        return f"hygiene branch occupancy: NOT RUN — {leg.get('reason', 'no reason recorded')}"
+    lines = [
+        f"hygiene branch occupancy: {leg['total']} tree(s) on {leg['branches']} branch(es), "
+        f"{len(leg['multiply_held'])} branch(es) multiply held (removes: no)"
+    ]
+    for entry in leg["multiply_held"]:
+        marker = "VIOLATION" if entry["branch"] == leg.get("primary_branch") else "FINDING"
+        lines.append(
+            f"  {marker} {_short_branch(entry['branch'])} — checked out in "
+            f"{len(entry['paths'])} trees: " + ", ".join(entry["paths"])
+        )
+    return "\n".join(lines)
+
+# --- Evidence supersession: PROSE-ONLY supersessions are REPORTED (G7; q13) -----------
+"""An evidence artifact superseded in PROSE but not MECHANICALLY, reported (G7; q13).
+
+`evidence/` and `reviews/` are append-only history: an artifact is never deleted when a
+later run replaces it, so the tree accumulates snapshots and the ONLY thing that says which
+one governs is a hand-written notice -- or, more often, the reader noticing that a later
+dated sibling exists. Measured 2026-10-02: 25 dated artifacts over 15 families, 6 families
+with more than one member, and **zero** `superseded_by` markers anywhere in the tree. So
+every supersession in this repository is prose-only, which is the gap G7 names.
+
+Two signals say an artifact is superseded, and the leg reads BOTH because they fail
+differently:
+
+  * **the naming convention** -- a dated artifact `<stem>-YYYY-MM-DD[-<suffix>].md` whose
+    date is STRICTLY older than its family's newest date. A tie at the newest date is a
+    set of CURRENT siblings, not a supersession: the suffix distinguishes a variant (a
+    refused census is not an older census);
+  * **a prose notice** -- the artifact's own text names a successor path. This catches the
+    singleton case the convention cannot see, where a file supersedes something outside
+    its own family.
+
+A mechanical marker is the declared field `superseded_by:` naming an existing path. An
+artifact that is superseded by EITHER signal and carries NO marker is the population this
+leg reports. It is a DEBT CENSUS and not a fault list: the report is expected to be
+non-empty on this tree, and the number falls only as markers are added.
+
+`removes: no`, and the leg never writes a marker for you: what a successor IS is a
+judgement by the lane that produced the artifact, and a marker this tool invented would be
+a fabricated supersession -- worse than an unmarked one, because it reads as a decision
+somebody made. The shape is the one established for this class by
+leshchenko1979/agent-factories#220.
+"""
+
+SUPERSEDED_FIELD = "superseded_by"
+
+# `<stem>-YYYY-MM-DD[-<suffix>].md`: the DECLARED naming convention. The suffix is part of
+# the convention rather than an exception to it -- `-refused` and `-self-audit` are real
+# members of this tree, and a variant shares its date with its sibling.
+DATED_ARTIFACT = re.compile(
+    r"^(?P<stem>.+?)-(?P<date>\d{4}-\d{2}-\d{2})(?:-(?P<suffix>[A-Za-z0-9._-]+))?\.md$"
+)
+
+# A prose notice that names a successor. Deliberately narrow: it requires a PATH-like token
+# ending in `.md`, because "superseded" as a bare word appears in this tree describing
+# ledger rows, measurements and channel surfaces, none of which is an artifact.
+SUPERSESSION_NOTICE = re.compile(
+    r"(?i)supersed(?:e[sd]?|ing)\s+by\s+`?(?P<path>[\w./-]+\.md)`?"
+)
+
+EVIDENCE_DIR = "evidence"
+
+def _dated_artifacts(root: Path) -> list[dict]:
+    """Every artifact under `evidence/` whose name carries the convention's date."""
+    base = root / EVIDENCE_DIR
+    records: list[dict] = []
+    for path in sorted(base.rglob("*.md")):
+        match = DATED_ARTIFACT.match(path.name)
+        if not match:
+            continue
+        records.append(
+            {
+                "path": path.relative_to(root).as_posix(),
+                "family": (path.parent / match.group("stem")).relative_to(root).as_posix(),
+                "date": match.group("date"),
+            }
+        )
+    return records
+
+def _reads_marker(root: Path, rel: str) -> str | None:
+    """The declared `superseded_by` value, or None when the artifact carries no marker.
+
+    A marker whose target does not exist is returned as-is and reported SEPARATELY: it is
+    a stale marker rather than a clean one, and folding it into "marked" would let a
+    fabricated supersession read as a satisfied one.
+    """
+    try:
+        text = (root / rel).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines()[:40]:
+        stripped = line.strip().lstrip("*-").strip()
+        if stripped.lower().startswith(SUPERSEDED_FIELD):
+            _, _, value = stripped.partition(":")
+            value = value.strip().strip("`").strip()
+            if value:
+                return value
+    return None
+
+def _names_successor(root: Path, rel: str) -> str | None:
+    """The successor path a prose notice names, when it names one that exists."""
+    try:
+        text = (root / rel).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for match in SUPERSESSION_NOTICE.finditer(text):
+        candidate = match.group("path")
+        for form in (root / candidate, root / EVIDENCE_DIR / candidate):
+            if form.is_file():
+                return form.relative_to(root).as_posix()
+    return None
+
+def evidence_supersession_leg(root: Path | None = None) -> dict:
+    """The artifacts superseded by convention or prose that carry no marker (G7).
+
+    Report-only (`removes: False`): a supersession is a judgement by the lane that produced
+    the artifact, so the leg PRINTS the debt and a human settles it.
+    """
+    root = Path(root) if root is not None else repo_root()
+    leg: dict = {
+        "class": "evidence-supersession",
+        "predicate": "an artifact superseded in prose or by the naming convention carries a mechanical marker",
+        "removes": False,
+        "root": str(root),
+        "dir": EVIDENCE_DIR,
+        "field": SUPERSEDED_FIELD,
+        "artifacts": [],
+        "families": {},
+        "newest": {},
+        "by_convention": [],
+        "by_prose": [],
+        "marked": [],
+        "stale_marker": [],
+        "prose_only": [],
+    }
+
+    base = root / EVIDENCE_DIR
+    if not base.is_dir():
+        leg["status"] = "absent"
+        leg["reason"] = f"no `{EVIDENCE_DIR}/` in this tree"
+        return leg
+    if not os.access(base, os.R_OK):
+        leg["status"] = "NOT RUN"
+        leg["reason"] = f"`{EVIDENCE_DIR}/` exists but cannot be read"
+        return leg
+
+    records = _dated_artifacts(root)
+    leg["artifacts"] = records
+    families: dict[str, list[str]] = {}
+    for record in records:
+        families.setdefault(record["family"], []).append(record["date"])
+    leg["families"] = {family: sorted(dates) for family, dates in families.items()}
+    leg["newest"] = {family: max(dates) for family, dates in families.items()}
+
+    for record in records:
+        rel = record["path"]
+        newest = leg["newest"][record["family"]]
+        by_convention = record["date"] < newest
+        successor = _names_successor(root, rel)
+        marker = _reads_marker(root, rel)
+        entry = {
+            "path": rel,
+            "family": record["family"],
+            "date": record["date"],
+            "newest": newest,
+            "by_convention": by_convention,
+            "successor": successor,
+            "marker": marker,
+        }
+        if by_convention:
+            leg["by_convention"].append(rel)
+        if successor:
+            leg["by_prose"].append(rel)
+        if marker:
+            if (root / marker).is_file():
+                leg["marked"].append(rel)
+                continue
+            leg["stale_marker"].append(entry)
+        if by_convention or successor:
+            leg["prose_only"].append(entry)
+
+    leg["status"] = "ASSERTED"
+    return leg
+
+def render_evidence_supersession(leg: dict) -> str:
+    """One summary line, then one line per unmarked supersession (G7)."""
+    if leg.get("status") == "NOT RUN":
+        return f"hygiene evidence supersession: NOT RUN — {leg.get('reason', 'no reason recorded')}"
+    if leg.get("status") == "absent":
+        return f"hygiene evidence supersession: absent — {leg.get('reason', 'no evidence tree')}"
+    head = (
+        f"hygiene evidence supersession: {len(leg['artifacts'])} dated artifact(s) over "
+        f"{len(leg['families'])} family(ies) — {len(leg['by_convention'])} superseded by the "
+        f"naming convention, {len(leg['prose_only'])} prose-only (unmarked), "
+        f"{len(leg['marked'])} marked (removes: no)"
+    )
+    lines = [head]
+    for entry in leg["prose_only"]:
+        why = (
+            f"superseded by {entry['family']}-{entry['newest']}.md"
+            if entry["by_convention"]
+            else f"names {entry['successor']} as its successor"
+        )
+        lines.append(
+            f"  PROSE-ONLY {entry['path']} — {why}, and carries no `{leg['field']}` marker"
+        )
+    for entry in leg["stale_marker"]:
+        lines.append(
+            f"  STALE MARKER {entry['path']} — declares `{leg['field']}: {entry['marker']}`, "
+            f"which does not exist in this tree"
+        )
+    return "\n".join(lines)
+
 def _split_status_line(line: str) -> tuple[str, str]:
     """Return (status code, path) from one `git status --porcelain` line.
 
@@ -223,6 +1525,28 @@ def _split_status_line(line: str) -> tuple[str, str]:
     if len(path) > 1 and path.startswith('"') and path.endswith('"'):
         path = path[1:-1]
     return status_code, path
+
+def _deleted_age_minutes(full: str, now: float) -> int | None:
+    """Age, in minutes, of a path that is GONE from the working tree (#447).
+
+    A deleted path has no mtime, so the age is read from its nearest EXISTING
+    ancestor directory: deleting an entry stamps the directory that held it, so
+    `git rm` across N files stamps each file's directory as it goes. The estimate
+    can only come out too YOUNG (a sibling entry changed since), which errs toward
+    ADVISORY — the safe direction in a shared tree, where a false RED on a peer's
+    in-flight deletion is the very defect this discriminates. `None` when no
+    ancestor is readable; the caller treats that as the pre-#447 behaviour.
+    """
+    probe = os.path.dirname(full)
+    while probe and not os.path.isdir(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            return None
+        probe = parent
+    try:
+        return int((now - os.path.getmtime(probe)) / 60)
+    except OSError:
+        return None
 
 def inspect_git_working_tree(
     repo_dir: str | None = None, now: float | None = None
@@ -275,9 +1599,28 @@ def inspect_git_working_tree(
         try:
             age_min = int((now - os.path.getmtime(full)) / 60)
         except OSError:
-            # Deleted from the working tree: nothing can be in flight about a file
-            # that is gone, and a deleted tracked file left uncommitted is stranded.
-            violations.append(f"[{status_code}] {path} (missing from the working tree)")
+            # The path is GONE from the working tree: git reports a deleted tracked
+            # file as ` D` (unstaged) or `D ` (staged). Its own mtime is unavailable,
+            # so the age is read from the nearest existing ancestor directory and the
+            # SAME grace discriminator applies as for every other dirty path (#447).
+            # The old branch called any deletion a violation at ANY age, conflating
+            # "the content is not being edited" with "the change is not being made":
+            # a lane that has run `git rm` across N files and is verifying before
+            # committing is exactly in flight, and the audit went RED on it — the #38
+            # race, re-introduced for this one class of change.
+            age_min = _deleted_age_minutes(full, now)
+            if age_min is None:
+                violations.append(
+                    f"[{status_code}] {path} (deleted from the working tree, age unknown)"
+                )
+            elif age_min >= GRACE_MINUTES:
+                violations.append(
+                    f"[{status_code}] {path} (deleted from the working tree, aged {age_min}m)"
+                )
+            else:
+                advisories.append(
+                    f"[{status_code}] {path} (deleted {age_min}m ago — possibly a lane's work in flight)"
+                )
             continue
 
         if status_code == "??":
@@ -385,11 +1728,49 @@ def main() -> int:
         f"hygiene declaration: {len(protected)} path(s) declared live, "
         f"{len(scratch_entries)} declared scratch ({PROTECTED_REL})"
     )
+    # The build-residue population, PRINTED on every run and never reaped (G3; q15). It is
+    # the class no other leg can see -- self-ignoring caches -- so its whole remedy is that
+    # a reader meets its size here rather than inferring "none" from silence.
+    print(render_build_residue(build_residue_leg()))
+    # The declaration cross-sweep, PRINTED on every run (G2). Each surface's own tool reads
+    # its own file for readability; nothing asked whether the thing an entry points at still
+    # exists, so a debt left by a rename read as a live exemption on every one of them.
+    print(render_declaration_sweep(declaration_sweep_leg()))
+    # The placement map, PRINTED on every run (G5). Nothing answered "is this file in the
+    # folder its content belongs to", so a file could sit in a directory its content does
+    # not belong to and every leg above would still read clean.
+    print(render_placement(placement_leg()))
+    # The stale-directory population OUTSIDE the scratch namespace, PRINTED on every run
+    # (G6). The reaper's glob is the whole of its vision, so a tree this factory created at
+    # a path that does not match it -- every `git worktree add` -- is invisible to it.
+    print(render_stale_dirs(stale_dirs_leg(namespace=args.namespace)))
+    # Branch occupancy: a branch checked out in MORE THAN ONE tree (G8; #504). The census
+    # already parsed every tree's branch and no leg read it, so two trees on one branch --
+    # which moves the SHARED tree's HEAD under its own index and renders a published ledger
+    # row as a staged deletion -- was invisible to every leg above.
+    occupancy = branch_occupancy_leg()
+    print(render_branch_occupancy(occupancy))
+    # The evidence artifacts superseded in PROSE that carry no mechanical marker (G7).
+    # A DEBT CENSUS and not a fault list: `evidence/` is append-only history, so an
+    # unmarked supersession is the expected state and the number falls only as markers
+    # are added by the lanes that produced the artifacts.
+    print(render_evidence_supersession(evidence_supersession_leg()))
     patterns = scratch_patterns_for(args.namespace) + list(args.scratch_glob or [])
     count, items = reap_stale_scratch(
         dry_run=dry_run, patterns=patterns, protected=protected
     )
     violations, advisories, explanations = inspect_git_working_tree()
+    # A multiply-held PRIMARY branch is the corruption class G8 exists for: the shared tree's
+    # HEAD moves under its own index and a published ledger row reads as a staged deletion.
+    # It is a violation, not an advisory, because no legitimate state produces it --
+    # `git worktree add` refuses a branch already checked out, so reaching it takes a force.
+    if occupancy.get("primary_contended"):
+        for entry in occupancy["multiply_held"]:
+            if entry["branch"] == occupancy.get("primary_branch"):
+                violations.append(
+                    f"branch {_short_branch(entry['branch'])} is checked out in "
+                    f"{len(entry['paths'])} worktrees: " + ", ".join(entry["paths"])
+                )
 
     if dry_run:
         # Audit mode: stale scratch, litter, stranded dirty paths and any path this
