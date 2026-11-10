@@ -40,9 +40,9 @@ by hand.
 
 ## The measured class
 
-Measured 2026-11-10 over the **1181 commits reachable from `HEAD`**, subject and body
-scanned separately (`--all` reaches 1199 and includes topic branches that never landed on
-`main`, so it is not the population this rule governs):
+Measured 2026-11-10 at `HEAD` = `4bc91f0`, over the **1185 commits reachable from `HEAD`**,
+subject and body scanned separately (`--all` reaches 1203 and includes topic branches that
+never landed on `main`, so it is not the population this rule governs):
 
 | Surface | Messages carrying keyword-then-ref |
 |---|---|
@@ -50,26 +50,46 @@ scanned separately (`--all` reaches 1199 and includes topic branches that never 
 | body | **15** |
 | total | **21** |
 
-The six **subject-borne** instances, with the effect each had on a board:
+21 messages, 22 hits: `b2e252f3` carries two refs in one body (`Fix #1`, `Fix #2`). The
+subject and body sets do not overlap. **A guard that read only subjects would have covered
+6 of 21, 29 %.** The body is the larger half, and it is why the guard reads the whole
+message.
 
-| Commit | Effect |
+### Which closes the parser actually caused
+
+`closedAt` is the *latest* close, and a reopen erases the earlier instant. A parser close is
+therefore provable only where the surviving gap between the commit and the close is
+second-scale. Classifying all 21 messages against their targets' own `closedAt`:
+
+| Verdict | Messages | Meaning |
+|---|---|---|
+| **record** | 7 | the board closed *before* the commit was authored: the message records a close, it does not cause one |
+| could-be-cause | 13 | closed after authoring, but push time is unrecorded |
+| reopened | 1 | `#46` is OPEN again, so its original instant no longer exists |
+
+The two closes that reproduce as a parser's work, both **subject-borne**:
+
+| Commit | Evidence |
 |---|---|
-| `8fe7155` | #50 closed +3 s |
-| `f758758` | #46 closed +2 s; mirror #46 +5 s (unrelated, reopened by hand) |
-| `b7221d0` | #39 closed |
-| `420ff65` | #121 closed +8 s |
-| `b3754ec` | #122 |
-| `b22dd67` | #142 closed +6 s |
+| `420ff65` | #121 closed **+8 s** after the commit's own timestamp |
+| `b22dd67` | #142 closed **+6 s** after the commit's own timestamp |
 
-Six and eight second gaps are a parser, not a decision. The class is still firing: the
-oldest instance is 2026-09-26 and the newest is 2026-11-09.
+Nobody closes a board eight seconds after writing a commit message. The class is still
+firing: the oldest instance is 2026-09-26, the newest 2026-11-09.
 
-**The body half is the larger half, and it is why the guard reads the whole message.** Of
-the 15 body-borne instances, three are ledger rows where the board closed by parser rather
-than by the lane (`close #140`, `close #128`, `close #55`); the rest are `Closes #42` (x3),
-`Closes #40` (x3), `Closes #25`, `Closes #32`, `Closes #44`, `fixes #3`, `Fix #1`,
-`Fixes #32` - intended closes, but executed by the parser at push time with no lane
-deciding. A guard that read only subjects would have covered 6 of 21.
+Two entries from the first draft of this section did not survive that check, and the reason
+is worth keeping. `b7221d0`'s `#39` closed **56 days before** the commit existed, so it is a
+record like the seven, not a cause. And `#50` / `#46` were reopened and re-closed, so the
+`+3 s` / `+2 s` gaps were true when measured and are not reproducible from `closedAt` today:
+a number measured against a mutable artifact has a shelf life.
+
+**Body-borne parser closes: zero proven instances.** The three this section first cited
+(`close #140`, `close #128`, `close #55`) are all records: every one closed before its commit
+was authored, so a push cannot have caused it. The body surface is therefore guarded on
+**preventive** grounds: GitHub documents closing keywords as working anywhere in a commit
+message, subject or body, the two proven cases above show the parser acting at push time,
+and 15 of 21 messages already carry a closing ref in the body. That is a documented
+exposure, not an observed close, and the distinction belongs in the record.
 
 ## The mechanism, and its fail-open contract
 
