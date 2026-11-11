@@ -884,6 +884,22 @@ GATE_WALLS_SEC: dict[str, float] = {
 # nearest round second ABOVE it. Its own work is ~4s; the wall is interpreter + plugin startup,
 # which is why the bare DEFAULT_GATE_WALL_SEC of 30.0 would leave only 1.36x on the worst.
 #
+# FOUR MORE, PORTED WITH THE HYGIENE FAMILY (#107, measured 2026-11-11, whole-command wall
+# vs pytest's own reported time, n=1 each, same loaded regime):
+#
+#   test_hygiene_build_residue.py        17.95s wall /  0.80s work
+#   test_hygiene_declaration_sweep.py    16.70s wall /  0.97s work
+#   test_hygiene_stale_dirs.py           13.76s wall /  0.67s work
+#   test_hygiene_branch_occupancy.py     13.54s wall /  0.10s work
+#
+# These four DO carry a `__main__`, unlike the nine above — so the group's predicate is not
+# "no `__main__`" but "no CHEAPER form exists", which is the fact that actually decides the
+# registration. Each `__main__` is three lines ending in
+# `sys.exit(pytest.main([__file__, "-q"]))`, i.e. the bare-script form pays the SAME pytest
+# interpreter + plugin startup and adds one import on top. So they take the group's declared
+# wall rather than a bare-script one, and the group's slowest sample (40.6s) is unchanged by
+# their arrival, which is what 150.0 was derived from.
+#
 # The DEFAULT_GATE_WALL_SEC of 30.0 would have killed six of the nine on the FIRST run, and
 # killed them into the worst shape: run_gate reports a timeout with duration 0.0 and the
 # exception in stderr, which is indistinguishable from an instant logic error. The declared
@@ -894,8 +910,12 @@ PYTEST_FORM_GATES: tuple[str, ...] = (
     "tests/test_audit_rates.py",
     "tests/test_binding_mechanism_exists.py",
     "tests/test_close_telemetry_provenance.py",
+    "tests/test_hygiene_branch_occupancy.py",
+    "tests/test_hygiene_build_residue.py",
+    "tests/test_hygiene_declaration_sweep.py",
     "tests/test_hygiene_inflight.py",
     "tests/test_hygiene_namespace.py",
+    "tests/test_hygiene_stale_dirs.py",
     "tests/test_insights_gate_recorded.py",
     "tests/test_ledger_close_preflight.py",
     "tests/test_registry_attest.py",
@@ -1659,6 +1679,14 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
         gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_hygiene_inflight.py", "-q"])
     if (repo_root / "tests/test_hygiene_namespace.py").is_file():
         gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_hygiene_namespace.py", "-q"])
+    if (repo_root / "tests/test_hygiene_build_residue.py").is_file():
+        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_hygiene_build_residue.py", "-q"])
+    if (repo_root / "tests/test_hygiene_declaration_sweep.py").is_file():
+        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_hygiene_declaration_sweep.py", "-q"])
+    if (repo_root / "tests/test_hygiene_stale_dirs.py").is_file():
+        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_hygiene_stale_dirs.py", "-q"])
+    if (repo_root / "tests/test_hygiene_branch_occupancy.py").is_file():
+        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_hygiene_branch_occupancy.py", "-q"])
     if (repo_root / "tests/test_insights_gate_recorded.py").is_file():
         gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_insights_gate_recorded.py", "-q"])
     if (repo_root / "tests/test_ledger_close_preflight.py").is_file():
