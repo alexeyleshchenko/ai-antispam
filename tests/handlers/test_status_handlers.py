@@ -1535,8 +1535,21 @@ class TestSelfLeaveOfPausedGroup:
         )
 
     def _human_removal(self) -> ChatMemberUpdated:
+        """A HUMAN kick. The actor MUST differ from `bot.id`.
+
+        CI derives `bot.id` from the dummy token `123456789:ABC…`
+        (`.github/workflows/deploy.yml:23`), which is exactly `HUMAN_ID` — so a
+        literal `HUMAN_ID` here makes a human removal read as a self-leave and
+        silently inverts this positive control (measured: green locally against
+        the real token, `assert 0 == 1` in CI). The id is therefore derived, and
+        the invariant is asserted rather than assumed.
+        """
+        from src.app.handlers.status_handlers import bot
+
+        human_id = HUMAN_ID if HUMAN_ID != bot.id else HUMAN_ID + 1
+        assert human_id != bot.id, "the human actor must not collide with bot.id"
         return _real_event(
-            from_id=HUMAN_ID,
+            from_id=human_id,
             from_is_bot=False,
             old_status="member",
             new_status="left",
