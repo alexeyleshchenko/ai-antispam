@@ -283,13 +283,19 @@ async def record_bot_added(group_id: int) -> None:
             group_id,
         )
 
-async def record_bot_removed(group_id: int) -> None:
+async def record_bot_removed(group_id: int, *, preserve_paused: bool = False) -> None:
     """Stamp the removal instant AND retire the row.
 
     The removal event is the one observation that needs no sweep to confirm:
     the bot is no longer in the chat, so the group is `left` from that instant
     (D6a). Retiring here is what stops the next startup roster sweep from
     re-probing a chat we already know we are not in.
+
+    `preserve_paused=True` is for the bot's OWN deliberate leave from a group it
+    already paused (#151): the pause is a disposition someone chose and the
+    mappings exist to be restored, so the instant is stamped without overwriting
+    `paused` with `left`. Safe by construction — a row that is not `paused` at
+    this instant still takes the ordinary retire path.
 
     `$N` appears in ascending text order below because the SQLite test
     adapter rewrites placeholders positionally (same trap as _retire_group).
@@ -300,6 +306,17 @@ async def record_bot_removed(group_id: int) -> None:
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
+        if preserve_paused:
+            current = await conn.fetchval(
+                "SELECT status FROM groups WHERE group_id = $1",
+                group_id,
+            )
+            if current == GroupStatus.PAUSED.value:
+                await conn.execute(
+                    "UPDATE groups SET bot_removed_at = NOW() WHERE group_id = $1",
+                    group_id,
+                )
+                return
         await conn.execute(
             """
             UPDATE groups

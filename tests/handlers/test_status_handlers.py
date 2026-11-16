@@ -1,14 +1,16 @@
 """Tests for status_handlers: Telegram auto-add detection + awaiting-rights upsert."""
 
 import asyncio
+import logging
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import (
     Chat,
     ChatMemberAdministrator,
+    ChatMemberLeft,
     ChatMemberMember,
     ChatMemberUpdated,
     User,
@@ -78,6 +80,7 @@ def _real_event(
     *,
     chat_type: str = "supergroup",
     from_id: int = HUMAN_ID,
+    from_is_bot: bool = False,
     old_status: str = "member",
     new_status: str = "administrator",
     chat_id: int = DISCUSSION_ID,
@@ -88,7 +91,11 @@ def _real_event(
 ) -> ChatMemberUpdated:
     """Build a REAL ChatMemberUpdated (logfire extract_args needs real models)."""
     chat = Chat(id=chat_id, type=chat_type, title="Discussion")
-    from_user = User(id=from_id, is_bot=False, first_name="Admin")
+    from_user = User(
+        id=from_id,
+        is_bot=from_is_bot,
+        first_name="Bot" if from_is_bot else "Admin",
+    )
     if old_can_delete is None:
         old_can_delete = can_delete
     if old_can_restrict is None:
@@ -109,6 +116,10 @@ def _real_event(
             can_post_stories=False,
             can_edit_stories=False,
             can_delete_stories=False,
+        )
+    elif new_status == "left":
+        new_member = ChatMemberLeft(
+            user=User(id=BOT_ID, is_bot=True, first_name="Bot"),
         )
     else:
         new_member = ChatMemberMember(
@@ -1374,6 +1385,234 @@ class TestBotAddRemoveInstants:
             assert after["bot_added_at"] is not None
         finally:
             self._clear_pool()
+
+
+class TestSelfLeaveOfPausedGroup:
+    """#151: the bot's own leave must not destroy a deliberate pause's mappings.
+
+    #150's tests all mocked `leave_chat`, so this chain never ran. Telegram
+    delivers OUR OWN leave as a `my_chat_member` update whose `from_user` is the
+    bot; `_handle_bot_removed` read that as a human kick, and because a bot that
+    has just left can never deliver the in-group fallback, "all notification
+    methods failed" was guaranteed — which hard-deleted the mappings and
+    overwrote `paused` with `left` (live trace: -1002496127723, 21:01:08).
+
+    These drive the REAL `_handle_bot_removed` against the real DB. The cleanup
+    spy wraps the REAL `perform_complete_group_cleanup`, so the controls below
+    delete rows for real: the guard is able to fail.
+    """
+
+    GROUP = DISCUSSION_ID
+    ADMIN = HUMAN_ID
+
+    def _sync_pool(self):
+        import app.database.postgres_connection as app_pc
+        import src.app.database.postgres_connection as src_pc
+
+        src_pc._pool = app_pc._pool
+
+    def _clear_pool(self):
+        import src.app.database.postgres_connection as src_pc
+
+        src_pc._pool = None
+
+    async def _seed(self, clean_db, *, status: str = "paused") -> None:
+        """One registered admin + two approved members, group in `status`."""
+        async with clean_db.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO groups (group_id, title, status) VALUES ($1, $2, $3)",
+                self.GROUP,
+                "Discussion",
+                status,
+            )
+            await conn.execute(
+                "INSERT INTO administrators (admin_id, is_active) VALUES ($1, 1)",
+                self.ADMIN,
+            )
+            await conn.execute(
+                "INSERT INTO group_administrators (group_id, admin_id) VALUES ($1, $2)",
+                self.GROUP,
+                self.ADMIN,
+            )
+            for member_id in (7001, 7002):
+                await conn.execute(
+                    "INSERT INTO approved_members (group_id, member_id) "
+                    "VALUES ($1, $2)",
+                    self.GROUP,
+                    member_id,
+                )
+
+    async def _state(self, clean_db):
+        """(status, admin rows, approved rows, bot_removed_at)."""
+        async with clean_db.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT status, bot_removed_at FROM groups WHERE group_id = $1",
+                self.GROUP,
+            )
+            admins = await conn.fetchval(
+                "SELECT COUNT(*) FROM group_administrators WHERE group_id = $1",
+                self.GROUP,
+            )
+            approved = await conn.fetchval(
+                "SELECT COUNT(*) FROM approved_members WHERE group_id = $1",
+                self.GROUP,
+            )
+        return row["status"], admins, approved, row["bot_removed_at"]
+
+    async def _drive(self, event) -> dict:
+        """Run the REAL handler with Telegram degraded as it is after a leave.
+
+        Every private DM fails (the admin blocked the bot) and the in-group
+        fallback fails (`bot is not a member of the supergroup chat`) — the exact
+        21:01:08 sequence, so the "all notification methods failed" branch is
+        reached in every case and only `cleanup_if_group_fails` differs.
+        """
+        from src.app.common import notifications
+        from src.app.handlers import status_handlers
+
+        cleanup_calls: list[tuple] = []
+        real_cleanup = notifications.perform_complete_group_cleanup
+
+        async def spy_cleanup(*args, **kwargs):
+            cleanup_calls.append((args, kwargs))
+            return await real_cleanup(*args, **kwargs)
+
+        async def send_message(chat_id, *args, **kwargs):
+            if chat_id == self.GROUP:
+                raise TelegramBadRequest(
+                    method=MagicMock(),
+                    message="Forbidden: bot is not a member of the supergroup chat",
+                )
+            raise TelegramForbiddenError(
+                method=MagicMock(), message="Forbidden: bot was blocked by the user"
+            )
+
+        send_mock = AsyncMock(side_effect=send_message)
+
+        self._sync_pool()
+        try:
+            with (
+                patch(
+                    "src.app.handlers.status_handlers._resolve_lang",
+                    AsyncMock(return_value="en"),
+                ),
+                patch(
+                    "src.app.handlers.status_handlers.format_chat_or_channel_display",
+                    return_value="Discussion",
+                ),
+                patch(
+                    "src.app.common.notifications.perform_complete_group_cleanup",
+                    AsyncMock(side_effect=spy_cleanup),
+                ),
+                patch("src.app.common.notifications.bot.send_message", send_mock),
+                patch(
+                    "src.app.common.notifications.bot.get_chat",
+                    AsyncMock(side_effect=Exception("no chat")),
+                ),
+                patch(
+                    "src.app.common.notifications.bot.leave_chat",
+                    AsyncMock(return_value=True),
+                ),
+            ):
+                await status_handlers._handle_bot_removed(
+                    event, self.GROUP, event.from_user.id, "Discussion", "left"
+                )
+        finally:
+            self._clear_pool()
+
+        return {"cleanup_calls": cleanup_calls, "send": send_mock}
+
+    def _self_leave(self) -> ChatMemberUpdated:
+        """Our own `leave_chat` arrives as `my_chat_member` acted by the bot."""
+        from src.app.handlers.status_handlers import bot
+
+        assert bot.id is not None, "aiogram derives bot.id from the token"
+        return _real_event(
+            from_id=bot.id,
+            from_is_bot=True,
+            old_status="member",
+            new_status="left",
+        )
+
+    def _human_removal(self) -> ChatMemberUpdated:
+        return _real_event(
+            from_id=HUMAN_ID,
+            from_is_bot=False,
+            old_status="member",
+            new_status="left",
+        )
+
+    @pytest.mark.asyncio
+    async def test_self_leave_of_paused_group_keeps_mappings(
+        self, patched_db_conn, clean_db, caplog
+    ):
+        """The guard: a paused group survives the bot's own leave intact."""
+        await self._seed(clean_db)
+        assert (await self._state(clean_db))[:3] == ("paused", 1, 2)
+
+        with caplog.at_level(logging.INFO, logger="src.app.common.notifications"):
+            result = await self._drive(self._self_leave())
+
+        # The fallback branch WAS reached (not skipped): the cleanup was
+        # declined by decision, not merely never considered.
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("Cleanup disabled for group" in m for m in messages), messages
+        assert result["cleanup_calls"] == [], (
+            "a self-leave of a paused group must not run the destructive cleanup"
+        )
+        status, admins, approved, bot_removed_at = await self._state(clean_db)
+        assert status == "paused"
+        assert (admins, approved) == (1, 2)
+        # #108's stamp still lands — only the cleanup is suppressed.
+        assert bot_removed_at is not None
+        # Notifications still ran: one admin DM + one group fallback (both failed).
+        assert result["send"].call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_self_leave_of_active_group_still_cleans_up(
+        self, patched_db_conn, clean_db
+    ):
+        """The guard is not "any self-leave": a non-paused group still cleans up."""
+        await self._seed(clean_db, status="active")
+
+        result = await self._drive(self._self_leave())
+
+        assert len(result["cleanup_calls"]) == 1
+        status, admins, approved, _ = await self._state(clean_db)
+        assert status == "left"
+        assert (admins, approved) == (0, 0)
+
+    @pytest.mark.asyncio
+    async def test_human_removal_of_paused_group_still_cleans_up(
+        self, patched_db_conn, clean_db
+    ):
+        """Positive control, same file: the identical event from a HUMAN cleans up.
+
+        A test that cannot fail is worse than none — this is the same group,
+        same status, same degraded Telegram surface, differing only in the actor.
+        """
+        await self._seed(clean_db, status="paused")
+
+        result = await self._drive(self._human_removal())
+
+        assert len(result["cleanup_calls"]) == 1
+        status, admins, approved, _ = await self._state(clean_db)
+        assert status == "left"
+        assert (admins, approved) == (0, 0)
+
+    @pytest.mark.asyncio
+    async def test_human_removal_of_active_group_still_cleans_up(
+        self, patched_db_conn, clean_db
+    ):
+        """The ordinary kick path is untouched."""
+        await self._seed(clean_db, status="active")
+
+        result = await self._drive(self._human_removal())
+
+        assert len(result["cleanup_calls"]) == 1
+        status, admins, approved, _ = await self._state(clean_db)
+        assert status == "left"
+        assert (admins, approved) == (0, 0)
 
 
 class TestRosterSyncOnBotAdd:
