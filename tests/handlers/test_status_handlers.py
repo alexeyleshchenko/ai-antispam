@@ -1569,18 +1569,33 @@ class TestSelfLeaveOfPausedGroup:
         assert result["send"].call_count == 2
 
     @pytest.mark.asyncio
-    async def test_self_leave_of_active_group_still_cleans_up(
+    async def test_self_leave_of_active_group_also_suppresses_cleanup(
         self, patched_db_conn, clean_db
     ):
-        """The guard is not "any self-leave": a non-paused group still cleans up."""
+        """The guard is the ACTOR, not the status — this is the amendment's proof.
+
+        HQ, 2026-11-16: a bot that has just left can never deliver the in-group
+        fallback, so "all notification methods failed" is guaranteed for a
+        self-leave WHATEVER the group's status. Gating on `paused` would leave a
+        hole here, and this arm is what closes it: the identical self-leave
+        against an `active` group must suppress the destructive cleanup too.
+
+        Status is corroboration only, so the row keeps the status it had — the
+        handler did not start it and must not end it.
+        """
         await self._seed(clean_db, status="active")
 
         result = await self._drive(self._self_leave())
 
-        assert len(result["cleanup_calls"]) == 1
-        status, admins, approved, _ = await self._state(clean_db)
-        assert status == "left"
-        assert (admins, approved) == (0, 0)
+        assert result["cleanup_calls"] == [], (
+            "a self-leave must not run the destructive cleanup even when the "
+            "group is not paused: the actor is the predicate"
+        )
+        status, admins, approved, bot_removed_at = await self._state(clean_db)
+        assert status == "active", "the self-leave handler must not overwrite the status"
+        assert (admins, approved) == (1, 2)
+        # #108's stamp still lands — only the cleanup and the status write are suppressed.
+        assert bot_removed_at is not None
 
     @pytest.mark.asyncio
     async def test_human_removal_of_paused_group_still_cleans_up(

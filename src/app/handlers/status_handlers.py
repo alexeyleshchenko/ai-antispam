@@ -31,7 +31,6 @@ from ..common.utils import (
     user_display_label,
 )
 from ..database import (
-    GroupStatus,
     activate_discussion_group,
     deactivate_admin,
     get_admin,
@@ -479,26 +478,28 @@ async def _handle_bot_removed(
     # A bot that leaves on purpose (`bot.leave_chat`, e.g. #150's terminal pause)
     # arrives here as a `my_chat_member` update with ITSELF as the actor. It can
     # never deliver the in-group fallback, so "all notification methods failed"
-    # is guaranteed — and the cleanup that follows hard-deletes the very
-    # mappings a deliberate pause exists to preserve (#151). Suppress ONLY the
-    # cleanup in that case; the notifications themselves still run.
-    self_leave_of_paused_group = (
-        event.from_user is not None
-        and event.from_user.id == bot.id
-        and group is not None
-        and group.status == GroupStatus.PAUSED
-    )
-    if self_leave_of_paused_group:
+    # is GUARANTEED for a self-leave, whatever the group's status — which makes
+    # `cleanup_if_group_fails=True` unconditionally wrong here (#151).
+    #
+    # The ACTOR is therefore the predicate. The status is CORROBORATION ONLY:
+    # gating on `paused` would leave a hole for a self-leave from a non-paused
+    # group, where the same guaranteed fallback failure would still hard-delete
+    # the mappings (HQ amendment, 2026-11-16). The status is logged so the
+    # record shows what the row actually held, but it never decides the branch.
+    is_self_leave = event.from_user is not None and event.from_user.id == bot.id
+    if is_self_leave:
         logger.info(
-            f"Bot's own leave from paused chat {chat_id} ('{chat_title}') — "
-            "deliberate pause, so mappings and paused status are kept "
-            "(destructive cleanup suppressed)"
+            f"Bot's own leave from chat {chat_id} ('{chat_title}') "
+            f"[status={group.status.value if group else 'no-row'}] — a "
+            "self-leave can never deliver the in-group fallback, so the "
+            "destructive cleanup is suppressed and the status is not "
+            "overwritten (the handler did not start it)"
         )
 
     # A removal breaks the pre-existing inference: the bot was not watching
     # when it was absent, so any re-add starts a fresh window (#108).
     try:
-        await record_bot_removed(chat_id, preserve_paused=self_leave_of_paused_group)
+        await record_bot_removed(chat_id, preserve_status=is_self_leave)
     except Exception:
         logger.warning(
             f"Failed to record bot removal instant for chat {chat_id} "
@@ -521,7 +522,7 @@ async def _handle_bot_removed(
                 event.chat.username,
                 human_admin_ids,
                 assume_human_admins=True,
-                cleanup_if_group_fails=not self_leave_of_paused_group,
+                cleanup_if_group_fails=not is_self_leave,
             )
         else:
             logger.warning(
