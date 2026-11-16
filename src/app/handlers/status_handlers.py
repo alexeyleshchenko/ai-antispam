@@ -469,10 +469,37 @@ async def _handle_bot_removed(
         f"Bot removed from chat '{chat_title}' ({chat_id}) by {removed_by_info}"
     )
 
+    # Read the group BEFORE the removal stamp. `record_bot_removed` retires the
+    # row to `left` (D6a), which would erase the very evidence the guard below
+    # needs: a group paused a second ago would already read as an ordinary
+    # removal, and the guard would be dead code (#151).
+    group = await get_group(chat_id)
+
+    # A bot that leaves on purpose (`bot.leave_chat`, e.g. #150's terminal pause)
+    # arrives here as a `my_chat_member` update with ITSELF as the actor. It can
+    # never deliver the in-group fallback, so "all notification methods failed"
+    # is GUARANTEED for a self-leave, whatever the group's status — which makes
+    # `cleanup_if_group_fails=True` unconditionally wrong here (#151).
+    #
+    # The ACTOR is therefore the predicate. The status is CORROBORATION ONLY:
+    # gating on `paused` would leave a hole for a self-leave from a non-paused
+    # group, where the same guaranteed fallback failure would still hard-delete
+    # the mappings (HQ amendment, 2026-11-16). The status is logged so the
+    # record shows what the row actually held, but it never decides the branch.
+    is_self_leave = event.from_user is not None and event.from_user.id == bot.id
+    if is_self_leave:
+        logger.info(
+            f"Bot's own leave from chat {chat_id} ('{chat_title}') "
+            f"[status={group.status.value if group else 'no-row'}] — a "
+            "self-leave can never deliver the in-group fallback, so the "
+            "destructive cleanup is suppressed and the status is not "
+            "overwritten (the handler did not start it)"
+        )
+
     # A removal breaks the pre-existing inference: the bot was not watching
     # when it was absent, so any re-add starts a fresh window (#108).
     try:
-        await record_bot_removed(chat_id)
+        await record_bot_removed(chat_id, preserve_status=is_self_leave)
     except Exception:
         logger.warning(
             f"Failed to record bot removal instant for chat {chat_id} "
@@ -480,7 +507,6 @@ async def _handle_bot_removed(
             exc_info=True,
         )
 
-    group = await get_group(chat_id)
     if group and group.admin_ids:
         # Filter out bots from admin list - only notify human admins
         human_admin_ids = []
@@ -496,6 +522,7 @@ async def _handle_bot_removed(
                 event.chat.username,
                 human_admin_ids,
                 assume_human_admins=True,
+                cleanup_if_group_fails=not is_self_leave,
             )
         else:
             logger.warning(
@@ -558,8 +585,15 @@ async def _notify_admins_about_removal(
     username: str | None,
     admin_ids: list[int],
     assume_human_admins: bool = False,
+    cleanup_if_group_fails: bool = True,
 ) -> None:
-    """Notify admins when bot is removed from a group."""
+    """Notify admins when bot is removed from a group.
+
+    `cleanup_if_group_fails=False` keeps the group row, its mappings and its
+    status untouched when the in-group fallback cannot be delivered — used for
+    the bot's own leave from an already-paused group, where that failure is
+    guaranteed and the pause is deliberate (#151). Notifications still run.
+    """
     lang = await _resolve_lang(admin_ids)
     group_display = format_chat_or_channel_display(
         chat_title, username, t(lang, "common.group")
@@ -572,7 +606,7 @@ async def _notify_admins_about_removal(
         chat_id,
         private_message,
         group_message_template=t(lang, "common.notify_no_dm"),
-        cleanup_if_group_fails=True,
+        cleanup_if_group_fails=cleanup_if_group_fails,
         parse_mode="HTML",
         assume_human_admins=assume_human_admins,
     )
