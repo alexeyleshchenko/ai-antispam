@@ -825,16 +825,21 @@ GATE_WALLS_SEC: dict[str, float] = {
     # and when it does the audit reports UNKNOWN and takes NO verdict, instead of the false
     # DEGRADED that filed this item.
     "tests/test_cron_thinness.py": 121.07,
-    # REGIME: co-tenant LOADED (2026-10-02, the same regime #72 calibrated in), because a
-    # budget must be sized in the regime it runs in and this is the regime the audit runs
-    # in. measured 0.21 / 0.23 / 0.24 / 0.28 / 0.28 / 0.33 / 0.36 / 1.00s wall over eight
-    # whole-command samples at load 5.24-5.26 on 4 cores (script-mode, stdlib only, so the
-    # cost is interpreter startup; the 1.00s head is the cold first sample). Worst observed
-    # 1.00s -> margin_x 4.75 -> 4.75, rounded UP to 5.0, i.e. a 5.0x factor on the worst
-    # observed and still far below the 30.0 default. An earlier UNLOADED reading of
-    # 0.66 / 0.33 / 0.31s (three runs) is kept only as the comparison: its head is 1.5x
-    # smaller, so the loaded regime is the one that sizes this wall.
-    "tests/test_ledger_commit_cites_no_rows.py": 5.0,
+    # REGIME: the AUDIT'S OWN run (2026-11-17), which is heavier than co-tenant load: the
+    # 5.0s wall this replaces was derived from eight samples of 0.21-1.00s taken when the
+    # gate's population was small, and it is now UNDER-SIZED for the population the gate
+    # reads. The 2026-11-17 self-audit killed this gate TWICE at 5.00s (first attempt
+    # 5.01s, bounded retry also killed) and took NO verdict, reporting `UNKNOWN` -- and an
+    # UNKNOWN is what turns a clean run DEGRADED, the #72 failure shape exactly. Measured
+    # after that run: 8.67s once (elevated load, immediately post-audit) and 0.65 / 0.64 /
+    # 0.74s over three runs at load 3.66 on 4 cores. The spread is the point: the gate
+    # walks `marker..HEAD` (234 commits and growing), so its cost is O(history) and a wall
+    # sized on startup alone cannot hold. Derivation from the worst observed: 8.67s ->
+    # margin_x 4.0381 -> 35.01, rounded UP to 35.0 (4.04x the worst sample, 47.3x the
+    # typical one, and still far below the 2537.0 wall this file gives the slowest gate).
+    # Erring generous is deliberate: a fast run costs nothing against a loose wall, while a
+    # tight one manufactures UNKNOWN verdicts (#72).
+    "tests/test_ledger_commit_cites_no_rows.py": 35.0,
     # REGIME: co-tenant LOADED. measured 9.97 / 9.55 / 10.23 / 13.14 / 9.67 / 11.45 /
     # 12.71 / 11.51 / 12.83s wall over nine runs on 2026-09-30-10-01, the later ones taken
     # at load 11.49 on 4 cores (co-tenant load, board item #72) -- so the basis already sits
