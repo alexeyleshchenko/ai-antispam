@@ -20,7 +20,17 @@ permissions:
   packages: write
 
 env:
-  BOT_TOKEN: "123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ0123456789"
+  # Dummy token for the CI test run. Its numeric prefix IS `bot.id`, because
+  # aiogram derives the id from the token — so the prefix is an ACTOR IDENTITY
+  # inside every test, and it must not equal any fixture's `*_ID` literal.
+  # It did: `123456789` is `HUMAN_ID` in tests/handlers/test_status_handlers.py,
+  # so under CI `bot.id == HUMAN_ID` and an arm asking "was this the bot or a
+  # human?" answered *bot* for a human — inverting silently in the PASSING
+  # direction (measured on CI 43965695185: a human removal read as a
+  # self-leave, while the same test passed locally against the real token).
+  # tests/test_fixture_identity_collision.py now fails if any `*_ID` constant
+  # ever matches this prefix again. Move THIS value, never the constant.
+  BOT_TOKEN: "987654321:ABCdefGhIJKlmNoPQRsTUVwxyZ0123456789"
 
 jobs:
   build-push:

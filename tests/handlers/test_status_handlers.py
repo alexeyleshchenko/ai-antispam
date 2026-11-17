@@ -1405,6 +1405,33 @@ class TestSelfLeaveOfPausedGroup:
     GROUP = DISCUSSION_ID
     ADMIN = HUMAN_ID
 
+    @pytest.fixture(autouse=True)
+    def _pinned_bot_id(self, monkeypatch):
+        """Pin `bot.id` to the real bot's id (#152).
+
+        `bot.id` is a read-only property derived from the token, so its value
+        depends on WHICH token the run uses: the real one locally, the CI dummy
+        in CI. That made this class's positive control depend on an environment
+        fact rather than on the code — CI's dummy prefix is `HUMAN_ID`, so a
+        human removal read as a self-leave and the control inverted while
+        looking green (measured 43965695185; `assert 0 == 1` in CI, passing
+        locally).
+
+        Pinning makes both arms mean what their names say on any token, and it
+        is a pin, not a derivation: a fixture that adjusted its actor around a
+        colliding token would preserve the collision and hide it. The token
+        itself is guarded by `tests/test_fixture_identity_collision.py`, which
+        fails if any `*_ID` literal ever equals the CI prefix again.
+        """
+        from aiogram import Bot as AiogramBot
+
+        monkeypatch.setattr(AiogramBot, "id", property(lambda self: BOT_ID))
+
+        from src.app.handlers.status_handlers import bot
+
+        assert bot.id == BOT_ID, f"the pin did not take effect (bot.id={bot.id})"
+        return BOT_ID
+
     def _sync_pool(self):
         import app.database.postgres_connection as app_pc
         import src.app.database.postgres_connection as src_pc
@@ -1535,21 +1562,24 @@ class TestSelfLeaveOfPausedGroup:
         )
 
     def _human_removal(self) -> ChatMemberUpdated:
-        """A HUMAN kick. The actor MUST differ from `bot.id`.
+        """A HUMAN kick: the actor is `HUMAN_ID`, and the class pins `bot.id`.
 
-        CI derives `bot.id` from the dummy token `123456789:ABC…`
-        (`.github/workflows/deploy.yml:23`), which is exactly `HUMAN_ID` — so a
-        literal `HUMAN_ID` here makes a human removal read as a self-leave and
-        silently inverts this positive control (measured: green locally against
-        the real token, `assert 0 == 1` in CI). The id is therefore derived, and
-        the invariant is asserted rather than assumed.
+        The invariant is now carried by the pin, not by arithmetic around a
+        colliding token. This previously read
+        `HUMAN_ID if HUMAN_ID != bot.id else HUMAN_ID + 1` — a workaround that
+        KEPT the collision and hid it: under CI's dummy token the prefix is
+        `HUMAN_ID`, so a human removal read as a self-leave and inverted this
+        positive control in the PASSING direction (green locally against the
+        real token, `assert 0 == 1` in CI, 43965695185). #152 close condition 2
+        forbids deriving the actor; the assertion below is the honest form.
         """
         from src.app.handlers.status_handlers import bot
 
-        human_id = HUMAN_ID if HUMAN_ID != bot.id else HUMAN_ID + 1
-        assert human_id != bot.id, "the human actor must not collide with bot.id"
+        assert HUMAN_ID != bot.id, (
+            f"HUMAN_ID ({HUMAN_ID}) collides with the pinned bot.id ({bot.id})"
+        )
         return _real_event(
-            from_id=human_id,
+            from_id=HUMAN_ID,
             from_is_bot=False,
             old_status="member",
             new_status="left",
