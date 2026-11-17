@@ -116,54 +116,23 @@ async def test_cleanup_group_data_old_row_captures_pre_transition_state(
 
 @pytest.mark.asyncio
 async def test_update_group_admins_reactivates_paused_group(
-    patched_db_conn, clean_db, monkeypatch
+    patched_db_conn, clean_db
 ):
     """Re-add flips paused/left back to active and clears no_rights_detected_at.
 
-    The SQLite test adapter rewrites the groups upsert (`ON CONFLICT DO UPDATE`
-    without RETURNING) as INSERT OR REPLACE, which would reset `status` to the
-    default `active` and defeat the `prior` check — a harness limitation, not
-    production behavior (Postgres keeps the existing row). So the upsert is
-    neutralized with INSERT OR IGNORE here, and the reactivation UPDATE itself
-    is verified via a SQL spy on the statements actually issued.
-    """
-    from app.database import group_operations
+    The row assertions below are the whole test, and they are load-bearing: the
+    upsert in `update_group_admins` deliberately leaves `status` alone (`DO
+    UPDATE` sets only `last_active`/`title`/`username`), so the seeded `paused`
+    row survives it and the reactivation branch MUST fire to clear the stamps.
 
+    Before #146 the SQLite adapter rewrote that upsert into INSERT OR REPLACE,
+    which reset `status` to the default `active`, skipped the branch under test,
+    and let this pass against broken code — which is why it used to neutralize
+    the upsert with a spy pool. The rewrite is gone, so nothing is neutralized
+    here and the assertions now exercise the production statement itself.
+    """
     group_id = -1003
     admin_id = 9003
-
-    orig_get_pool = group_operations.get_pool
-
-    class _SpyPool:
-        def __init__(self, inner):
-            self._inner = inner
-            self.statements = []
-
-        def acquire(self):
-            return _SpyConn(self._inner.acquire(), self.statements)
-
-    class _SpyConn:
-        def __init__(self, inner, statements):
-            self._inner = inner
-            self.statements = statements
-
-        async def execute(self, query, *args):
-            self.statements.append(query)
-            # Neutralize ONLY the adapter-unfaithful upsert (see docstring).
-            if "ON CONFLICT" in query and "INSERT INTO groups" in query:
-                return await self._inner.execute(
-                    "INSERT OR IGNORE INTO groups (group_id) VALUES (?)", args[0]
-                )
-            return await self._inner.execute(query, *args)
-
-        def __getattr__(self, name):
-            return getattr(self._inner, name)
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return await self._inner.__aexit__(*exc)
 
     async with clean_db.acquire() as conn:
         # D6b: a row retired by the sweep carries bot_removed_at; re-add must
@@ -176,13 +145,6 @@ async def test_update_group_admins_reactivates_paused_group(
         await conn.execute(
             "INSERT INTO administrators (admin_id) VALUES ($1)", admin_id
         )
-
-    spy = _SpyPool(await orig_get_pool())
-
-    async def _get_pool():
-        return spy
-
-    monkeypatch.setattr(group_operations, "get_pool", _get_pool)
 
     await update_group_admins(group_id, [admin_id], ["admin"], "Reactivated", "@r")
 
@@ -205,18 +167,10 @@ async def test_update_group_admins_reactivates_paused_group(
         assert ev is not None
         assert ev["action"] == "group_reactivated"
 
-    # SQL spy: the reactivation UPDATE was actually issued (not skipped)
-    assert any(
-        "SET status" in s
-        and "no_rights_detected_at = NULL" in s
-        and "bot_removed_at = NULL" in s
-        for s in spy.statements
-    ), f"reactivation UPDATE missing a clear; got:\n{spy.statements}"
-
 
 @pytest.mark.asyncio
 async def test_readd_after_low_balance_leave_restores_moderation(
-    patched_db_conn, clean_db, monkeypatch
+    patched_db_conn, clean_db
 ):
     """Issue #41: pause -> leave -> re-add must end with moderation ON.
 
@@ -226,54 +180,16 @@ async def test_readd_after_low_balance_leave_restores_moderation(
     restoring `moderation_enabled`, so `validation` dropped every message while
     the group read `status=active` — every outward signal healthy.
 
-    The SQLite adapter rewrites the `update_group_admins` upsert (ON CONFLICT
-    DO UPDATE, no RETURNING) as INSERT OR REPLACE, which resets `status` to its
-    default `active` and skips the reactivation branch — the branch under test.
-    It is neutralized to INSERT OR IGNORE here so the paused row survives, which
-    is what Postgres does. Without that neutralization this test passes against
-    the unfixed code and guards nothing.
+    This is the #41 regression guard, and it only bites because the row really
+    is still paused when the re-add arrives. Before #146 the SQLite adapter
+    rewrote the `update_group_admins` upsert into INSERT OR REPLACE, which reset
+    `status` to its default `active`, skipped the reactivation branch — the
+    branch under test — and let this pass against the unfixed code. It used to
+    neutralize that with a spy pool; the rewrite is gone, so the production
+    statement runs unmodified.
     """
-    from app.database import group_operations
-
     group_id = -1006
     admin_id = 9006
-
-    orig_get_pool = group_operations.get_pool
-
-    class _SpyPool:
-        def __init__(self, inner):
-            self._inner = inner
-            self.statements = []
-
-        def acquire(self):
-            return _SpyConn(self._inner.acquire(), self.statements)
-
-    class _SpyConn:
-        def __init__(self, inner, statements):
-            self._inner = inner
-            self.statements = statements
-
-        async def execute(self, query, *args):
-            self.statements.append(query)
-            # update_group_admins' upsert is the groups upsert that does NOT set
-            # moderation_enabled from EXCLUDED; neutralize ONLY it (see docstring).
-            if (
-                "INSERT INTO groups" in query
-                and "EXCLUDED.moderation_enabled" not in query
-            ):
-                return await self._inner.execute(
-                    "INSERT OR IGNORE INTO groups (group_id) VALUES (?)", args[0]
-                )
-            return await self._inner.execute(query, *args)
-
-        def __getattr__(self, name):
-            return getattr(self._inner, name)
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return await self._inner.__aexit__(*exc)
 
     # 1. A live, moderated group with a paying admin.
     async with clean_db.acquire() as conn:
@@ -291,13 +207,6 @@ async def test_readd_after_low_balance_leave_restores_moderation(
             group_id,
             admin_id,
         )
-
-    spy = _SpyPool(await orig_get_pool())
-
-    async def _get_pool():
-        return spy
-
-    monkeypatch.setattr(group_operations, "get_pool", _get_pool)
 
     # 2. Credits run out: moderation is disabled, then the leave soft-deletes the
     #    row and HARD-deletes the admin mapping (handle_deactivation +

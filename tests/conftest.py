@@ -253,15 +253,27 @@ class SQLiteConnectionAdapter:
         return None
 
     def _convert_on_conflict_to_sqlite(self, query):
-        """Convert PostgreSQL ON CONFLICT to SQLite INSERT OR IGNORE / OR REPLACE if needed,
-        but prefer keeping ON CONFLICT if it has DO UPDATE and RETURNING."""
-        # If the query has RETURNING, we must be careful not to strip it.
-        # SQLite 3.24+ supports ON CONFLICT DO UPDATE, and 3.35+ supports RETURNING.
-        # We only convert if it's a simple DO NOTHING or if we really want INSERT OR REPLACE.
+        """Convert PostgreSQL ON CONFLICT to SQLite-compatible syntax.
 
-        if "RETURNING" in query.upper() and "DO UPDATE" in query.upper():
-            # Keep the query as is, but maybe strip the WHERE clause in ON CONFLICT if it's too complex
-            # Actually, SQLite supports WHERE in ON CONFLICT target.
+        `DO NOTHING` becomes `INSERT OR IGNORE`; `DO UPDATE` is passed through
+        VERBATIM, with or without `RETURNING`.
+
+        Issue #146: this method used to rewrite every `DO UPDATE` that lacked
+        `RETURNING` into `INSERT OR REPLACE`. That is a DELETE followed by an
+        INSERT of the VALUES row, so a test which seeded a row and then
+        exercised the DO UPDATE branch read the VALUES defaults instead of the
+        pre-state — the branch under test never ran, and the assertion passed
+        for the wrong reason. #41 (a reactivation that never restored
+        `moderation_enabled`, ~36 days silently unmoderated) and #130
+        (`is_registered` lost on procedure rows) were both certified that way.
+
+        SQLite has supported `ON CONFLICT ... DO UPDATE` since 3.24 and
+        `RETURNING` since 3.35 (this suite runs 3.45), including qualified
+        column references and `EXCLUDED`. The `RETURNING` form was the one
+        faithful branch and it worked — which is what proved the rewrite was
+        never needed. `tests/upsert_masking.py` enumerates the sites.
+        """
+        if "DO UPDATE" in query.upper():
             return query
 
         if re.search(
@@ -278,9 +290,11 @@ class SQLiteConnectionAdapter:
             )
             return query
 
-        query = re.sub(r"\bINSERT\b", "INSERT OR REPLACE", query, flags=re.IGNORECASE)
-        on_conflict_pattern = r"\s+ON\s+CONFLICT\b.*?(?=RETURNING|;|$)"
-        query = re.sub(on_conflict_pattern, "", query, flags=re.IGNORECASE | re.DOTALL)
+        # Every `ON CONFLICT` clause is either `DO NOTHING` (handled above) or
+        # `DO UPDATE` (returned above), so nothing valid reaches here. Pass the
+        # query through unchanged rather than rewriting it: an unexpected form
+        # must fail loudly in SQLite, never be silently converted into a
+        # different statement (#146).
         return query
 
     async def executemany(self, query, args_list):
