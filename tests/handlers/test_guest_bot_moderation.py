@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from aiogram.types import Chat, Message, User
 
+from src.app.common.guest_bots import is_foreign_bot_message
 from src.app.common.utils import determine_effective_user_id
 from src.app.handlers.message.pipeline import handle_moderated_message
 from src.app.main import extract_update_type_ignored
@@ -29,12 +30,13 @@ GROUP_ID = -1001503592176
 
 def _message(
     *,
+    message_id: int = 17836,
     from_user: User | None = None,
     sender_chat: Chat | None = None,
     caller: User | None = None,
 ) -> Message:
     return Message.model_construct(
-        message_id=17836,
+        message_id=message_id,
         date=datetime.now(UTC),
         chat=Chat.model_construct(id=GROUP_ID, type="supergroup", title="chat"),
         from_user=from_user,
@@ -253,3 +255,61 @@ class TestEarlyExitLogs:
 
         assert reason == "message_trusted_member_skipped"
         assert self._exit_lines(caplog) == []
+
+
+# Четыре сообщения инцидента 2026-10-25 09:02:46–09:02:55Z в чате -1001503592176.
+# 17835 — человек, вызвавший трёх ботов; 17836/17837/17838 — их нагрузка.
+# До #123 три нагрузки уходили в `message_ignored` и жили в чате ~52 минуты.
+INCIDENT_BOT_SENDERS = {
+    17836: 8839849835,  # Dhm_935cdf22bot
+    17837: 8694772380,  # Dhm_93fa00e2bot
+    17838: 8967879593,  # Dhm_93da6031bot
+}
+
+
+class TestIncidentRegression123:
+    """Регрессия по четырём id инцидента (#123): нагрузка не пропускается.
+
+    `is_foreign_bot_message` — единственное, что решает, попадёт ли сообщение
+    в классификацию: False означает «модерируем». До #123 на этом месте стояло
+    `~F.from_user.is_bot`, поэтому все три строки ботов читались как True и
+    уходили в `message_ignored`, минуя пайплайн целиком.
+    """
+
+    @pytest.mark.parametrize("message_id", sorted(INCIDENT_BOT_SENDERS))
+    def test_incident_bot_payload_is_moderated_not_ignored(self, message_id):
+        message = _message(
+            message_id=message_id,
+            from_user=User.model_construct(
+                id=INCIDENT_BOT_SENDERS[message_id], is_bot=True, first_name="Rates"
+            ),
+            caller=User.model_construct(
+                id=SUMMONER_ID, is_bot=False, first_name="Alex"
+            ),
+        )
+        assert is_foreign_bot_message(message) is False
+        # Нагрузка классифицируется и банится от имени вызвавшего: сам бот
+        # одноразовый, банить его бессмысленно.
+        assert determine_effective_user_id(message) == SUMMONER_ID
+
+    def test_incident_summoner_message_is_moderated(self):
+        message = _message(
+            message_id=17835,
+            from_user=User.model_construct(
+                id=SUMMONER_ID, is_bot=False, first_name="Alex"
+            ),
+        )
+        assert is_foreign_bot_message(message) is False
+        assert determine_effective_user_id(message) == SUMMONER_ID
+
+    @pytest.mark.parametrize("message_id", sorted(INCIDENT_BOT_SENDERS))
+    def test_incident_bot_without_a_caller_is_still_skipped(self, message_id):
+        # Положительный контроль: предикат обязан уметь вернуть True, иначе
+        # тест выше доказывает лишь то, что функция всегда False (#122).
+        message = _message(
+            message_id=message_id,
+            from_user=User.model_construct(
+                id=INCIDENT_BOT_SENDERS[message_id], is_bot=True, first_name="Rates"
+            ),
+        )
+        assert is_foreign_bot_message(message) is True
