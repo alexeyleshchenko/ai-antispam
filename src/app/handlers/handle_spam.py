@@ -406,7 +406,11 @@ async def handle_permission_error(
                 ),
                 group_message_template=group_msg_tpl
                 + t(lang, "spam.setup_guide_link", url=get_setup_guide_url()),
-                cleanup_if_group_fails=True,
+                # #156: a missing-permission notice is exactly the state in
+                # which the in-group fallback cannot be delivered, so `True`
+                # here turned the guaranteed failure into an unconditional
+                # wipe. The branch owns the decision.
+                cleanup_if_group_fails=False,
                 parse_mode="HTML",
             )
         except Exception as notify_exc:  # noqa: BLE001
@@ -589,7 +593,8 @@ async def notify_admins(
         message.chat.id,
         private_message,
         group_message_template=t(lang, "spam.group_message_template"),
-        cleanup_if_group_fails=True,
+        # #156: same class as :409 - no caller asserts a blanket wipe.
+        cleanup_if_group_fails=False,
         parse_mode="HTML",
         reply_markup=keyboard,
     )

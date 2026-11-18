@@ -479,13 +479,22 @@ async def _handle_bot_removed(
     # arrives here as a `my_chat_member` update with ITSELF as the actor. It can
     # never deliver the in-group fallback, so "all notification methods failed"
     # is GUARANTEED for a self-leave, whatever the group's status — which makes
-    # `cleanup_if_group_fails=True` unconditionally wrong here (#151).
+    # an unconditional cleanup flag wrong here (#151).
     #
     # The ACTOR is therefore the predicate. The status is CORROBORATION ONLY:
     # gating on `paused` would leave a hole for a self-leave from a non-paused
     # group, where the same guaranteed fallback failure would still hard-delete
     # the mappings (HQ amendment, 2026-11-16). The status is logged so the
     # record shows what the row actually held, but it never decides the branch.
+    #
+    # #156 was tempted to add the status as a SECOND gate at the branch itself
+    # (`cleanup_group_data` refusing any row that is not `active`). That was
+    # built, then REMOVED: it reds `test_human_removal_of_paused_group_still_cleans_up`,
+    # because a human kicking the bot out of a paused group MUST still clean up
+    # — the actor test above is the whole predicate, and a status gate silently
+    # overrides it. So #156's protection is delivered by the callers instead:
+    # every site that could not honestly assert "always wipe" now passes
+    # `cleanup_if_group_fails=False`, and the parameter default is False too.
     is_self_leave = event.from_user is not None and event.from_user.id == bot.id
     if is_self_leave:
         logger.info(
@@ -571,7 +580,10 @@ async def _notify_admins_about_rights(
         chat_id,
         private_message,
         group_message_template=t(lang, "common.notify_no_dm"),
-        cleanup_if_group_fails=True,
+        # #156: an unconditional True asserts "always wipe", which this caller
+        # cannot claim - the site fires on ordinary `chat_member` traffic,
+        # including on a row already paused to preserve its mappings.
+        cleanup_if_group_fails=False,
         parse_mode="HTML",
         assume_human_admins=assume_human_admins,
     )
@@ -585,14 +597,17 @@ async def _notify_admins_about_removal(
     username: str | None,
     admin_ids: list[int],
     assume_human_admins: bool = False,
-    cleanup_if_group_fails: bool = True,
+    cleanup_if_group_fails: bool = False,
 ) -> None:
     """Notify admins when bot is removed from a group.
 
-    `cleanup_if_group_fails=False` keeps the group row, its mappings and its
-    status untouched when the in-group fallback cannot be delivered — used for
-    the bot's own leave from an already-paused group, where that failure is
-    guaranteed and the pause is deliberate (#151). Notifications still run.
+    `cleanup_if_group_fails=False` (the default, #156) keeps the group row, its
+    mappings and its status untouched when the in-group fallback cannot be
+    delivered — that failure is the NORM, not an anomaly, because the in-group
+    fallback is impossible by construction for a bot that is leaving or has
+    lost the right to post. Turning a delivery failure into an unrecoverable
+    wipe is what destroyed `-1002496127723` 0.766804 s after it was paused to
+    preserve exactly those mappings.
     """
     lang = await _resolve_lang(admin_ids)
     group_display = format_chat_or_channel_display(
@@ -793,7 +808,9 @@ async def handle_member_service_message(message: types.Message) -> str:
                         chat_id,
                         private_message=private_msg,
                         group_message_template=group_msg_tpl,
-                        cleanup_if_group_fails=True,
+                        # #156: see _notify_admins_about_rights - no caller may
+                        # assert a blanket wipe; the branch owns the decision.
+                        cleanup_if_group_fails=False,
                         parse_mode="HTML",
                         assume_human_admins=True,
                     )

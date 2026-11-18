@@ -287,6 +287,29 @@ async def cleanup_group_data(
             )
             return
 
+        # #156: snapshot the mappings BEFORE destroying them. The `groups` row
+        # pre-image above does NOT contain `group_administrators` or
+        # `approved_members`, so before this the wipe left no artifact from
+        # which anyone could reconstruct what was lost - `-1002496127723`'s
+        # mappings are gone for exactly that reason. Written inside the same
+        # transaction as the DELETEs, so the tombstone cannot survive a crash
+        # that ate the rows, nor the reverse.
+        admin_rows = await conn.fetch(
+            "SELECT * FROM group_administrators WHERE group_id = $1",
+            group_id,
+        )
+        approved_rows = await conn.fetch(
+            "SELECT * FROM approved_members WHERE group_id = $1",
+            group_id,
+        )
+        mappings_tombstone = json.dumps(
+            {
+                "group_administrators": [dict(r) for r in admin_rows],
+                "approved_members": [dict(r) for r in approved_rows],
+            },
+            default=str,
+        )
+
         # Remove all admin associations
         await conn.execute(
             """
@@ -329,6 +352,27 @@ async def cleanup_group_data(
             f"group_{status_value}",
             reason or "group_cleanup",
             json.dumps(dict(old_row), default=str) if old_row else None,
+        )
+
+        # #156: the durable tombstone for the two DELETEs above. Its own event
+        # type, so the pre-image of the `groups` row keeps its established shape
+        # and a wipe is reconstructable by action name alone.
+        #
+        # ORDER IS LOAD-BEARING: this INSERT runs LAST, after the `group_<status>`
+        # event. Readers exist that select the FIRST `entity_events` row for a
+        # group with NO action filter (`fetchrow(... WHERE entity_type='group'
+        # AND entity_id=$1)`) and assert on it — `test_cleanup_group_data_
+        # paused_status` reads the transition action that way. Writing the
+        # tombstone first silently re-pointed those reads at it. Both rows stay
+        # in one transaction, so atomicity is unaffected.
+        await conn.execute(
+            """
+            INSERT INTO entity_events (entity_type, entity_id, action, reason, old_row)
+            VALUES ('group', $1, 'group_mappings_deleted', $2, $3)
+            """,
+            group_id,
+            reason or "group_cleanup",
+            mappings_tombstone,
         )
 
     logger.info(

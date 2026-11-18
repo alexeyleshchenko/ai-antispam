@@ -89,7 +89,7 @@ async def notify_admins_with_fallback_and_cleanup(
     group_id: int,
     private_message: str | Callable[[int], str],
     group_message_template: str = "{mention}, I can't send a private message to any administrator. Please message me privately to receive important group notifications!",
-    cleanup_if_group_fails: bool = True,
+    cleanup_if_group_fails: bool = False,
     parse_mode: str = "HTML",
     reply_markup: InlineKeyboardMarkup | None = None,
     assume_human_admins: bool = False,
@@ -305,6 +305,15 @@ async def notify_admins_with_fallback_and_cleanup(
                 f"Failed to send group fallback notification to chat {format_chat_log(group_id, group_title, group_username)}: {group_e}",
                 exc_info=True,
             )
+            # #156: the flag is the ONLY gate here, by ruling, not by omission.
+            # #151 (HQ amendment, 2026-11-16) establishes that the ACTOR is the
+            # predicate: a self-leave can never deliver the in-group fallback, so
+            # "all notification methods failed" is guaranteed and must not wipe;
+            # a HUMAN removal of the same group is the human's authority and DOES
+            # clean up, even when the row is `paused`. A status gate at this
+            # branch would silently override that ruling in the human-kick case,
+            # which is why the decision stays with the caller and the default
+            # (`cleanup_if_group_fails=False`) is what protects the paused class.
             if cleanup_if_group_fails:
                 cleanup_success = await perform_complete_group_cleanup(
                     group_id,
