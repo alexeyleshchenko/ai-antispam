@@ -98,4 +98,18 @@ Report it verbatim. Field guide: `all= / decided / failed` is the RETAINED windo
 
 WHY NO `--stamp` (do not put it back — board #65, ledger n=86): `tools/ledger.py` derives the writing identity from `OPENCRABS_SESSION_ID` and refuses any session it cannot place in a fragment's lanes; a cron session is never a lane, so `--stamp` is refused by construction. Do NOT retry it, do NOT pass a different `--actor`, and do NOT redirect `OC_LEDGER_PATH`. The `run` row this job used to stamp is OWED BY THE HQ LANE on receipt — end the report with the line `stamp owed: run row for <date>` and the HQ lane writes it.
 
+**THE RUN ROW'S SHAPE — prose FIRST, canonical trailer LAST** (board #154, 2026-11-18). The trailer is read by POSITION: it is the detail's TRAILING run of `key=value` tokens, and **any text appended after it terminates it**, so the row's declared telemetry leaves the trailing run that every trailer-scoped reader stops at (`tools/field_predicate.py`, `split_canonical_run`; the writer's inverse, #91 / n=303, ruled at ledger `n=572` PART 3).
+
+```
+--detail "<prose: verdict, artifact path, push disposition, failing legs> duration=1433s turns=0 outcome=accepted gate=all-pass"
+```
+
+Wrong way round — telemetry first, prose after — and `trailer_tokens(detail)` returns `[]`: the row is invisible to cost, duration and outcome totals while LOOKING complete to a human reader. That is not hypothetical: 9 of 62 self-audit run rows were written that way between `n=365` (2026-11-09) and `n=460` (2026-11-18), biasing the scorecard's own `First-Pass Yield` downward by excluding its own accepted runs. The propagation mechanism was **imitation** — this section said what the row must SAY and never its shape, so each run copied the previous row, and one bad shape on 11-09 was copied 8 more times.
+
+So: **do not imitate the previous row's layout.** Check the shape instead — a correct row passes this and a broken one returns an empty list:
+
+```
+cd /root/ai-antispam/tools && python3 -c "import json,sys; from field_predicate import trailer_tokens; d=[json.loads(l) for l in open('../evidence/ledger.jsonl')]; print(trailer_tokens([r for r in d if r['n']==int(sys.argv[1])][0]['detail']))" <n>
+```
+
 VERDICT PREDICATE (`tools/audit.py:339`): the verdict is `gates AND cadence` only. First-pass yield and rework rate are displayed but NEVER enter the verdict — never name them as a failing leg.
