@@ -44,8 +44,12 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_VERDICT_TTL_DAYS = 7
 DEFAULT_PENDING_STALE_MINUTES = 15
-DEFAULT_VERDICT_RETRY_ATTEMPTS = 3
-DEFAULT_VERDICT_RETRY_COOLDOWN_SECONDS = 60
+# #119: these mirror config.yaml's shipped values, because a fallback that is
+# weaker than the configured policy reintroduces the defect the moment the key
+# goes missing (a 3 x 60s budget was exhausted ~3 min before the 2026-10-15
+# spike ended). The handler always overrides via _retry_policy().
+DEFAULT_VERDICT_RETRY_ATTEMPTS = 5
+DEFAULT_VERDICT_RETRY_COOLDOWN_SECONDS = 120
 
 VERDICT_TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS classification_verdicts (

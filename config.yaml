@@ -23,8 +23,8 @@ cache:
   # so Telegram redelivers and a later delivery reclaims it and classifies
   # again. Bounded twice: the cooldown is the backoff between attempts, and the
   # attempt cap is what finally stops the redelivery loop.
-  verdict_retry_attempts: 3        # total attempts before giving up (1 = no retry)
-  verdict_retry_cooldown_seconds: 60 # minimum wait between attempts
+  verdict_retry_attempts: 5        # total attempts before giving up (1 = no retry)
+  verdict_retry_cooldown_seconds: 120 # minimum wait between attempts
   pending_spam_ttl_days: 7     # Pending spam examples before cleanup
 
 # Confidence threshold (0-100): spam/not-spam with confidence >= this is high-confidence.
@@ -94,9 +94,20 @@ llm:
   # (FALLBACK_API_BASE, two lines below), so an aggregator-wide outage empties
   # the pool in a single stroke. Measured that day, 13:33:36-13:43:20Z: a
   # ~9.5 min latency event put BOTH legs past the 45s wall on all three
-  # attempts (rows 2797 terminal, 2798 recovered at attempt 2). The retry
-  # budget is 3 attempts x 60s cooldown = 6m19s, which ran out ~3 min before
-  # the spike ended. The prefix pair protects against a per-provider outage;
+  # attempts (rows 2797 terminal, 2798 recovered at attempt 2). The budget
+  # MEASURED 6m19s wall-clock (379s) and ran out ~3 min before the spike
+  # ended. That figure is not a product: 3 attempts x 60s is 180s, and the
+  # rest is the attempts' own 45s wall plus redelivery latency — so the
+  # arithmetic UNDER-predicts the real budget. Never "correct" a measurement
+  # into an arithmetic identity.
+  # RAISED 2026-11-19 (#119, the q24 default applied): 5 attempts, 120s
+  # cooldown. The cooldown alone now floors the budget at 4 x 120s = 8m00s,
+  # 101s above the recorded 6m19s; the arithmetic ceiling is 5 x 45s +
+  # 4 x 120s = 11m45s, 135s above the 9.5 min spike. Both bounds are
+  # arithmetic, not a measurement: the proof is still a live spike with no
+  # give-up in it. Keep scripts/loss_watch.py in step — it reads
+  # cache.verdict_retry_attempts for what "terminal" means.
+  # The prefix pair protects against a per-provider outage;
   # nothing here protects against the aggregator.
   #
   # Both are inferhub aliases: the endpoint is FALLBACK_API_BASE (set in

@@ -80,6 +80,36 @@ DEFAULT_WINDOW_MIN = 480
 DEFAULT_LAG_MIN = 5
 DEFAULT_MIN_FIRE_HOURS = 6.0
 
+# Terminal-vs-retryable is a function of the ATTEMPT CAP, so the cap is read from
+# the same config.yaml the handler obeys — never hardcoded. Measured 2026-11-19
+# (#119): with the cap raised 3 -> 5, a literal ``attempts >= 3`` would have
+# labelled a row on its 3rd attempt "terminal" while it still had 2 attempts and
+# a redelivery left. The split is the only thing a wrong cap distorts — the rows
+# themselves are reported either way — so an unreadable config WARNS and falls
+# back to the shipped default rather than killing the watch outright.
+DEFAULT_RETRY_ATTEMPTS = 5
+DEFAULT_CONFIG = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.yaml"
+)
+
+
+def retry_cap() -> int:
+    """Attempts-before-giving-up, read from config.yaml ``cache.verdict_retry_attempts``."""
+    path = os.environ.get("LOSS_WATCH_CONFIG", DEFAULT_CONFIG)
+    try:
+        import yaml
+
+        with open(path, encoding="utf-8") as fh:
+            cache = (yaml.safe_load(fh) or {}).get("cache") or {}
+        return int(cache.get("verdict_retry_attempts", DEFAULT_RETRY_ATTEMPTS))
+    except Exception as exc:  # noqa: BLE001 — a watchdog must survive its own inputs
+        print(
+            f"loss watch: CONFIG — cannot read {path} ({exc}); "
+            f"assuming verdict_retry_attempts={DEFAULT_RETRY_ATTEMPTS}",
+            file=sys.stderr,
+        )
+        return DEFAULT_RETRY_ATTEMPTS
+
 # The free-text title is selected LAST so the parse can split on a bounded number
 # of separators: a title containing "|" cannot shift the numeric fields.
 # `-f -` reads this over stdin, which keeps every quote out of the ssh command
@@ -245,18 +275,19 @@ def render(
     lag_min: int,
     cause: int | None,
     newly: int,
+    cap: int,
 ) -> str:
     by_chat: dict[int, list[dict]] = {}
     for row in rows:
         by_chat.setdefault(row["chat_id"], []).append(row)
 
-    terminal = sum(1 for r in rows if r["attempts"] >= 3)
+    terminal = sum(1 for r in rows if r["attempts"] >= cap)
     lines = [
         "**ai-antispam loss watch: messages left unmoderated**",
         f"_{instant} · window {window_min}m (lag {lag_min}m excluded) · {newly} new_",
         "",
         f"**{len(rows)} unmoderated message(s)** in {len(by_chat)} chat(s) · "
-        f"{terminal} terminal (attempts>=3), {len(rows) - terminal} retryable",
+        f"{terminal} terminal (attempts>={cap}), {len(rows) - terminal} retryable",
         "",
     ]
     for chat_id, chat_rows in sorted(by_chat.items(), key=lambda kv: -len(kv[1])):
@@ -289,6 +320,8 @@ def main() -> int:
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--force", action="store_true", help="ignore the wake floor (bite proof)")
     args = ap.parse_args()
+
+    cap = retry_cap()
 
     if args.window_min - args.lag_min <= 30:
         print(
@@ -352,7 +385,7 @@ def main() -> int:
                     "window_min": args.window_min,
                     "count": len(rows),
                     "lifetime_unmoderated": lifetime,
-                    "terminal": sum(1 for r in rows if r["attempts"] >= 3),
+                    "terminal": sum(1 for r in rows if r["attempts"] >= cap),
                     "gateway_failures": cause,
                     "rows": rows,
                 },
@@ -360,7 +393,11 @@ def main() -> int:
             )
         )
     else:
-        print(render(rows, instant, lifetime, args.window_min, args.lag_min, cause, newly))
+        print(
+            render(
+                rows, instant, lifetime, args.window_min, args.lag_min, cause, newly, cap
+            )
+        )
         print(f"\n_trigger: {newly} new since the last wake_")
     return 0
 

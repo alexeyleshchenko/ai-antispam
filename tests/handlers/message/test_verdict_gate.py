@@ -237,7 +237,7 @@ async def test_classification_failure_is_recorded_as_failed(
 async def test_failure_at_the_cap_is_terminal(patched_db_conn, clean_db):
     """The retry stops at the cap: FAILED (200), never an endless 503.
 
-    The budget is `verdict_retry_attempts` (3 by default). Reaching it is the
+    The budget is `verdict_retry_attempts` (5 by default since #119). Reaching it is the
     only case that may answer 200 - the loud give-up - and it is the half that
     bounds the loop RETRY_LATER opens. Each round goes through a real reclaim, so
     this also shows the redelivery path SPENDING the budget rather than the row
@@ -247,25 +247,27 @@ async def test_failure_at_the_cap_is_terminal(patched_db_conn, clean_db):
     async def _fail():
         raise RuntimeError("every leg exhausted")
 
+    # Derived from the shipped policy, not hardcoded: the cap moved 3 -> 5 in
+    # #119 and a literal here silently stops exercising the real budget.
+    from app.handlers.message import verdict as verdict_module
+
+    budget, cooldown = verdict_module._retry_policy()
+
     seen = []
-    for _ in range(3):
+    for _ in range(budget):
         # Move the last failure past the cooldown so the next delivery may
         # reclaim it. Without this every round would read RETRY_LATER and the
         # cap would never be reached.
-        await _fail_at(clean_db, datetime.now(UTC) - timedelta(seconds=61))
+        await _fail_at(clean_db, datetime.now(UTC) - (cooldown + timedelta(seconds=1)))
         seen.append(
             await run_with_verdict(CHAT_ID, MESSAGE_ID, _fail, _Counter().moderate)
         )
 
-    assert seen == [
-        RESULT_VERDICT_RETRY_LATER,
-        RESULT_VERDICT_RETRY_LATER,
-        RESULT_VERDICT_FAILED,
-    ]
+    assert seen == [RESULT_VERDICT_RETRY_LATER] * (budget - 1) + [RESULT_VERDICT_FAILED]
 
     row = await claim_or_read(CHAT_ID, MESSAGE_ID)
     assert row["status"] == "failed"
-    assert row["attempts"] == 3
+    assert row["attempts"] == budget
 
 
 async def _fail_at(clean_db, when) -> None:
@@ -396,7 +398,7 @@ def test_shipped_config_carries_the_retry_keys():
     from app.handlers.message import verdict as verdict_module
 
     attempts, cooldown = verdict_module._retry_policy()
-    assert attempts == 3, "config.yaml cache.verdict_retry_attempts must resolve"
-    assert cooldown == timedelta(seconds=60), (
+    assert attempts == 5, "config.yaml cache.verdict_retry_attempts must resolve"
+    assert cooldown == timedelta(seconds=120), (
         "config.yaml cache.verdict_retry_cooldown_seconds must resolve"
     )
