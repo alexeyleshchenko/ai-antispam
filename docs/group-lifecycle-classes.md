@@ -88,6 +88,24 @@ reads the group's registered admins, and routes on both.
 | `member` / `left` / `kicked` | — | leave after grace (unchanged) |
 | unreadable / inaccessible | — | leave after grace (unchanged) |
 
+**Read `bot_removed_at`, never `status` alone, to tell a hold from a leave.** The
+two "leave" rows above run `_leave_group_and_record_for_notification`, which calls
+`perform_complete_group_cleanup(..., status="paused", reason="no_rights_past_grace")`
+— so a group the bot has **left** also reads `status='paused'`, with
+`bot_removed_at` set and both mapping tables at 0. `paused` on its own is therefore
+not evidence of a hold. Measured 2026-11-20 on the 11-16 tick's output:
+
+| Group | `status` | `bot_removed_at` | roster / approved | Class |
+|---|---|---|---|---|
+| `-1003078404548` | `paused` | `20:19:55.48Z` | 0 / 0 | leave |
+| `-1002509060912` | `paused` | `20:19:56.45Z` | 0 / 0 | leave |
+| `-1003751652625` | `paused` | NULL | **1 / 1** | #150 terminal pause |
+
+The third row is also the **positive control** for #150's non-destructiveness: every
+registered admin (`7054850510`) is `is_active=false`, so the terminal branch fired,
+and both mapping tables survived — which is what #151's fix is meant to guarantee
+and what the sole-member branch destroyed before it.
+
 **Why the third row exists (#150, ruled 2026-11-16).** #144's hold is licensed by
 the notify: the DM asks a human to tick one checkbox. `notify_degraded_admin_rights`
 skips every admin it cannot reach (`no_rights.py:95-97`, `if admin and not
