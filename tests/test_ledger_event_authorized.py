@@ -26,6 +26,17 @@ actually appear in the ledger and requires each to resolve to a non-empty actor
 set. A future event added without a matrix entry reds here on the day its first
 row is written, instead of never.
 
+FACTORY-LOCAL, NOT TEMPLATE LAW (2026-11-20). The kit already ships this class
+gate: `TEMPLATE/tests/test_declared_event_population.py`, landed `8e5fc278` on
+2026-10-21 for #526, declared in `REQUIRED_GATES` and in the kit audit's run
+list. It is absent here because this tree's pin predates that commit and the
+kit's declared-set table never named the gate (kit #659, ruled T0), not because
+the class was uncovered. Do NOT offer this file upstream as the template half:
+its second arm is this factory's own decision (`release` is the AUTHORITY set
+`{hq, triage, owner}`, and `worker` may claim and must not release), which each
+factory sets in its own declaration. Keep the class arm here only as a local
+control until the kit gate is ported.
+
 Run:  python3 -m pytest tests/test_ledger_event_authorized.py -q
 Exit: 0 clean, non-zero on an ungated event or a release by an unauthorized actor.
 """
