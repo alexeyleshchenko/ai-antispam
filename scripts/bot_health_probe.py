@@ -308,7 +308,7 @@ def check_image_digest(container: dict) -> dict:
             digests = json.loads(out.strip())
             if digests:
                 local_digest = digests[0].split("@")[-1]
-        except ValueError, IndexError:
+        except (ValueError, IndexError):
             local_digest = None
     published = None
     registry_error = None

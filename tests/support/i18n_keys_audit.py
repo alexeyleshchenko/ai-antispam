@@ -70,7 +70,7 @@ def extract_t_keys_from_file(path: Path) -> tuple[set[str], list[tuple[int, str]
     try:
         source = path.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=str(path))
-    except OSError, SyntaxError:
+    except (OSError, SyntaxError):
         return set(), []
 
     class TCallVisitor(ast.NodeVisitor):

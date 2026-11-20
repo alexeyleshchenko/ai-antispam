@@ -168,7 +168,7 @@ class UserAccountInfo:
                 (now.year - dt.year) * 12 + now.month - dt.month,
             )
             return f"photo_age={age_months}mo"
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             return "photo_age=unknown"
 
 

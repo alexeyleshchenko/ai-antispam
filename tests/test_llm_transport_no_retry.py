@@ -89,7 +89,7 @@ def _predicate_retries(fn, exc) -> bool:
     """
     try:
         return bool(fn(exc))
-    except AttributeError, TypeError:
+    except (AttributeError, TypeError):
         pass
     state = RetryCallState(retry_object=None, fn=None, args=(), kwargs={})
     state.set_exception((type(exc), exc, None))
