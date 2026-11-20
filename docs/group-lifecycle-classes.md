@@ -68,8 +68,73 @@ Three properties are deliberate:
   healthy groups write nothing and a flagged group does not churn a fresh stamp
   every day.
 
-The action is unchanged: the clock routes into the same 7-day grace, the same
-admin notification and the same pause. `reconcile_bot_rights` writes no
+The **clock** is unchanged: it routes into the same 7-day grace. The **action**
+is class-dependent: #144 split it on the bot's membership, and #150 split the
+degraded-administrator class again on whether any registered admin is still
+reachable. The table below is the authority; the paragraph that stood here
+claimed the action was unchanged, which was true only before #144.
+
+### The disposition table (#144, extended by #150)
+
+`leave_no_rights_groups` reads the bot's membership when the grace expires, then
+reads the group's registered admins, and routes on both.
+
+| Bot membership at expiry | Reachable admin? | Disposition |
+|---|---|---|
+| `administrator`, both rights | — | clear the flag, stay (unchanged) |
+| `administrator`, missing a right | **yes** | notify, keep the flag, **do not leave** (#144) |
+| `administrator`, missing a right | **no** — every admin `is_active=false` | `pause_group_preserving_data(reason="no_rights_no_reachable_admin")`, clock cleared, WARNING; **terminal** (#150) |
+| …and the bot is the group's only member | no | terminal as above, **then** `leave_chat` (#150) |
+| `member` / `left` / `kicked` | — | leave after grace (unchanged) |
+| unreadable / inaccessible | — | leave after grace (unchanged) |
+
+**Why the third row exists (#150, ruled 2026-11-16).** #144's hold is licensed by
+the notify: the DM asks a human to tick one checkbox. `notify_degraded_admin_rights`
+skips every admin it cannot reach (`no_rights.py:95-97`, `if admin and not
+admin.is_active: continue`), so when *every* admin is inactive the notify sends
+nothing and returns `sent = 0` — the hold has no terminating condition and the
+group is held forever in silence. That is the same silent-degradation shape #144
+moved the notify to detection time to avoid.
+
+**Pause, not leave.** The terminal branch is a **status write**:
+`pause_group_preserving_data` (`group_operations.py:340`), already built for
+#145's protected-channel branch and documented as *"right when the bot is
+STAYING but cannot act"*. `perform_complete_group_cleanup` hard-deletes
+`group_administrators` and `approved_members` and a re-add restores neither, so
+it is never the disposition here. Terminal by construction: both populations
+filter `status = 'active'`, so the pause removes the row from
+`get_groups_with_no_rights_past_grace` and `sweep_group_administrators` at once —
+the one-shot property #145 relies on.
+
+**The sole-member leave, and what it does NOT license.** Leaving the chat is
+correct once no human remains, because there is nobody for the preserved mappings
+to serve. It is **not** a licence to delete them: #150's ruling of 2026-11-16T21:07Z
+reaffirmed condition 7 (`paused` … **mappings intact**) after a live run showed the
+bot's own leave event driving `status_handlers.py:547/:575` into
+`perform_complete_group_cleanup`, which overwrote the `paused` written 0.76 s
+earlier and hard-deleted both mapping tables. That is #151 (closed
+2026-11-16T22:15:42Z): the self-leave path must not run destructive cleanup for a
+group already paused by this branch.
+
+**Fail safe.** An unreadable member count, or a count read that raises, means
+pause-only, no leave. Leaving is the irreversible direction, so it never runs on
+an uncertain probe. `rights_unverified` is not zero.
+
+**#145's guard wins.** A group in `get_protected_channel_ids()` never reaches this
+branch — the protected-channel `continue` precedes it.
+
+**One correction, measured 2026-11-20.** A peer probe reported
+`-1002496127723` блатные чупани😎🐾 as *still* an administrator with
+`member count = 1` and **2 `approved_members` / 1 `group_administrators`** rows,
+i.e. as a group still being held. That state is two days stale. Read live: the
+bot's own `getChatMember` returns **403 "bot is not a member of the supergroup
+chat"**; the row is `status='left'` with `bot_removed_at=2026-11-16T21:01:08Z`;
+and both mapping tables are **0** — destroyed at 21:01:08Z, seventy-four minutes
+before #151 landed. So this group is not an open instance of the hold; it is the
+measured instance of the #151 defect, already terminal. Its 96 credits sit on
+admin `5272438221`, `is_active=false`, last active **2026-05-15**.
+
+`reconcile_bot_rights` writes no
 `status` and no `moderation_enabled` — #141's ruling rejected every disposition
 that would have added a second writer of `status`.
 
