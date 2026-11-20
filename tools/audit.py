@@ -923,6 +923,7 @@ PYTEST_FORM_GATES: tuple[str, ...] = (
     "tests/test_hygiene_stale_dirs.py",
     "tests/test_insights_gate_recorded.py",
     "tests/test_ledger_close_preflight.py",
+    "tests/test_ledger_event_authorized.py",
     "tests/test_registry_attest.py",
     "tests/test_registry_render.py",
     "tests/test_score_gate_recorded.py",
@@ -1696,6 +1697,8 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
         gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_insights_gate_recorded.py", "-q"])
     if (repo_root / "tests/test_ledger_close_preflight.py").is_file():
         gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_ledger_close_preflight.py", "-q"])
+    if (repo_root / "tests/test_ledger_event_authorized.py").is_file():
+        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_ledger_event_authorized.py", "-q"])
     if (repo_root / "tests/test_registry_attest.py").is_file():
         gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_registry_attest.py", "-q"])
     if (repo_root / "tests/test_registry_render.py").is_file():
