@@ -216,12 +216,42 @@ def leg_shared_label(problems: list[str]) -> None:
         )
 
 
+def leg_record_honest(problems: list[str]) -> None:
+    """#159: the record the leg PRINTS must describe the predicate it now reads with.
+
+    The printed `record_read` line is part of the reporting contract (a reader bounds what the
+    leg looked at from that sentence alone). While the reader was an exact match on one typed
+    spelling, `subject internal-self-audit` was true; once the reader is a predicate, the same
+    sentence under-states it and a reader would conclude the variant-spelled rows were never
+    consulted -- the very confusion that let n=488 sit unread for two days.
+    """
+    record = getattr(audit, "LEDGER_RECORD", "")
+    if not isinstance(record, str) or not record.strip():
+        problems.append("record_honest: tools/audit.py declares no LEDGER_RECORD; the leg names no record")
+        return
+    if "ledger" not in record:
+        problems.append(f"record_honest: {record!r} does not name the ledger")
+    if "with subject internal-self-audit" in record:
+        problems.append(
+            f"record_honest: the printed record {record!r} still claims an EXACT typed subject "
+            f"while the reader is a predicate (#159)"
+        )
+    if "daily self-audit" not in record:
+        problems.append(
+            f"record_honest: the printed record {record!r} does not name the observed variant shape "
+            f"(`daily self-audit YYYY-MM-DD`), so a reader cannot tell what the predicate accepts (#159)"
+        )
+    if "internal-self-audit" not in record:
+        problems.append(f"record_honest: the printed record {record!r} does not name the canonical literal")
+
+
 def main() -> int:
     problems: list[str] = []
     leg_behaviour(problems)
     leg_record_named(problems)
     leg_surface(problems)
     leg_shared_label(problems)
+    leg_record_honest(problems)
 
     print("Gate: cadence leg names its record and separates a dropped row from a missed run (#116)")
     print("  predicate: check_cadence_integrity reads ledger rows AND the scorecard artifact series;")
@@ -231,7 +261,8 @@ def main() -> int:
         for p in problems:
             print(f"  - {p}")
         return 1
-    print("PASS: 4 fixture branches, 3 distinct labels, report row carries the state and the record")
+    print("PASS: 4 fixture branches, 3 distinct labels, report row carries the state and the record,")
+    print("      and the printed record describes the subject PREDICATE (#159)")
     return 0
 
 

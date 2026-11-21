@@ -1586,7 +1586,10 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     # quiet day moved the clock and the leg read HELD while the self-audit had not run at all.
     # Measured 2026-10-27: the day's audit never ran, and `n=267` -- a `#123` correction row --
     # satisfied the leg's staleness check; the report read HELD. The clock is now bound to
-    # `subject == internal-self-audit`, and this gate reds if that binding is removed.
+    # `is_self_audit_subject(subject)` -- the canonical literal plus the observed free-text
+    # variant `daily self-audit YYYY-MM-DD` (#159) -- and this gate reds if that binding is
+    # removed or widened to a loose contains-match (which would let `self-audit-class`, n=519,
+    # satisfy the clock and turn a genuinely missing day into a false HELD).
     #
     # SCRIPT-form, matching #16/#17.
     if (repo_root / "tests/test_audit_cadence_subject.py").is_file():
@@ -1736,7 +1739,10 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
 # (#116; measured 2026-10-03: the artifact `dd16280` was committed while the owed row never
 # landed, and the report read `MISSED: Last run: 39.9h ago`). So the record is NAMED in the
 # output, and a stale ledger row is classified against the artifact series.
-LEDGER_RECORD = "evidence/ledger.jsonl run/score rows with subject internal-self-audit"
+LEDGER_RECORD = (
+    "evidence/ledger.jsonl run/score rows whose subject matches is_self_audit_subject "
+    "(internal-self-audit, or daily self-audit YYYY-MM-DD)"
+)
 
 # The subject that marks a SELF-AUDIT run row. Binding the clock to it is the fix for #124:
 # before it, `event in ("run","score")` alone fed the clock, so ANY unrelated board row
@@ -1747,6 +1753,49 @@ LEDGER_RECORD = "evidence/ledger.jsonl run/score rows with subject internal-self
 # window TWO rows were dropped (10-25, 10-26) and ONE run never happened (10-27); the clock
 # could not tell either from a healthy day while an unrelated row kept it fresh.
 SELF_AUDIT_SUBJECT = "internal-self-audit"
+
+# But the canonical literal is only ONE lawful spelling of that subject, and it is not the one
+# every lawful path writes. The `--stamp` path types it itself (the stamp command in `main()`),
+# so a stamped run is always canonical; the CRON route FORBIDS `--stamp`, so the runner writes
+# its run row by hand, and `docs/pacemaker-procedures.md` names no `--subject` literal -- on
+# that path the subject is FREE TEXT. Measured 2026-11-21 over the live ledger: 64 run/score
+# rows carry `internal-self-audit` and exactly ONE (n=488, 2026-11-19T06:10:05Z) carries
+# `daily self-audit 2026-11-19`. That one row is the whole hole: the 2026-11-19 audit DID run
+# (artifact `evidence/scores/2026-11-19-self-audit.md`, PASSED, commit be6674f), but the reader
+# matched its subject as an exact string, so the day read as a DROPPED ROW / HOLE -- and kept
+# reading so for the whole `CADENCE_HOLE_LOOKBACK_DAYS` window, a 7-day DEGRADED streak from one
+# misnamed row (#159).
+#
+# So the reader recognises its own rows by SHAPE. The shape is deliberately NARROW: the ledger
+# also carries `self-audit-class` (n=519, Triage's row about a CLASS of self-audit defects), and
+# a loose `"self-audit" in subject` match would let that unrelated row satisfy the clock -- a
+# genuinely missing audit day would then read HELD. That is a FALSE PASS, worse than the false
+# red being fixed here, and it is the exact class #124 exists to prevent.
+SELF_AUDIT_VARIANT_RE = re.compile(r"^daily self-audit \d{4}-\d{2}-\d{2}$", re.IGNORECASE)
+
+
+def is_self_audit_subject(subject: Any) -> bool:
+    """True when `subject` names a SELF-AUDIT run/score row, in either lawful spelling.
+
+    Accepts, after stripping surrounding whitespace:
+
+    * the canonical literal `SELF_AUDIT_SUBJECT` (`internal-self-audit`), case-insensitively --
+      the `--stamp` path's own subject; and
+    * `daily self-audit YYYY-MM-DD` -- the shape the by-hand cron runner actually wrote
+      (n=488, the observed instance).
+
+    REJECTS `self-audit-class` (n=519: a different subject, about a class of defects) and a
+    bare `daily self-audit` with no date. The date is what makes the variant a RUN'S OWN name
+    rather than a topic label, so requiring it keeps the match tight against future free text
+    without rejecting the row that exists.
+    """
+    if not isinstance(subject, str):
+        return False
+    text = subject.strip()
+    if text.lower() == SELF_AUDIT_SUBJECT:
+        return True
+    return bool(SELF_AUDIT_VARIANT_RE.match(text))
+
 
 # How far back a HOLE is looked for, in days ending at the newest scorecard. Bounded on
 # purpose: a hole is proved by an artifact whose row never landed, and the append-only law
@@ -1899,7 +1948,7 @@ def check_cadence_integrity(
                     # letting one feed the clock is how three handoffs went unnoticed.
                     if data.get("event") not in ("run", "score"):
                         continue
-                    if data.get("subject") != SELF_AUDIT_SUBJECT:
+                    if not is_self_audit_subject(data.get("subject")):
                         continue
                     ts = data.get("ts")
                     if not ts:
@@ -2272,7 +2321,7 @@ def main() -> int:
             "--actor",
             args.actor,
             "--subject",
-            "internal-self-audit",
+            SELF_AUDIT_SUBJECT,
             "--detail",
             detail,
         ]

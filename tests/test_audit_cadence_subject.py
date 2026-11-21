@@ -145,20 +145,164 @@ def leg_subject_bound_in_source(problems: list[str]) -> None:
         )
 
 
+def _variant_subject(day_offset: float = 0.0) -> str:
+    """The shape the by-hand cron runner actually wrote (ledger n=488, 2026-11-19)."""
+    day = (_utcnow() - datetime.timedelta(days=day_offset)).date().isoformat()
+    return f"daily self-audit {day}"
+
+
+def leg_variant_subject_is_the_clock(problems: list[str]) -> None:
+    """C: the OBSERVED VARIANT spelling feeds the clock -- the #159 regression arm.
+
+    The cron route forbids `--stamp`, so the runner writes its run row by hand and the subject
+    is FREE TEXT; ledger n=488 carries `daily self-audit 2026-11-19` while 64 other rows carry
+    the canonical literal. The fixture puts a STALE canonical row beside a FRESH variant row:
+    a reader that only knows the literal picks the stale one and reads MISSED, so this arm is
+    RED on the pre-#159 code and GREEN once the predicate recognises the shape.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        rows = [_row(1, STALE_HOURS, SELF_AUDIT), _row(2, 1.0, _variant_subject())]
+        # Artifact ONLY on the stale row's own day: nothing is missing, so no hole can decide
+        # the state and the arm isolates the SUBJECT (the same control shape as leg B).
+        arts = [STALE_HOURS / 24.0]
+        ledger, scores = _fixture(Path(tmp), rows, arts)
+        stats = audit.check_cadence_integrity(ledger, scores)
+
+    if stats.get("holes"):
+        problems.append(
+            f"C[fixture]: the variant arm carries holes {stats.get('holes')}; the fixture must "
+            f"isolate the subject, not the hole set"
+        )
+    if not stats.get("cadence_held"):
+        problems.append(
+            f"C[variant_clock]: a FRESH `{_variant_subject()}` row did not satisfy the clock "
+            f"(state {stats.get('state')!r}); the observed 2026-11-19 row (n=488) is unreadable "
+            f"and the leg reports a false HOLE/DROPPED ROW for a run whose artifact PASSED (#159)"
+        )
+    if stats.get("state") != "held":
+        problems.append(f"C[state]: expected 'held' from the fresh variant row, got {stats.get('state')!r}")
+
+
+def leg_predicate_shape(problems: list[str]) -> None:
+    """F: the predicate's accept/reject table, stated as data."""
+    predicate = getattr(audit, "is_self_audit_subject", None)
+    if predicate is None:
+        problems.append(
+            "F[predicate]: tools/audit.py defines no is_self_audit_subject; the reader is still an "
+            "exact-match on one typed spelling and every free-text variant is unreadable (#159)"
+        )
+        return
+    accept = [
+        "internal-self-audit",
+        "  internal-self-audit  ",
+        "daily self-audit 2026-11-19",
+        "  daily self-audit 2026-11-19 ",
+        "Daily Self-Audit 2026-11-19",
+    ]
+    reject = [
+        "self-audit-class",           # n=519: Triage's row about a CLASS of defects
+        "daily self-audit",           # no date: a topic label, not a run's own name
+        "daily self-audit 2026-11-19 extra",
+        "self-audit",                 # a bare substring must never be enough
+        "#159",
+        "",
+        None,
+    ]
+    for subject in accept:
+        if not predicate(subject):
+            problems.append(f"F[accept]: {subject!r} is a self-audit row and was rejected")
+    for subject in reject:
+        if predicate(subject):
+            problems.append(
+                f"F[reject]: {subject!r} is NOT a self-audit row and was accepted; a loose match "
+                f"lets an unrelated row satisfy the clock -- a false pass (#124's class)"
+            )
+
+
+def leg_unrelated_class_row_is_not_the_clock(problems: list[str]) -> None:
+    """D: the false-pass guard -- `self-audit-class` (n=519) must NOT feed the clock.
+
+    The fixture is leg C's with the fresh subject swapped for Triage's `self-audit-class`. It is
+    GREEN on the pre-#159 code (exact match) and must STAY green: it exists to red a NAIVE fix.
+    The bite proof at the end monkeypatches the predicate to `"self-audit" in subject` and shows
+    that same fixture then reads HELD -- so the arm discriminates rather than merely agreeing.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        rows = [_row(1, STALE_HOURS, SELF_AUDIT), _row(2, 1.0, "self-audit-class")]
+        arts = [STALE_HOURS / 24.0]
+        ledger, scores = _fixture(Path(tmp), rows, arts)
+        stats = audit.check_cadence_integrity(ledger, scores)
+
+    if stats.get("cadence_held"):
+        problems.append(
+            f"D[false_pass]: the `self-audit-class` row (n=519) satisfied the self-audit clock "
+            f"(state {stats.get('state')!r}); a genuinely missing audit day would then read HELD"
+        )
+    if stats.get("state") == "held":
+        problems.append("D[false_pass]: the leg reported HELD with no self-audit row inside the threshold")
+
+    # Bite proof: a naive contains-match over the SAME fixture must be caught by this arm.
+    predicate = getattr(audit, "is_self_audit_subject", None)
+    if predicate is not None:
+        audit.is_self_audit_subject = lambda s: "self-audit" in str(s or "").lower()  # type: ignore[assignment]
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                rows = [_row(1, STALE_HOURS, SELF_AUDIT), _row(2, 1.0, "self-audit-class")]
+                ledger, scores = _fixture(Path(tmp), rows, [STALE_HOURS / 24.0])
+                naive = audit.check_cadence_integrity(ledger, scores)
+        finally:
+            audit.is_self_audit_subject = predicate  # type: ignore[assignment]
+        if not naive.get("cadence_held"):
+            problems.append(
+                "D[bite]: a naive `'self-audit' in subject` predicate also rejects n=519, so this "
+                "arm does not discriminate against the fix it exists to forbid"
+            )
+
+
+def leg_hole_bites_under_variant_spelling(problems: list[str]) -> None:
+    """E: the hole gate still bites when the rows are spelled the VARIANT way.
+
+    Leg A proves the hole is named for canonical rows; this proves widening the reader did not
+    buy the hole away -- a genuinely missing day between two variant-spelled rows still reds.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        rows = [_row(1, 4 * 24, _variant_subject(4)), _row(2, 0.0, _variant_subject())]
+        arts = [4.0, 3.0, 2.0, 1.0, 0.0]
+        ledger, scores = _fixture(Path(tmp), rows, arts)
+        stats = audit.check_cadence_integrity(ledger, scores)
+
+    want = sorted((_utcnow() - datetime.timedelta(days=d)).date().isoformat() for d in (3.0, 2.0, 1.0))
+    if stats.get("holes") != want:
+        problems.append(
+            f"E[hole_days]: variant-spelled endpoints, expected holes {want}, got {stats.get('holes')}"
+        )
+    if stats.get("state") != "hole":
+        problems.append(f"E[state]: expected 'hole', got {stats.get('state')!r}")
+    if stats.get("cadence_held"):
+        problems.append("E[not_held]: a hole under variant spelling reported cadence_held=True")
+
+
 def main() -> int:
     problems: list[str] = []
     leg_hole_is_named(problems)
     leg_unrelated_row_is_not_the_clock(problems)
     leg_subject_bound_in_source(problems)
+    leg_variant_subject_is_the_clock(problems)
+    leg_unrelated_class_row_is_not_the_clock(problems)
+    leg_hole_bites_under_variant_spelling(problems)
+    leg_predicate_shape(problems)
 
     print("Gate: cadence clock bound to the self-audit subject, and a hole between rows is named (#124)")
     print("  predicate: state 'hole' names the unwritten days; an unrelated #N run row never feeds the clock")
+    print("  #159: the reader recognises BOTH lawful spellings -- `internal-self-audit` and `daily self-audit YYYY-MM-DD`")
+    print("        -- and still rejects `self-audit-class`, a bare `daily self-audit`, and any other free text")
     if problems:
         print(f"FAIL: {len(problems)} violation(s)")
         for p in problems:
             print(f"  - {p}")
         return 1
-    print("PASS: hole named with its days, unrelated row rejected by the clock, predicate bound")
+    print("PASS: hole named with its days, unrelated row rejected by the clock, predicate bound,")
+    print("      variant spelling (#159) recognised, `self-audit-class` rejected, hole still bites")
     return 0
 
 
