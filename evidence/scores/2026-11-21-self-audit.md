@@ -134,3 +134,11 @@ run-row command, or the cadence predicate matches a normalized prefix. The first
 and keeps the reader strict; the second survives a lane inventing a new phrasing. Filed on
 the board, not patched in this run — the artifact is a snapshot, and a gate change mid-run
 would invalidate the gate table above.
+
+**Bound — this is a self-healing red, not a permanent one.** `tools/audit.py:1753` sets
+`CADENCE_HOLE_LOOKBACK_DAYS = 7`, bounded on purpose so an unrepairable hole ages out instead
+of reding forever (the append-only law forbids back-writing the missing row). `n=488` is
+immutable, so `HOLE 2026-11-19` will be named on every audit from 2026-11-20 until it leaves
+the window on **2026-11-26** — a **seven-day DEGRADED streak produced by one misnamed row**.
+That is the real cost, and it is the argument for stating the literal in the procedure rather
+than relying on the bound.
