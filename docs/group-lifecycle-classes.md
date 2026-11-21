@@ -111,6 +111,18 @@ reason string survives only on rows already written to `entity_events` (2 as of
 2026-11-21), and the digest matches it too — otherwise those groups would drop
 out of the inventory on a rename.
 
+**A third withdrawal, same class (2026-11-21).** An HQ ruling that morning
+granted the exit with a **purge** attached — *"mark group `left`, purge stale
+`approved_members`/`group_administrators` rows"*. That half is withdrawn the same
+day, before any implementation, because deleting those rows **is** the #151
+defect one surface over: the exit here is `pause_group_preserving_data`
+(`no_rights.py:309-311`), a status write that leaves both mapping tables intact,
+and `no_rights.py:23` states the invariant in the code — *"never the destructive
+path"*. The evidence half of that ruling stands unchanged and is what #161
+codified: the entry condition needs **positive evidence** (live member count == 1
+**and** every known admin `is_active=false` and reported `left`), never an
+inference from an unreachable probe.
+
 **Read `bot_removed_at`, never `status` alone, to tell a hold from a leave.** The
 two "leave" rows above run `_leave_group_and_record_for_notification`, which calls
 `perform_complete_group_cleanup(..., status="paused", reason="no_rights_past_grace")`
