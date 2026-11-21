@@ -449,6 +449,9 @@ DECLARATION_SURFACES: tuple[
     ("audit-rates-exemptions", "docs/audit-rates-exemptions.json", (),
      "entries name a ledger row `n` and a BOARD ISSUE (`subject`); the ledger is "
      "append-only, so a row cannot be stranded by a rename"),
+    ("cadence-crosscheck-exemptions", "docs/cadence-crosscheck-exemptions.json",
+     (("exemptions", "artifact", DECL_PATH), ("exemptions", "artifact_commit", DECL_COMMIT)),
+     ""),
     ("close-board-exemptions", "docs/close-board-exemptions.json", (),
      "entries name a BOARD ISSUE (`subject`) and a ledger row `n`, neither of which this "
      "leg can read offline"),
