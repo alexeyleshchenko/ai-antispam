@@ -1,0 +1,4 @@
+{
+  "_note": "Skeleton for docs/cadence-crosscheck-exemptions.json, read by tests/test_audit_cadence_artifact_crosscheck.py. A factory ships this file EMPTY: an exemption is a dated admission that a scorecard artifact exists whose ledger handoff row never landed, and it may only be added with a non-blank `reason` and a non-blank `empty_repair_space` statement. The gate refuses a malformed entry, a STALE entry (the date DOES carry a row) and a PHANTOM entry (no artifact is dated so), and prints every live entry as an `excused:` line on every run.",
+  "exemptions": []
+}

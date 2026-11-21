@@ -1595,6 +1595,25 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     if (repo_root / "tests/test_audit_cadence_subject.py").is_file():
         gates_to_run.append([sys.executable, "tests/test_audit_cadence_subject.py"])
 
+    # 19. The ARTIFACT/LEDGER CROSSCHECK (#159) -- every scorecard artifact date must carry a
+    # self-audit `run`/`score` row, and the gate FAILS BY DATE where one does not. The two legs
+    # above read the ledger (and its hole set) inside a 7-day window; nothing asserted the whole
+    # artifact series, so a day whose handoff row never landed aged out of the window and left
+    # no trace. Measured 2026-11-21 before this gate: 61 artifacts, 57 distinct run dates -- 4
+    # days whose handoff row never landed, and two of those are the defects this repo already
+    # names (#116's 2026-10-03, #124's 2026-10-25/26). Those four are EXCUSED through
+    # `docs/cadence-crosscheck-exemptions.json` -- dated, printed on every run, never backfilled
+    # (the ledger is append-only and `append` has no `--ts`, so the repair space is empty).
+    #
+    # SCRIPT-form, matching #16-#18: `main()` under a `__main__` guard, no module-level
+    # `def test_*`. It reads the live series by default and takes `--scores`/`--ledger`/
+    # `--exemptions`/`--own-run-date` overrides, so its bite proof drives a throwaway fixture
+    # without reading this factory's exemption table.
+    if (repo_root / "tests/test_audit_cadence_artifact_crosscheck.py").is_file():
+        gates_to_run.append(
+            [sys.executable, "tests/test_audit_cadence_artifact_crosscheck.py"]
+        )
+
     # The commit-citation clause. SCRIPT-MODE (0 test functions collected, `__main__` present),
     # so a script registration is the honest form -- and unlike the cron gate this one is NOT
     # vacuous: it prints "examined N commit(s)" and exits 1 on an unexcused violation.
@@ -1797,6 +1816,79 @@ def is_self_audit_subject(subject: Any) -> bool:
     return bool(SELF_AUDIT_VARIANT_RE.match(text))
 
 
+# The predicate above decides which subjects COUNT. This one decides which subjects are
+# CANDIDATES -- rows that name a self-audit in any spelling and were nonetheless REFUSED by the
+# predicate. It is deliberately WIDER than the predicate, because its job is to find the rows the
+# reader could not read: a hyphen typed as a space, a bare `self audit` with no date, a subject
+# with a trailing parenthetical. Without it the artifact cannot tell "did not run" from "cannot
+# read" (#159): a day whose handoff exists under an unreadable spelling and a day whose audit
+# never ran both render as a ledger with no matching row, and the two have OPPOSITE remedies --
+# widen the reader's predicate vs. fix the pacemaker.
+SELF_AUDIT_MENTION_RE = re.compile(r"self[-_ ]?audit", re.IGNORECASE)
+
+def mentions_self_audit(subject: Any) -> bool:
+    """True when a subject TEXT mentions self-audit, in any spelling a writer might type.
+
+    Not an acceptance rule -- `is_self_audit_subject` remains the only one. This is the
+    candidate rule that finds the rows the acceptance rule REFUSED, so the artifact can name
+    them instead of letting them vanish into the same empty count as a day that never ran.
+    """
+    if not isinstance(subject, str):
+        return False
+    return bool(SELF_AUDIT_MENTION_RE.search(subject))
+
+def scan_self_audit_rows(ledger_path: Path) -> dict[str, Any]:
+    """Read the ledger ONCE and report what the self-audit predicate could and could not read.
+
+    Three populations, and the artifact needs all three to be honest (#159):
+
+    * `matched` -- `run`/`score` rows the predicate ACCEPTED. The count the cadence line never
+      carried: without it a reader cannot tell an accepted day from an empty read.
+    * `rejected` -- `run`/`score` rows whose subject MENTIONS self-audit (`mentions_self_audit`)
+      and which the predicate REFUSED, as `subject@date` strings. Nonzero is the "cannot read"
+      signal: a handoff exists that the reader is not recognising. Scoped to `run`/`score`
+      because only those events are handoff candidates -- an `intake` or `close` row that
+      mentions a self-audit is board bookkeeping, and counting it would paint every day
+      "cannot read" for a reason no predicate change could ever repair.
+    * `dates` / `last_ts` -- the `ts` date and stamp of every accepted row, which is the clock.
+
+    `n=519` (`self-audit-class`, a `run` row about a CLASS of defects) lands in `rejected` and
+    must: it is a row the predicate refused, and naming it is how a reader sees WHY the rejected
+    count is 1 on a healthy day rather than guessing at a hidden spelling.
+    """
+    dates: set[str] = set()
+    matched = 0
+    rejected: list[str] = []
+    last_ts = None
+    with open(ledger_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except Exception:
+                continue
+            # #124: the clock is fed ONLY by self-audit rows. An unrelated `run` row (a board
+            # item's correction receipt) is not this process running, and letting one feed the
+            # clock is how three handoffs went unnoticed.
+            if data.get("event") not in ("run", "score"):
+                continue
+            subject = data.get("subject")
+            if not is_self_audit_subject(subject):
+                if mentions_self_audit(subject):
+                    stamp = str(data.get("ts") or "")[:10] or "no-ts"
+                    rejected.append(f"{str(subject).strip()}@{stamp}")
+                continue
+            matched += 1
+            ts = data.get("ts")
+            if not ts:
+                continue
+            dates.add(ts[:10])
+            last_ts = ts
+    return {"dates": dates, "matched": matched, "rejected": rejected, "last_ts": last_ts}
+
+
 # How far back a HOLE is looked for, in days ending at the newest scorecard. Bounded on
 # purpose: a hole is proved by an artifact whose row never landed, and the append-only law
 # forbids writing that row after the fact -- so an old hole has no repair space and an
@@ -1893,6 +1985,34 @@ def render_cadence_label(stats: dict[str, Any]) -> str:
         return f"{label} {render_cadence_holes(holes)}"
     return label
 
+def render_record_counts(stats: dict[str, Any]) -> str:
+    """The matched/refused counts that sit BESIDE the record's name (#159).
+
+    The name alone says what was searched and never how much matched, so a day whose handoff
+    exists under an unreadable spelling rendered exactly like a day the audit never ran. The
+    two numbers separate them:
+
+    * `matched N` -- `run`/`score` rows the subject predicate accepted;
+    * `rejected M` -- rows that MENTION self-audit and were refused, with their
+      `subject@date` names (capped) so a reader can see WHICH spelling is unreadable. A
+      nonzero `M` is the "cannot read" signal; `matched 0 · rejected 0` is "did not run".
+
+    `None` in either count means the ledger was never opened -- rendered as `n/a`, never as 0,
+    because 0 is a reading and an unopened ledger is an absence.
+    """
+    matched = stats.get("record_matched")
+    rejected = stats.get("record_rejected")
+    if matched is None or rejected is None:
+        return "matched n/a · rejected n/a (ledger not read)"
+    text = f"matched {matched} · rejected {rejected}"
+    detail = stats.get("record_rejected_detail") or []
+    if detail:
+        shown = ", ".join(str(d) for d in detail[:3])
+        if len(detail) > 3:
+            shown += f", +{len(detail) - 3} more"
+        text += f" ({shown})"
+    return text
+
 def check_cadence_integrity(
     ledger_path: Path,
     scores_dir: Path | None = None,
@@ -1903,6 +2023,14 @@ def check_cadence_integrity(
     Reads TWO records and says which: `record_read` names the ledger rows the staleness is
     measured from, and `artifact_latest_date` is the newest scorecard on disk -- the value
     that separates a dropped row from a missed run (#116).
+
+    The record's NAME is not enough to tell "did not run" from "cannot read" (#159): a name
+    says what was searched, never how much matched. So the stats carry `record_matched` (the
+    `run`/`score` rows the subject predicate ACCEPTED) and `record_rejected` (+ its
+    `record_rejected_detail`) -- the rows that MENTION self-audit and were REFUSED. Zero
+    matched with zero rejected is a day that did not run; a nonzero rejected count is a day
+    whose handoff exists under a spelling the reader cannot parse. When the ledger was never
+    read, both counts are `None` rather than 0, because 0 is a reading and this is an absence.
 
     `own_run_date` is the date of the run being computed, and its artifact is EXCLUDED from
     the hole set: the process computing cadence owns that artifact, and the row proving its
@@ -1930,33 +2058,27 @@ def check_cadence_integrity(
             "hours_since_last_run": None,
             "state": "missed_run",
             "record_read": LEDGER_RECORD,
+            # Neither count is knowable: the ledger was never opened. `None`, not 0 -- a zero
+            # is the "did not run" reading, and this branch is "cannot read the ledger".
+            "record_matched": None,
+            "record_rejected": None,
+            "record_rejected_detail": [],
             "artifact_latest_date": latest_artifact,
             "holes": [],
         }
 
     now = datetime.datetime.now(datetime.timezone.utc)
-    last_ts = None
-    row_dates: set[str] = set()
-    with open(ledger_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                try:
-                    data = json.loads(line)
-                    # #124: the clock is fed ONLY by self-audit rows. An unrelated `run` row
-                    # (a board item's correction receipt) is not this process running, and
-                    # letting one feed the clock is how three handoffs went unnoticed.
-                    if data.get("event") not in ("run", "score"):
-                        continue
-                    if not is_self_audit_subject(data.get("subject")):
-                        continue
-                    ts = data.get("ts")
-                    if not ts:
-                        continue
-                    row_dates.add(ts[:10])
-                    last_ts = ts
-                except Exception:
-                    pass
+    scan = scan_self_audit_rows(ledger_path)
+    row_dates: set[str] = scan["dates"]
+    last_ts = scan["last_ts"]
+    # The counts travel with EVERY branch below, so no render path can carry the record's name
+    # without the population it read (#159).
+    counts = {
+        "record_read": LEDGER_RECORD,
+        "record_matched": scan["matched"],
+        "record_rejected": len(scan["rejected"]),
+        "record_rejected_detail": scan["rejected"],
+    }
 
     holes = find_cadence_holes(row_dates, hole_dates, latest_artifact)
 
@@ -1965,7 +2087,7 @@ def check_cadence_integrity(
             "cadence_held": True,
             "hours_since_last_run": None,
             "state": "held",
-            "record_read": LEDGER_RECORD,
+            **counts,
             "artifact_latest_date": latest_artifact,
             "holes": holes,
         }
@@ -1986,7 +2108,7 @@ def check_cadence_integrity(
             "hours_since_last_run": round(hours_diff, 1),
             "last_run_ts": last_ts,
             "state": state,
-            "record_read": LEDGER_RECORD,
+            **counts,
             "artifact_latest_date": latest_artifact,
             "holes": holes,
         }
@@ -1995,7 +2117,7 @@ def check_cadence_integrity(
             "cadence_held": False,
             "hours_since_last_run": None,
             "state": "missed_run",
-            "record_read": LEDGER_RECORD,
+            **counts,
             "artifact_latest_date": latest_artifact,
             "holes": holes,
         }
@@ -2080,7 +2202,7 @@ def format_report_markdown(
         f"| **Avg Cost / Closed Task** | `{format_cost_usd(ledger_stats.get('avg_cost_per_closed_task_usd'))}` | ${ledger_stats.get('total_cost_usd', 0.0):.4f} total cost ÷ {ledger_stats.get('closed_subjects', 0)} distinct closed subjects |",
         f"| **Cost / Successful Task** | `{format_cost_usd(ledger_stats.get('cost_per_successful_task_usd'))}` | {format_cost_note(ledger_stats)} |",
         f"| **Total Tokens (In/Out)** | `{ledger_stats.get('total_tokens_in', 0)} / {ledger_stats.get('total_tokens_out', 0)}` | Cumulative prompt and completion tokens |",
-        f"| **Cadence Status** | `{render_cadence_label(cadence_stats)}` | Last run: {cadence_stats.get('hours_since_last_run')}h ago · record read: {cadence_stats.get('record_read')} · latest artifact: {cadence_stats.get('artifact_latest_date')} |",
+        f"| **Cadence Status** | `{render_cadence_label(cadence_stats)}` | Last run: {cadence_stats.get('hours_since_last_run')}h ago · record read: {cadence_stats.get('record_read')} · {render_record_counts(cadence_stats)} · latest artifact: {cadence_stats.get('artifact_latest_date')} |",
         "",
         "---",
         "",
@@ -2363,7 +2485,7 @@ def main() -> int:
     print(f"  - Rework Entries: {rework_stats.get('total_entries', 0)} (share: {round(rework_stats.get('rework_share', 0.0) * 100, 1)}% = {rework_stats.get('total_entries', 0)} ÷ ({rework_stats.get('closed_subjects', 0)} + {rework_stats.get('total_entries', 0)}) | per close: {round(rework_stats.get('rework_per_close', 0.0) * 100, 1)}% = {rework_stats.get('total_entries', 0)} ÷ {rework_stats.get('closed_subjects', 0)})")
     print(f"  - Rework Declarations: {ledger_stats.get('close_rows_declaring_rework', 0)}/{ledger_stats.get('close_events', 0)} close rows declare a disposition ({round(ledger_stats.get('rework_declaration_rate', 0.0) * 100, 1)}%) — {format_rework_declaration_note(ledger_stats)}")
     print(f"  - Change Fail Rate: {round(rework_stats.get('change_fail_rate', 0.0) * 100, 1)}% = {rework_stats.get('change_fail_rate_numerator', 0)} ÷ {rework_stats.get('change_fail_rate_denominator', 0)} closed work units (linkage coverage: {rework_stats.get('subject_coverage_numerator', 0)}/{rework_stats.get('subject_coverage_denominator', 0)} entries carry a determinate Subject — a bare rate is never read alone)")
-    print(f"  - Cadence: {render_cadence_label(cadence_stats)} (last run: {cadence_stats.get('hours_since_last_run')}h ago · record read: {cadence_stats.get('record_read')} · latest artifact: {cadence_stats.get('artifact_latest_date')})")
+    print(f"  - Cadence: {render_cadence_label(cadence_stats)} (last run: {cadence_stats.get('hours_since_last_run')}h ago · record read: {cadence_stats.get('record_read')} · {render_record_counts(cadence_stats)} · latest artifact: {cadence_stats.get('artifact_latest_date')})")
     unknown_note = f", {len(verdict.unknown)} UNKNOWN" if verdict.unknown else ""
     print(f"\nMechanical Gates ({len(gate_results)}{unknown_note}):")
     for g in gate_results:

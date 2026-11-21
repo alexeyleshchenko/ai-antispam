@@ -1,0 +1,33 @@
+{
+  "_note": "Factory data read by tests/test_audit_cadence_artifact_crosscheck.py. An exemption is a DATED, ATTRIBUTED admission that a scorecard artifact exists whose ledger handoff row never landed -- never a convenience. Key every entry by DATE, because the violation is per date (an artifact date with no self-audit run/score row) and the artifact file is named after it; each entry names why the row is missing and states the EMPTY REPAIR SPACE. The ledger is append-only and `append` has no `--ts`, so a retro row cannot carry the day's true stamp: re-stamping a day's handoff after the fact would falsify the record. Each entry is printed as an `excused:` line on EVERY gate run -- visible debt, not forgiveness. A malformed entry, an entry for a date that DOES carry a row (STALE), and an entry for a date with no artifact (PHANTOM) are each a gate FAILURE rather than a silent pass. The four entries below are the whole population measured 2026-11-21 over evidence/scores (61 artifacts, 57 covered): the #116 incident (2026-10-03, artifact dd16280 committed, row never written) and the #124 window (2026-10-25/26, when n=267 -- a #123 correction row -- was the newest run row until the 2026-10-28 stamp). 2026-09-28 predates both defects: its artifact was re-rendered (3dbe793) while the day's handoff row was never written.",
+  "exemptions": [
+    {
+      "date": "2026-09-28",
+      "artifact": "evidence/scores/2026-09-28-self-audit.md",
+      "artifact_commit": "3dbe793",
+      "reason": "The 2026-09-28 audit ran and its scorecard was committed (`evidence: re-render 2026-09-28 scorecard`, 3dbe793), but no `internal-self-audit` run row was written that day: the ledger steps from n=62 (2026-09-27T05:51:47Z) to n=129 (2026-09-29T11:31:42Z). The handoff was dropped, and the row-dropping was not detected at the time because the cadence leg read any `run` row as the clock.",
+      "empty_repair_space": "the ledger is append-only and `tools/ledger.py append` has no `--ts` (now_iso() is the sole source), so a row written today cannot carry the 2026-09-28 stamp; re-stamping would assert a handoff that was never made at that instant"
+    },
+    {
+      "date": "2026-10-03",
+      "artifact": "evidence/scores/2026-10-03-self-audit.md",
+      "artifact_commit": "dd16280",
+      "reason": "The #116 measured incident, in that defect's own words: the artifact `dd16280` was committed, the owed `run` row never landed, and the report read `MISSED: Last run: 39.9h ago` -- a DROPPED ROW read as a MISSED RUN. The next self-audit row is n=157 at 2026-10-04T06:01:10Z.",
+      "empty_repair_space": "append-only ledger with no `--ts`: no retro row can carry the 2026-10-03 stamp, and a row written today would claim a handoff at a false instant"
+    },
+    {
+      "date": "2026-10-25",
+      "artifact": "evidence/scores/2026-10-25-self-audit.md",
+      "artifact_commit": "149e63d",
+      "reason": "The #124 window. The 2026-10-25 audit ran and its artifact was committed (`evidence: daily self-audit 2026-10-25`, 149e63d) while its handoff row was dropped; the artifact itself reads `Cadence Status HELD · Last run: 7.9h ago` because the leg then accepted ANY `run` row, and the `#123` correction row (n=267, 2026-10-25T10:21:27Z) kept the clock fresh.",
+      "empty_repair_space": "append-only ledger with no `--ts`: the 2026-10-25 stamp cannot be written retroactively, and the row's absence is the record of the drop"
+    },
+    {
+      "date": "2026-10-26",
+      "artifact": "evidence/scores/2026-10-26-self-audit.md",
+      "artifact_commit": "a3c1ea5",
+      "reason": "The #124 window's second dropped handoff: the 2026-10-26 artifact was committed (`evidence: daily self-audit 2026-10-26`, a3c1ea5) with no `run` row; its own Cadence Status read `HELD · Last run: 19.5h ago` on n=267. The next self-audit row is n=269 at 2026-10-28T05:54:41Z -- 2.81 days later -- and 2026-10-27 has no artifact at all (that run never happened, which is why it is not an entry here: this gate judges ARTIFACT dates).",
+      "empty_repair_space": "append-only ledger with no `--ts`: no retro row can carry the 2026-10-26 stamp; 2026-10-28's `DROPPED ROW` reading is the surviving record of the debt"
+    }
+  ]
+}
