@@ -69,24 +69,47 @@ Three properties are deliberate:
   every day.
 
 The **clock** is unchanged: it routes into the same 7-day grace. The **action**
-is class-dependent: #144 split it on the bot's membership, and #150 split the
-degraded-administrator class again on whether any registered admin is still
-reachable. The table below is the authority; the paragraph that stood here
+is class-dependent: #144 split it on the bot's membership, #150 split the
+degraded-administrator class on whether any registered admin is still reachable,
+and #161 amended that split again — on **positive evidence**, and with the leave
+withdrawn. The table below is the authority; the paragraph that stood here
 claimed the action was unchanged, which was true only before #144.
 
-### The disposition table (#144, extended by #150)
+### The disposition table (#144, amended by #161)
 
 `leave_no_rights_groups` reads the bot's membership when the grace expires, then
-reads the group's registered admins, and routes on both.
+asks `has_human_admin(group_id)` and `count_registered_admins(group_id)`, and
+routes on both.
 
-| Bot membership at expiry | Reachable admin? | Disposition |
+| Bot membership at expiry | Human admin? | Disposition |
 |---|---|---|
 | `administrator`, both rights | — | clear the flag, stay (unchanged) |
 | `administrator`, missing a right | **yes** | notify, keep the flag, **do not leave** (#144) |
-| `administrator`, missing a right | **no** — every admin `is_active=false` | `pause_group_preserving_data(reason="no_rights_no_reachable_admin")`, clock cleared, WARNING; **terminal** (#150) |
-| …and the bot is the group's only member | no | terminal as above, **then** `leave_chat` (#150) |
+| `administrator`, missing a right | **no, and no admin is on file at all** | **hold** — data gap, not the orphaned class: flag kept, clock keeps running, nothing written (#161) |
+| `administrator`, missing a right | **no, and admins ARE on file** → class `orphaned` | `pause_group_preserving_data(reason="no_rights_orphaned_group")`, clock cleared, WARNING; **terminal: stay, silent, no retry** (#161) |
 | `member` / `left` / `kicked` | — | leave after grace (unchanged) |
 | unreadable / inaccessible | — | leave after grace (unchanged) |
+
+**`has_human_admin` is the discriminator**, not "every admin is inactive": at
+least one `group_administrators` row whose `administrators` row is active, who is
+still a member, and who is not the bot itself. An empty roster is a data gap —
+a sweep that never captured the list — and #150's error was reading it as proof
+that every human had blocked us.
+
+**The orphaned class never leaves.** HQ's ruling on #161 is *"stay, silent, no
+retry"*: the group is dormant, so residency costs nothing measurable, while
+eviction is irreversible and destroys the `approved_members` and
+`group_administrators` rows that are the evidence of what happened. No DM is
+sent (every registered admin is gone, so it would reach nobody) — but the group
+stays in the **inventory** population and `scripts/bot_health_probe.py` prints
+one line per orphaned group in the daily digest, so it cannot hide by being
+silent.
+
+**History:** #150 wrote this class as `no_rights_no_reachable_admin` and added a
+leave when the bot was the group's sole member. Both are withdrawn. The old
+reason string survives only on rows already written to `entity_events` (2 as of
+2026-11-21), and the digest matches it too — otherwise those groups would drop
+out of the inventory on a rename.
 
 **Read `bot_removed_at`, never `status` alone, to tell a hold from a leave.** The
 two "leave" rows above run `_leave_group_and_record_for_notification`, which calls
