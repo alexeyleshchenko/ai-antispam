@@ -20,8 +20,15 @@ repaired by a single permission change.
 registered admin of such a group has blocked the bot, #144's notify reaches
 nobody (`notify_degraded_admin_rights` skips inactive admins), so no human will
 ever tick the checkbox. That class gets a terminal exit — a STATUS write
-(`pause_group_preserving_data` + clock cleared), never the destructive path —
-and, only when the bot is the chat's sole remaining member, a leave.
+(`pause_group_preserving_data` + clock cleared), never the destructive path.
+
+#161 withdraws the leave #150 added on top of that exit. HQ's ruling is "STAY,
+silent, no retry": residency of a dormant group costs nothing measurable while
+eviction is irreversible, and the departed admins' rows are EVIDENCE, not
+garbage. So the orphaned class is a pause and nothing else — no leave, no
+`retire_group`, no `perform_complete_group_cleanup`. It also gates the class on
+positive evidence: a group with NO admins on file is a data gap, not a group
+whose humans all blocked us, and it keeps the ordinary hold.
 """
 
 import logging
@@ -42,9 +49,11 @@ from ..common.utils import (
 from ..database import get_admin, get_group
 from ..database.group_operations import (
     clear_no_rights_detected_at,
+    count_registered_admins,
     get_discussion_group_id,
     get_groups_with_no_rights_past_grace,
     get_protected_channel_ids,
+    has_human_admin,
     pause_group_preserving_data,
 )
 from ..i18n import resolve_lang, t
@@ -83,6 +92,26 @@ async def notify_degraded_admin_rights(degraded: list[dict]) -> int:
             logger.warning(
                 f"No-rights notify: {format_chat_log(group_id, entry.get('title'))} "
                 "is a degraded administrator with no known admin to tell"
+            )
+            continue
+
+        # #161: the ORPHANED class leaves the NOTIFICATION population. Every
+        # registered admin is dead, so a DM reaches nobody and the honest thing
+        # is not to send one — HQ's ruling is "STAY, silent, no retry". The group
+        # does NOT leave the INVENTORY population: `leave_no_rights_groups` pauses
+        # it and the digest prints it, so the operator still sees it. Silence to
+        # the customer, never silence to the operator.
+        # No `exclude_id` here on purpose: obtaining the bot's id costs a
+        # `bot.me()` round trip, and this guard is a courtesy, not the
+        # disposition. `leave_no_rights_groups` owns the real bot id and applies
+        # the predicate with it; the worst case here is a DM addressed to our own
+        # account in a group whose ONLY roster row is the bot — which fails at
+        # the API and tells nobody anything false.
+        if not await has_human_admin(group_id):
+            logger.info(
+                f"No-rights notify: {format_chat_log(group_id, entry.get('title'))} "
+                "has NO live human admin — orphaned, no DM sent (digest inventory "
+                "only)"
             )
             continue
 
@@ -137,84 +166,6 @@ async def _leave_group_and_record_for_notification(
             admin_to_left_groups[admin_id].append((group_id, display))
     return success
 
-
-async def _every_registered_admin_is_unreachable(group_id: int) -> bool:
-    """True when the group's registered admin set is non-empty and ALL blocked (#150).
-
-    #144's hold is licensed by its notify: a DM tells a human to tick one
-    checkbox. When every registered admin has `administrators.is_active = false`
-    (the bot is blocked), `notify_degraded_admin_rights` skips them all and sends
-    nothing — the hold then has no terminating condition at all.
-
-    An EMPTY admin set is a DIFFERENT class and returns False here: #144's notify
-    already warns "no known admin to tell", and "nobody is registered" is a data
-    gap, not a statement that every human is unreachable.
-
-    An admin row that cannot be read (`get_admin` → None) counts as REACHABLE, so
-    the hold stays. That is the fail-safe direction — holding preserves the
-    mappings, and it is also what the notify does (`if admin and not
-    admin.is_active: continue` DMs a `None` admin rather than skipping it).
-    """
-    group = await get_group(group_id)
-    admin_ids = list(group.admin_ids) if group and group.admin_ids else []
-    if not admin_ids:
-        return False
-    for admin_id in admin_ids:
-        admin = await get_admin(admin_id)
-        if admin is None or admin.is_active:
-            return False
-    return True
-
-
-async def _leave_after_terminal_pause(
-    group_id: int,
-    title: str | None,
-    username: str | None,
-) -> bool:
-    """#150: leave ONLY when the bot is the group's sole member. True if it left.
-
-    After the terminal pause there is nobody left for the preserved mappings to
-    serve when the bot is alone, and an administrator that cannot moderate is the
-    #143 lie one surface over. While ANY human remains, a leave would foreclose
-    the repair path (blocking the bot is reversible without re-adding it), so it
-    does not run.
-
-    Fail-safe by construction: leaving is the irreversible direction, so an
-    unreadable count — a raise, or anything that is not exactly `1` — means
-    pause-only. The pause is already applied by the caller either way.
-    """
-    try:
-        count = await bot.get_chat_member_count(group_id)
-    except Exception as e:  # noqa: BLE001
-        logger.warning(
-            f"Not leaving {format_chat_log(group_id, title, username)} after the "
-            f"terminal pause: member count unreadable ({e}) — pause-only, no leave"
-        )
-        return False
-
-    # `isinstance(count, bool)` first: bool is an int subclass and `True == 1`.
-    if isinstance(count, bool) or not isinstance(count, int) or count != 1:
-        logger.info(
-            f"Not leaving {format_chat_log(group_id, title, username)} after the "
-            f"terminal pause: member count reads {count!r}, not exactly 1"
-        )
-        return False
-
-    try:
-        await bot.leave_chat(group_id)
-    except Exception as e:  # noqa: BLE001
-        logger.warning(
-            f"Failed to leave {format_chat_log(group_id, title, username)} after "
-            f"the terminal pause (bot was the only member): {e}"
-        )
-        return False
-
-    logger.warning(
-        f"Left {format_chat_log(group_id, title, username)} after the terminal "
-        "pause: the bot was the group's ONLY member, so the preserved mappings "
-        "serve nobody and an administrator that cannot moderate must not squat"
-    )
-    return True
 
 
 async def leave_no_rights_groups() -> None:
@@ -302,9 +253,10 @@ async def leave_no_rights_groups() -> None:
                     # clock started, so there is nothing to send here.
                     #
                     # The destructive leg is disarmed FIRST, before any new
-                    # await: if the #150 probe below raises, `skip_leave` is
-                    # already True and the `if not skip_leave:` cleanup can
-                    # never run for a group we merely failed to classify.
+                    # await: if the #161 `has_human_admin` predicate below
+                    # raises, `skip_leave` is already True and the
+                    # `if not skip_leave:` cleanup can never run for a group we
+                    # merely failed to classify.
                     skip_leave = True
                     withheld = ", ".join(
                         name
@@ -314,39 +266,62 @@ async def leave_no_rights_groups() -> None:
                         )
                         if not granted
                     )
-                    if await _every_registered_admin_is_unreachable(group_id):
-                        # #150: the hold's licence (#144's notify) is void here —
-                        # every registered admin has blocked the bot, so no human
-                        # will ever tick the checkbox. Terminal: a STATUS write,
-                        # never the destructive path. `perform_complete_group_cleanup`
-                        # hard-deletes `group_administrators` + `approved_members`
-                        # and a re-add restores neither; `retire_group` would stamp
-                        # `bot_removed_at`, false because the bot is not removed.
-                        await pause_group_preserving_data(
-                            group_id,
-                            reason="no_rights_no_reachable_admin",
-                        )
-                        # Clearing the clock is what stops the 7-day re-stamp loop.
-                        # One-shot by construction, not by wording: both
-                        # populations filter `status = 'active'`
-                        # (`get_groups_with_no_rights_past_grace`,
-                        # `sweep_group_administrators`), so the pause above
-                        # removes this row from BOTH.
-                        await clear_no_rights_detected_at(group_id)
-                        logger.warning(
-                            f"Paused group {format_chat_log(group_id, title, username)}: "
-                            f"bot is an administrator without {withheld} and EVERY "
-                            "registered admin is unreachable (blocked the bot), so "
-                            "no human can repair the checkbox — terminal hold, "
-                            "mappings preserved, clock cleared, no further sweep "
-                            "will revisit it"
-                        )
-                        await _leave_after_terminal_pause(group_id, title, username)
-                    else:
+                    if await has_human_admin(group_id, exclude_id=bot_user_id):
                         logger.info(
                             f"Holding group {format_chat_log(group_id, title, username)}: "
                             f"bot is an administrator without {withheld} — not leaving "
                             "(repairable by permission change; flag kept)"
+                        )
+                    elif await count_registered_admins(group_id) == 0:
+                        # Absence of EVIDENCE, not evidence of absence. An empty
+                        # roster is a data gap (a sweep that never captured the
+                        # admin list), and #150's error was reading it as "every
+                        # human blocked the bot" and leaving. #161 is built on
+                        # positive evidence, so this case keeps the old hold: the
+                        # flag stays, the clock keeps running, nothing is written.
+                        logger.info(
+                            f"Holding group {format_chat_log(group_id, title, username)}: "
+                            f"bot is an administrator without {withheld} and NO admin "
+                            "is on file at all — data gap, not the orphaned class "
+                            "(flag kept, no pause)"
+                        )
+                    else:
+                        # #161: ORPHANED — the bot is an administrator with a right
+                        # withheld and there is no live human admin left to tick the
+                        # checkbox. #144's whole basis ("merely degraded — one
+                        # unticked checkbox — and leaving destroys approved_members,
+                        # which no re-add restores") presupposes a human who can
+                        # tick it; with zero humans the degradation is permanent and
+                        # the preserved rows are preserved for a return that cannot
+                        # occur.
+                        #
+                        # Disposition, HQ's ruling: STAY, silent, no retry. That is
+                        # a STATUS write plus a cleared clock, never the destructive
+                        # path and NEVER a leave: `perform_complete_group_cleanup`
+                        # hard-deletes `group_administrators` + `approved_members`
+                        # (the departed admin's rows are EVIDENCE, not garbage —
+                        # #161 obligation 2), and `retire_group` would stamp
+                        # `bot_removed_at`, false because the bot stays.
+                        #
+                        # #150's sole-member leave is WITHDRAWN by the same ruling:
+                        # residency of a dormant group costs nothing measurable,
+                        # while eviction is irreversible. Do not reintroduce it.
+                        await pause_group_preserving_data(
+                            group_id,
+                            reason="no_rights_orphaned_group",
+                        )
+                        # Clearing the clock is what stops the 7-day re-stamp loop.
+                        # One-shot by construction, not by wording: both populations
+                        # filter `status = 'active'` (`get_groups_with_no_rights_past_grace`,
+                        # `sweep_group_administrators`), so the pause above removes
+                        # this row from BOTH.
+                        await clear_no_rights_detected_at(group_id)
+                        logger.warning(
+                            f"Paused ORPHANED group {format_chat_log(group_id, title, username)}: "
+                            f"bot is an administrator without {withheld} and NO live "
+                            "human admin remains to repair the checkbox — terminal "
+                            "hold, mappings preserved, clock cleared, bot stays in "
+                            "the chat, no further sweep will revisit it"
                         )
         except Exception as e:
             if is_group_inaccessible_error(e):

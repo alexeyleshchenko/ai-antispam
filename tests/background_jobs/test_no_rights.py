@@ -458,6 +458,15 @@ async def test_degraded_administrator_is_held_and_never_left(
             "app.background_jobs.no_rights.clear_no_rights_detected_at",
             new_callable=AsyncMock,
         ) as mock_clear,
+        # The class under test is "degraded administrator": a human admin exists
+        # and can tick the checkbox. Stubbed so the arm does not depend on a
+        # live DB pool — before #161 it reached the real predicate and passed
+        # only when an earlier test had left a pool behind.
+        patch(
+            "app.background_jobs.no_rights.has_human_admin",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
     ):
         mock_load.return_value = {"billing": {"no_rights_grace_days": 7}}
         mock_get.return_value = [-1002496127723]
@@ -591,6 +600,11 @@ async def test_detection_dm_names_the_missing_right():
             new_callable=AsyncMock,
             return_value=True,
         ) as mock_send,
+        patch(
+            "app.background_jobs.no_rights.has_human_admin",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
     ):
         from app.database.models import Group
 
@@ -651,6 +665,11 @@ async def test_detection_dm_skips_inactive_admins():
         patch(
             "app.background_jobs.no_rights.send_admin_dm", new_callable=AsyncMock
         ) as mock_send,
+        patch(
+            "app.background_jobs.no_rights.has_human_admin",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
     ):
         from app.database.models import Group
 

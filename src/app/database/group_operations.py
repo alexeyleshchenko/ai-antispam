@@ -163,6 +163,146 @@ async def get_paying_admins(group_id: int) -> list[int]:
         return [row["admin_id"] for row in rows]
 
 
+# "Still a member of the group" is `group_administrators.is_admin_now`, the
+# column this codebase already uses for exactly that question ("Telegram still
+# lists them as an admin of that chat" — roster_predicates.py:9, where
+# BILLABLE_SEAT reads it as "is still an admin there"). It is POSITIVE evidence,
+# refreshed from Telegram's own admin list by the daily sweep, the bot-add
+# event and `chat_member` updates, and appearing on that list implies presence
+# in the chat. The alternatives were read and rejected:
+#   * `approved_members` is the MODERATION roster, not a membership roster —
+#     `validation` skips admins before `add_member` ever runs, so a live admin
+#     normally has no row there and requiring one would call a healthy group
+#     orphaned, which is the dangerous direction;
+#   * `member_joins` records joins OBSERVED while the bot was watching (#108),
+#     so its absence proves nothing at all.
+# `groups.status` is group-level, not per-admin: it records where the BOT
+# stands (active/paused/left). The predicate is deliberately blind to it — a
+# paused group whose owner is still active and still in the chat is precisely
+# the recoverable case this has to tell apart from a real orphan (#161).
+#
+# The bot's own id is NOT in the database: `bot.id` is parsed from the token by
+# aiogram at runtime. So "not the bot itself" is a PARAMETER (`exclude_id`),
+# never a hardcoded id. `GROUP_ANONYMOUS_BOT_ID` is excluded unconditionally —
+# a system account Telegram lists as an admin in anonymous-admin groups and
+# that no human can be (`status_handlers.py:521` filters it the same way).
+
+def _human_admin_where(
+    group_condition: str, params: list[int], exclude_id: int | None
+) -> tuple[str, list[int]]:
+    """The WHERE shared by `has_human_admin` and its batch variant.
+
+    `group_condition` brings its own placeholders ($1..$n, bound by `params`);
+    the two exclusion legs are numbered after them, so `$N` ascends in text
+    order. That is what the SQLite test adapter requires: it rewrites each `$N`
+    into its own `?` in the order the placeholders appear, and a condition
+    appended out of order desyncs the bindings.
+    """
+    conditions = [group_condition, "a.is_active = TRUE", "ga.is_admin_now = TRUE"]
+    params = list(params)
+    if exclude_id is not None:
+        params.append(exclude_id)
+        conditions.append(f"ga.admin_id <> ${len(params)}")
+    params.append(GROUP_ANONYMOUS_BOT_ID)
+    conditions.append(f"ga.admin_id <> ${len(params)}")
+    return " AND ".join(conditions), params
+
+
+async def has_human_admin(group_id: int, *, exclude_id: int | None = None) -> bool:
+    """Does this group have at least ONE human admin we could still reach?
+
+    HQ's ruling on #161, verbatim: "a group has a human admin iff there is at
+    least one `group_administrators` row for that group whose corresponding
+    `administrators` row has `is_active = TRUE`, who is still a member of the
+    group, and who is not the bot itself." At least one, not all: one active
+    owner is enough, and one dead seat does not veto them.
+
+    Read-only and status-blind — see the comment above for which column carries
+    "still a member", and why.
+
+    Args:
+        group_id: the `groups` primary key. That column is `group_id`, NOT
+            `chat_id`.
+        exclude_id: the bot's own Telegram user id, when the caller has one.
+            There is no bot id stored in the database, so it is passed in.
+    """
+    where, params = _human_admin_where("ga.group_id = $1", [group_id], exclude_id)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        exists = await conn.fetchval(
+            f"""
+            SELECT EXISTS(
+                SELECT 1
+                FROM group_administrators ga
+                JOIN administrators a ON a.admin_id = ga.admin_id
+                WHERE {where}
+            )
+        """,
+            *params,
+        )
+        return bool(exists)
+
+
+async def count_registered_admins(group_id: int) -> int:
+    """How many admins this group has on file, bots excluded.
+
+    Companion to `has_human_admin`, and it exists to keep #150's mistake from
+    returning in a new costume. `has_human_admin` answering False has two very
+    different causes, and only one of them is #161's ORPHANED class:
+
+    - we know admins and none of them is live  -> nobody can tick the checkbox;
+    - we know of NO admins at all              -> absence of EVIDENCE.
+
+    The second is a data gap (a failed `sweep_group_administrators`, a roster
+    never captured), not proof that every human blocked the bot. #150 read that
+    absence as proof and left a group whose only member was the bot, which is
+    why #161 was written around positive evidence only. A caller must therefore
+    ask this first: `count_registered_admins(gid) > 0 and not has_human_admin(gid)`.
+
+    `GROUP_ANONYMOUS_BOT_ID` is excluded because it is a system account no human
+    can be — a roster holding only that row has no admin we ever lost.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        count = await conn.fetchval(
+            "SELECT COUNT(*) FROM group_administrators "
+            "WHERE group_id = $1 AND admin_id <> $2",
+            group_id,
+            GROUP_ANONYMOUS_BOT_ID,
+        )
+        return int(count or 0)
+
+
+async def get_groups_with_human_admin(
+    group_ids: list[int], *, exclude_id: int | None = None
+) -> set[int]:
+    """The subset of `group_ids` for which `has_human_admin` answers True.
+
+    Same predicate, one query: an orphan sweep asks this for a page of groups,
+    and a per-group round trip would add an N+1 to a job that already reads
+    Telegram once per group. Empty input returns an empty set without touching
+    the database — `IN ()` is not valid SQL in either dialect.
+    """
+    if not group_ids:
+        return set()
+
+    where, params = _human_admin_where(
+        f"ga.group_id IN ({_in_placeholders(group_ids)})", group_ids, exclude_id
+    )
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT DISTINCT ga.group_id
+            FROM group_administrators ga
+            JOIN administrators a ON a.admin_id = ga.admin_id
+            WHERE {where}
+        """,
+            *params,
+        )
+        return {row["group_id"] for row in rows}
+
+
 async def deduct_credits_from_admins(group_id: int, amount: int) -> int:
     """
     Deduct credits from the admin with the highest balance
