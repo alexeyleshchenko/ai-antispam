@@ -348,3 +348,98 @@ def test_json_output_is_parseable():
     """--json must round-trip; a digest the cron cannot parse is a silent failure."""
     payload = {"verdict": "OK", "exit_code": 0, "reasons": []}
     assert json.loads(json.dumps(payload)) == payload
+
+# --- #161 obligation 1: orphans are inventory, never silence ---------------
+
+def test_orphan_inventory_line_names_each_group():
+    """One line per orphaned group, with its id, title and pause date."""
+    report = make_report(
+        generated_at="2026-11-21 15:00 UTC",
+        window_hours=24,
+        orphaned_groups={
+            "groups": [
+                {
+                    "group_id": "-1003751652625",
+                    "title": "Сервер Shadowraze",
+                    "since": "2026-11-16",
+                    "bot_left": "",
+                }
+            ]
+        }
+    )
+    text = probe.render_markdown(report, probe.OK, [])
+    assert "**Orphaned groups — inventory" in text
+    assert "- `-1003751652625` Сервер Shadowraze · paused since 2026-11-16" in text
+    # The bot never left, and the row says so rather than assuming it.
+    assert "bot stays" in text
+    assert "bot LEFT" not in text
+
+def test_orphan_inventory_states_a_leave_rather_than_hiding_it():
+    """A cleanup-stamped row reads `paused` too; the line must not claim a hold.
+
+    `bot_removed_at` is the only field that separates "paused and still in the
+    chat" from "paused because we left" — reading `status` alone cannot.
+    """
+    report = make_report(
+        generated_at="2026-11-21 15:00 UTC",
+        window_hours=24,
+        orphaned_groups={
+            "groups": [
+                {
+                    "group_id": "-1002496127723",
+                    "title": "g",
+                    "since": "2026-11-21",
+                    "bot_left": "2026-11-22",
+                }
+            ]
+        }
+    )
+    text = probe.render_markdown(report, probe.OK, [])
+    assert "bot LEFT 2026-11-22" in text
+    assert "bot stays" not in text
+
+def test_empty_orphan_inventory_is_stated_not_omitted():
+    """ "None" must be PRINTED — an absent section is indistinguishable from a
+    section that failed to run, which is how a group would hide by being silent.
+    """
+    text = probe.render_markdown(
+        make_report(
+            generated_at="2026-11-21 15:00 UTC",
+            window_hours=24,
+            orphaned_groups={"groups": []},
+        ),
+        probe.OK,
+        [],
+    )
+    assert "**Orphaned groups — inventory" in text
+    assert "- none" in text
+
+def test_unreadable_orphan_inventory_is_not_reported_as_none():
+    """A read failure is UNREADABLE, never "none": the two are different answers."""
+    report = make_report(
+        generated_at="2026-11-21 15:00 UTC",
+        window_hours=24,
+        orphaned_groups={"error": "ssh: connect to host apps port 22", "groups": []}
+    )
+    text = probe.render_markdown(report, probe.OK, [])
+    assert "inventory UNREADABLE" in text
+    assert "- none" not in text
+
+def test_orphan_query_matches_the_legacy_reason_too():
+    """#150's name for the same class is still on rows already written.
+
+    A rename cannot rewrite history, so a digest matching only the new string
+    would silently drop the older orphans — the exact failure obligation 1
+    forbids.
+    """
+    # Assert against the QUERY the runner actually sends, not the helper: a
+    # guard on the helper alone passes even if the query stops using it.
+    query = probe._orphan_query()
+    assert probe.ORPHAN_PAUSE_REASON in query
+    assert probe.LEGACY_ORPHAN_PAUSE_REASONS, "the legacy set must not be empty"
+    for legacy in probe.LEGACY_ORPHAN_PAUSE_REASONS:
+        assert legacy in query
+    # A paused group the bot LEFT is still an orphan: status alone cannot tell
+    # a hold from a leave, so the query must not filter on bot_removed_at.
+    assert "bot_removed_at::date::text" in query
+    assert "bot_removed_at IS NULL" not in query

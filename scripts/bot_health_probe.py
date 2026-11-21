@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import subprocess
 import sys
 import time
@@ -51,6 +52,19 @@ IMAGE = "ghcr.io/leshchenko1979/ai-antispam:main"
 REGISTRY_REPO = "leshchenko1979/ai-antispam"
 PUBLIC_HEALTH_URL = "https://ai-antispam.l1979.ru/health"
 EXPECTED_WEBHOOK_URL = "https://ai-antispam.l1979.ru/process-tg-updates"
+
+# #161: the pause reason that marks a group ORPHANED — the bot is an
+# administrator with a right withheld and no live human admin is left to tick
+# the checkbox. Such a group gets a status write and nothing else: no DM, no
+# grace clock, no leave.
+ORPHAN_PAUSE_REASON = "no_rights_orphaned_group"
+
+# #150's name for the SAME class, withdrawn by #161 but still carried by rows
+# already written to `entity_events` (2 as of 2026-11-21). The reason string is
+# stored on the event, so renaming the writer cannot rename history: the
+# inventory must match BOTH names or the older orphans vanish from the digest —
+# a group hiding by being silent, which is exactly what obligation 1 forbids.
+LEGACY_ORPHAN_PAUSE_REASONS = ("no_rights_no_reachable_admin",)
 
 THRESHOLDS = {
     "health_max_seconds": 2.0,
@@ -339,6 +353,70 @@ def check_image_digest(container: dict) -> dict:
     }
 
 
+def _orphan_reason_list() -> str:
+    """SQL literal list of every pause reason that means ORPHANED."""
+    reasons = (ORPHAN_PAUSE_REASON, *LEGACY_ORPHAN_PAUSE_REASONS)
+    return ", ".join(f"'{r}'" for r in reasons)
+
+
+def _orphan_query() -> str:
+    """The inventory SELECT. Separate from the runner so a test can read it."""
+    return (
+        "SELECT DISTINCT ON (g.group_id) g.group_id, g.title, e.created_at::date, "
+        "coalesce(g.bot_removed_at::date::text, '') "
+        "FROM entity_events e JOIN groups g ON g.group_id = e.entity_id "
+        "WHERE e.entity_type = 'group' AND e.action = 'group_paused' "
+        f"AND e.reason IN ({_orphan_reason_list()}) AND g.status = 'paused' "
+        "ORDER BY g.group_id, e.created_at DESC"
+    )
+
+
+def check_orphaned_groups() -> dict:
+    """INVENTORY of paused ORPHANED groups (#161 obligation 1).
+
+    An orphan leaves the NOTIFICATION population — no DM, because every
+    registered admin is gone — but it must NOT leave the INVENTORY population.
+    This leg is the carrier: one line per orphaned group, printed every day, so
+    the state is VISIBLE instead of silently absent. "Never able to hide by
+    being silent" is the obligation's own wording.
+
+    An orphan is identified by its PAUSE RECORD, not by inferring it from the
+    current roster: `entity_events` carries `action='group_paused'` with the
+    reason `no_rights_orphaned_group`. The roster is not consulted because a
+    group can be paused for several reasons and re-deriving "why" from live
+    state after the fact is a guess; the event is the record of what happened.
+
+    `g.status = 'paused'` keeps the list honest over time: a re-add reactivates
+    the group (E+C policy), and a reactivated group is no longer an orphan.
+
+    A read failure is reported as an ERROR, never as "none" — the distinction
+    between "no orphans" and "I could not look" is the whole point of the leg.
+    """
+    rc, out, err = remote(
+        "docker exec postgres psql -U postgres -d ai_spam_bot -At -F'|' -c "
+        + shlex.quote(_orphan_query())
+    )
+    if rc != 0:
+        return {"error": (err or out).strip()[:200] or f"rc={rc}", "groups": []}
+
+    groups = []
+    for line in out.splitlines():
+        parts = line.split("|", 3)
+        if len(parts) != 4:
+            continue
+        groups.append(
+            {
+                "group_id": parts[0],
+                "title": parts[1],
+                "since": parts[2],
+                # Empty means the bot never left — the #161 disposition. A date
+                # means a cleanup stamped it, which the row must SAY rather than
+                # let the header's "bot stays" assert falsely.
+                "bot_left": parts[3],
+            }
+        )
+    return {"groups": groups}
+
 def check_log_window(hours: int) -> dict:
     script = f"docker logs --since {hours}h {container_name()} 2>&1 | awk '{LOG_WINDOW_AWK}'"
     rc, out, err = remote(script, timeout=120)
@@ -543,6 +621,19 @@ def render_markdown(report: dict, verdict: int, reasons: list[str]) -> str:
         ),
         render_llm_row(logs, report.get("llm_topology", {})),
     ]
+    orphans = report.get("orphaned_groups") or {}
+    lines += ["", "**Orphaned groups — inventory (paused, no live human admin)**"]
+    if orphans.get("error"):
+        lines.append(f"- ⚠️ inventory UNREADABLE: {orphans['error']}")
+    elif not orphans.get("groups"):
+        lines.append("- none")
+    else:
+        lines += [
+            f"- `{g['group_id']}` {g['title']} · paused since {g['since']} · "
+            + (f"bot LEFT {g['bot_left']}" if g.get("bot_left") else "bot stays")
+            for g in orphans["groups"]
+        ]
+
     if reasons:
         lines += ["", "**Why not OK**"] + [f"- {r}" for r in reasons]
     return "\n".join(lines)
@@ -577,6 +668,9 @@ def main() -> int:
         # Read the hop's state so the digest can be honest about which path
         # actually served (board #117).
         "llm_topology": {"gateway_enabled": read_gateway_enabled()},
+        # #161 obligation 1: orphans leave the NOTIFICATION population but stay
+        # in the INVENTORY one. Read every run, so the list cannot rot.
+        "orphaned_groups": check_orphaned_groups(),
     }
     report["image_digest"] = check_image_digest(report["container"])
 
