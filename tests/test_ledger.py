@@ -1350,7 +1350,9 @@ def main() -> int:
         write_ledger(rec, ("intake", "#98"), ("claim", "#98"), ("close", "#98"))
         r = run(rec, "verify")
         check("a ledger with no reconstruction prints no reconstructed line",
-              r.returncode == 0 and "reconstructed claim:" not in r.stdout,
+              r.returncode == 0 and "reconstructed claim:" not in r.stdout
+              and "reconstructed intake:" not in r.stdout
+              and "reconstructed rows examined: 0 (0 claim, 0 intake)" in r.stdout,
               r.stdout.strip().splitlines()[-1] if r.stdout else "")
 
         set_detail(rec, 1, "Taken on acceptance of the dispatch. claim=reconstructed")
@@ -1374,6 +1376,85 @@ def main() -> int:
         r = run(quote, "verify")
         check("a non-claim row that quotes the token is not a reconstruction",
               r.returncode == 0 and "reconstructed claim:" not in r.stdout,
+              r.stdout.strip().splitlines()[-1] if r.stdout else "")
+
+        # THE INTAKE ARM (#111 option A, HQ ruling 2026-11-06T00:37:14Z). The 2026-10-04
+        # board migration renumbered every service unit, so a pre-migration `claim`/`intake`
+        # keeps its OLD-number subject and the canonical-number leg is rebuilt by a
+        # reconstructed intake declaring `intake=reconstructed` plus a `BASIS:` line. That
+        # token was written by the recipe and read by NOTHING — the population was scoped to
+        # the event name `claim` — so a basis-less intake was indistinguishable from one that
+        # named its basis. Four directions here, and the fourth is the one a one-sided probe
+        # misses: the line must APPEAR for a token-bearing intake, must say `basis=MISSING`
+        # when no `BASIS:` line is present, must not appear for another event carrying the
+        # same token, and the population count must name BOTH arms.
+        intake_rec = Path(tmp) / "rec-intake.jsonl"
+        write_ledger(intake_rec, ("intake", "#111"), ("claim", "#111"), ("close", "#111"))
+        set_detail(intake_rec, 0,
+                   "Reconstructed intake for the CANONICAL-number leg. intake=reconstructed "
+                   "BASIS: the original intake n=150 on subject #75, renumbered to #108 by "
+                   "docs/board-migration/number-map.json")
+        r = run(intake_rec, "verify")
+        check("a reconstructed INTAKE prints its line and is counted in the intake arm",
+              r.returncode == 0
+              and "reconstructed intake: n=1 (subject #111) basis=declared" in r.stdout
+              and "reconstructed rows examined: 1 (0 claim, 1 intake)" in r.stdout,
+              r.stdout.strip().splitlines()[-1] if r.stdout else "")
+
+        # The leg that closes #111's own defect: the token is READ, so a reconstruction that
+        # names no basis is VISIBLE. Before the intake arm this row printed nothing at all,
+        # and `names_basis` returning True (or the arm being dropped) makes this leg fail.
+        set_detail(intake_rec, 0,
+                   "Reconstructed intake for the CANONICAL-number leg. intake=reconstructed")
+        r = run(intake_rec, "verify")
+        check("a reconstructed intake naming NO basis is VISIBLE as basis=MISSING",
+              r.returncode == 0
+              and "reconstructed intake: n=1 (subject #111) basis=MISSING" in r.stdout,
+              r.stdout.strip().splitlines()[-1] if r.stdout else "")
+
+        # THE EVENT SCOPE, the other direction: `intake=reconstructed` on a CLAIM row is not
+        # a reconstructed intake, and that claim carries no `claim=reconstructed` either, so
+        # the population is EMPTY. Without this leg a key-scoped predicate would be a
+        # token-scoped one, and a row quoting its sibling's token would join the population.
+        key_scope = Path(tmp) / "rec-key-scope.jsonl"
+        write_ledger(key_scope, ("intake", "#111"), ("claim", "#111"), ("close", "#111"))
+        set_detail(key_scope, 1,
+                   "Written late. intake=reconstructed BASIS: quoted from the sibling intake")
+        r = run(key_scope, "verify")
+        check("a CLAIM row carrying the INTAKE token is not a reconstructed intake",
+              r.returncode == 0
+              and "reconstructed intake:" not in r.stdout
+              and "reconstructed rows examined: 0 (0 claim, 0 intake)" in r.stdout,
+              r.stdout.strip().splitlines()[-1] if r.stdout else "")
+
+        # And a RULING row that merely QUOTES the intake token is out of the population, the
+        # `n=602` need one arm over: the token is read LEXICALLY, so the EVENT is the scope
+        # that keeps a definition from reading as a declaration.
+        quoted_intake = Path(tmp) / "rec-intake-quoted.jsonl"
+        write_ledger(quoted_intake, ("intake", "#111"), ("claim", "#111"),
+                     ("close", "#111"), ("ruling", "#111"))
+        set_detail(quoted_intake, 3,
+                   "States the token intake=reconstructed that the #111 recipe defines.")
+        r = run(quoted_intake, "verify")
+        check("a RULING row that quotes the intake token is not a reconstruction",
+              r.returncode == 0
+              and "reconstructed intake:" not in r.stdout
+              and "reconstructed rows examined: 0 (0 claim, 0 intake)" in r.stdout,
+              r.stdout.strip().splitlines()[-1] if r.stdout else "")
+
+        # BOTH ARMS, ONE POPULATION: a ledger carrying a reconstructed intake AND a
+        # reconstructed claim prints one line per member and a count that names each arm,
+        # so neither arm can be silently absent from the instrument that reads it.
+        both_arms = Path(tmp) / "rec-both-arms.jsonl"
+        write_ledger(both_arms, ("intake", "#111"), ("claim", "#111"), ("close", "#111"))
+        set_detail(both_arms, 0, "intake=reconstructed BASIS: the pre-migration intake n=150")
+        set_detail(both_arms, 1, "claim=reconstructed BASIS: taken after the intake repair")
+        r = run(both_arms, "verify")
+        check("both arms are ONE population and both print",
+              r.returncode == 0
+              and "reconstructed rows examined: 2 (1 claim, 1 intake)" in r.stdout
+              and "reconstructed intake: n=1 (subject #111) basis=declared" in r.stdout
+              and "reconstructed claim: n=2 (subject #111) interval=" in r.stdout,
               r.stdout.strip().splitlines()[-1] if r.stdout else "")
 
         # Not collapsed: one ledger exercising BOTH a pre-gate exemption and a

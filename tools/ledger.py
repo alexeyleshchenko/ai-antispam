@@ -157,7 +157,14 @@ from field_predicate import (
 # self-declaration, on the same bare-neighbour import and for the same reason: two private
 # copies of one predicate drift in silence, and the drift lands on exactly the rows that
 # matter (`n=405` clause 5, `n=599`).
-from reconstruction import interval_line, reconstructed_claims
+from reconstruction import (
+    intake_line,
+    interval_line,
+    names_basis,
+    population_line,
+    reconstructed_claims,
+    reconstructed_intakes,
+)
 
 # THE REPO COMES FROM THIS FILE'S OWN LOCATION, NOT FROM THE CALLER'S CWD -- so a probe
 # run from a throwaway git repo still reads and WRITES the production ledger, and `cd`
@@ -2308,6 +2315,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
         f"reissue partitions: {_declared_partitions} declared, "
         f"{len(partition_notices)} applied")
     print(f"refs examined: {refs_examined}")
+    # THE RECONSTRUCTION POPULATION, PRINTED WITH ITS COUNT ON BOTH PATHS (#111 option A,
+    # HQ ruling 2026-11-06T00:37:14Z). The count is split by arm and printed even at zero,
+    # because a zero that came from a reader which cannot see a token reads exactly like a
+    # zero that came from a ledger carrying none (rule 7) — and the population has TWO arms,
+    # so one number over both would hide which arm the reader can actually see.
+    print(population_line(rows))
     # The dispatch leg's population, printed BESIDE the verdict rather than implied by
     # it — a leg that examined nothing must not read as one that examined the ledger.
     print(
@@ -2342,11 +2355,23 @@ def cmd_verify(args: argparse.Namespace) -> int:
         # declaring and never the interval — the close row's `ts` is assigned by whoever
         # appends the close, under the append lock. So the reader recomputes it from the
         # two rows' own `ts` values and PRINTS it. Both the population predicate and the
-        # interval come from `tools/reconstruction.py`, shared with
-        # `tests/test_reconstructed_claim_declared.py` — one field predicate, one home
+        # interval come from `tools/reconstruction.py` — one field predicate, one home
         # (`n=405` clause 5, `n=599`), never a private copy that can drift in silence.
+        #
+        # THE INTAKE ARM (#111 option A, HQ ruling 2026-11-06T00:37:14Z). A reconstructed
+        # intake declares `intake=reconstructed` plus a `BASIS:` line, and until this arm
+        # existed that token was written by the migration recipe and read by NOTHING — the
+        # population was scoped to the event name `claim`, so a basis-less intake was
+        # indistinguishable from one that named its basis. Intakes whose basis IS declared
+        # print here, beside the claims. The ones that name NO basis print BELOW the
+        # verdict branch, on BOTH paths, for the reason `malformed subject` and `multiple
+        # closes` do: a defect with no in-place repair must stay visible even when another
+        # problem is what made the ledger dirty, or a reader never meets it at all.
         for row in reconstructed_claims(rows):
             print(f"  {interval_line(row, rows)}")
+        for row in reconstructed_intakes(rows):
+            if names_basis(row.get("detail") or ""):
+                print(f"  {intake_line(row)}")
         for subject, line_no, ts in dispatch_excused:
             print(
                 f"  excused: dispatch of {subject} at line {line_no} ({ts}) precedes "
@@ -2354,6 +2379,13 @@ def cmd_verify(args: argparse.Namespace) -> int:
                 f"been enforced before {DISPATCH_LEG_BOUNDARY}"
             )
         rc = 0
+    # A RECONSTRUCTED INTAKE THAT NAMES NO BASIS PRINTS ON BOTH PATHS (#111 option A).
+    # It is a finding about the ROW, like `malformed subject` below, and it must be visible
+    # even when the ledger is otherwise dirty — the alternative is a reader who only meets
+    # it on the runs where nothing else was wrong.
+    for row in reconstructed_intakes(rows):
+        if not names_basis(row.get("detail") or ""):
+            print(f"  {intake_line(row)}")
     # The malformed population prints on BOTH paths: a row whose subject cannot be
     # resolved is a finding about the ROW, and it stays visible even when the ledger is
     # otherwise clean — which is the only way a reader meets it at all.
