@@ -36,6 +36,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import UTC, datetime
 
@@ -65,6 +66,23 @@ ORPHAN_PAUSE_REASON = "no_rights_orphaned_group"
 # inventory must match BOTH names or the older orphans vanish from the digest —
 # a group hiding by being silent, which is exactly what obligation 1 forbids.
 LEGACY_ORPHAN_PAUSE_REASONS = ("no_rights_no_reachable_admin",)
+
+# #162: a TERMINAL row is outside every grace population, because both
+# `get_groups_with_no_rights_past_grace` and `sweep_group_administrators` filter
+# `status = 'active'`. So once a row is stamped terminal nothing ever looks at
+# it again — if the bot is in fact still sitting in that supergroup, no job will
+# notice, forever. This leg is the only reader.
+#
+# It REPORTS and never rewrites. Re-stamping a row `active` to make a job visit
+# it is a `status` write, and #144's scope keeps `status` ownership with the
+# grace job alone; a second writer of `status` is exactly what #144 refused.
+TERMINAL_STATUSES = ("left", "paused", "retired")
+
+# Telegram member statuses that mean the bot IS in the chat. `restricted` is
+# deliberately absent: it counts only when `is_member` is true, which the caller
+# checks separately, because a restricted non-member has been thrown out and
+# still reports `restricted`.
+PRESENT_MEMBER_STATUSES = ("creator", "administrator", "member")
 
 THRESHOLDS = {
     "health_max_seconds": 2.0,
@@ -417,6 +435,141 @@ def check_orphaned_groups() -> dict:
         )
     return {"groups": groups}
 
+def _terminal_rows_query() -> str:
+    """The reconcile SELECT. Separate from the runner so a test can read it.
+
+    `bot_removed_at IS NOT NULL` is the whole premise: a row with no stamp has
+    never claimed the bot left, so there is nothing to contradict.
+    """
+    quoted = ", ".join(f"'{s}'" for s in TERMINAL_STATUSES)
+    return (
+        "SELECT group_id, coalesce(title, ''), status, "
+        "bot_removed_at::text, coalesce(moderation_enabled::text, '') "
+        "FROM groups "
+        f"WHERE status IN ({quoted}) AND bot_removed_at IS NOT NULL "
+        "ORDER BY bot_removed_at"
+    )
+
+def _tg_call(token: str, method: str, params: dict) -> tuple[dict | None, str | None]:
+    """One Bot API call, returning (result, error_kind).
+
+    `error_kind` is a CLASS, never a response body: the request URL carries the
+    token and Telegram echoes request context in some error strings. The one
+    body inspected is matched to a fixed literal ("chat not found") and then
+    discarded — that answer is not an error, it is Telegram telling us the bot
+    is genuinely out of the chat, which is the NO-DIVERGENCE case.
+    """
+    url = f"https://api.telegram.org/bot{token}/{method}"
+    data = urllib.parse.urlencode(params).encode()
+    try:
+        req = urllib.request.Request(
+            url, data=data, headers={"User-Agent": "ai-antispam-health-probe/1"}
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            payload = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        try:
+            description = str(json.loads(exc.read().decode()).get("description", ""))
+        except Exception:  # noqa: BLE001
+            description = ""
+        if "chat not found" in description.lower():
+            return None, "absent"
+        return None, f"HTTP {exc.code}"
+    except Exception as exc:  # noqa: BLE001
+        return None, type(exc).__name__
+    if not payload.get("ok"):
+        return None, "ok=false"
+    return payload.get("result"), None
+
+def check_terminal_row_membership(token: str | None) -> dict:
+    """RECONCILE terminal group rows against live membership (#162).
+
+    A row stamped `left`/`paused`/`retired` with a `bot_removed_at` is outside
+    both grace populations by status, so no job ever visits it again. If the bot
+    is in fact still in that supergroup, the stamp is wrong and nothing will
+    ever say so — the group would sit unmoderated, outside every population,
+    silently, which is #41's failure shape one surface over.
+
+    This leg reads live membership for every such row and reports each
+    contradiction. It NEVER rewrites the row: deciding which of the two
+    artifacts is wrong is a `status` write, and #144 keeps that with the grace
+    job alone. The output is an INVENTORY the digest prints daily.
+
+    Three outcomes are kept distinct, because collapsing them is how a broken
+    instrument reads clean:
+      - `divergences` — live says the bot is present, the row says it left.
+      - `verified_absent` — Telegram itself answered "chat not found"; the
+        stamp is right and this is the expected case.
+      - `unverified` — we could not ask (network, 5xx, timeout). Neither
+        healthy nor divergent; reported so "could not look" never prints as
+        "none".
+    """
+    rc, out, err = remote(
+        "docker exec postgres psql -U postgres -d ai_spam_bot -At -F'|' -c "
+        + shlex.quote(_terminal_rows_query())
+    )
+    if rc != 0:
+        return {
+            "error": (err or out).strip()[:200] or f"rc={rc}",
+            "divergences": [],
+            "examined": 0,
+        }
+    if not token:
+        return {
+            "error": "bot token unavailable",
+            "divergences": [],
+            "examined": 0,
+        }
+
+    me, me_error = _tg_call(token, "getMe", {})
+    if me_error or not me:
+        return {
+            "error": f"getMe failed: {me_error or 'no result'}",
+            "divergences": [],
+            "examined": 0,
+        }
+    bot_id = me.get("id")
+
+    divergences: list[dict] = []
+    unverified: list[dict] = []
+    examined = 0
+    for line in out.splitlines():
+        parts = line.split("|", 4)
+        if len(parts) != 5:
+            continue
+        group_id, title, status, removed_at, moderation = parts
+        examined += 1
+        member, member_error = _tg_call(
+            token, "getChatMember", {"chat_id": group_id, "user_id": bot_id}
+        )
+        if member_error == "absent":
+            continue
+        if member_error or not member:
+            unverified.append(
+                {"group_id": group_id, "title": title, "reason": member_error or "no result"}
+            )
+            continue
+        live_status = str(member.get("status", ""))
+        present = live_status in PRESENT_MEMBER_STATUSES or (
+            live_status == "restricted" and bool(member.get("is_member"))
+        )
+        if present:
+            divergences.append(
+                {
+                    "group_id": group_id,
+                    "title": title,
+                    "stored_status": status,
+                    "bot_removed_at": removed_at,
+                    "live_membership": live_status,
+                    "moderation_enabled": moderation == "true",
+                }
+            )
+    return {
+        "examined": examined,
+        "divergences": divergences,
+        "unverified": unverified,
+    }
+
 def check_log_window(hours: int) -> dict:
     script = f"docker logs --since {hours}h {container_name()} 2>&1 | awk '{LOG_WINDOW_AWK}'"
     rc, out, err = remote(script, timeout=120)
@@ -634,6 +787,31 @@ def render_markdown(report: dict, verdict: int, reasons: list[str]) -> str:
             for g in orphans["groups"]
         ]
 
+    # #162: the only daily reader of a terminal row's stamp. A divergence means
+    # the row says the bot is gone while Telegram says it is still in the chat —
+    # and no job will ever revisit it, because both grace populations filter
+    # `status = 'active'`. Printed every run so it cannot hide by being silent.
+    terminal = report.get("terminal_rows") or {}
+    if terminal:
+        lines += ["", "**Terminal rows — reconciled against live membership (#162)**"]
+        if terminal.get("error"):
+            lines.append(f"- ⚠️ reconcile UNREADABLE: {terminal['error']}")
+        elif not terminal.get("divergences"):
+            lines.append(
+                f"- no divergence ({terminal.get('examined', 0)} terminal row(s) checked)"
+            )
+        else:
+            lines += [
+                f"- ⚠️ `{d['group_id']}` {d['title']} · stored `{d['stored_status']}` "
+                f"stamped {d['bot_removed_at']} · LIVE `{d['live_membership']}`"
+                + (" · moderation ON" if d["moderation_enabled"] else "")
+                for d in terminal["divergences"]
+            ]
+        for u in terminal.get("unverified", []):
+            lines.append(
+                f"- ⚠️ `{u['group_id']}` {u['title']} · could not verify: {u['reason']}"
+            )
+
     if reasons:
         lines += ["", "**Why not OK**"] + [f"- {r}" for r in reasons]
     return "\n".join(lines)
@@ -671,6 +849,9 @@ def main() -> int:
         # #161 obligation 1: orphans leave the NOTIFICATION population but stay
         # in the INVENTORY one. Read every run, so the list cannot rot.
         "orphaned_groups": check_orphaned_groups(),
+        # #162: a terminal row is outside every grace population, so this is the
+        # only place its stamp is ever checked against live membership.
+        "terminal_rows": check_terminal_row_membership(_TOKEN),
     }
     report["image_digest"] = check_image_digest(report["container"])
 

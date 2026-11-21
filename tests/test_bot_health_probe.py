@@ -443,3 +443,145 @@ def test_orphan_query_matches_the_legacy_reason_too():
     # a hold from a leave, so the query must not filter on bot_removed_at.
     assert "bot_removed_at::date::text" in query
     assert "bot_removed_at IS NULL" not in query
+
+# --- #162: terminal rows reconciled against live membership -----------------
+#
+# A row stamped `left`/`paused`/`retired` is outside BOTH grace populations
+# (they filter `status = 'active'`), so no job ever revisits it. If the bot is
+# still in that chat, nothing else in the system can notice. These tests pin
+# both directions plus the third outcome that is neither: we could not ask.
+
+def _fake_remote(rows: str, rc: int = 0, err: str = ""):
+    def _remote(command, *args, **kwargs):
+        return rc, rows, err
+
+    return _remote
+
+def _fake_tg(member: dict | None, member_error: str | None = None):
+    """getMe answers with a bot id; getChatMember answers with `member`."""
+
+    def _call(token, method, params):
+        if method == "getMe":
+            return {"id": 4242, "is_bot": True}, None
+        assert method == "getChatMember"
+        assert params["user_id"] == 4242
+        return member, member_error
+
+    return _call
+
+TERMINAL_ROW = "-1002496127723|блатные чупани|left|2026-11-16 21:01:08+00|true\n"
+
+def test_terminal_row_with_bot_still_present_is_a_divergence(monkeypatch):
+    """The row says the bot left; Telegram says it is an administrator."""
+    monkeypatch.setattr(probe, "remote", _fake_remote(TERMINAL_ROW))
+    monkeypatch.setattr(
+        probe, "_tg_call", _fake_tg({"status": "administrator", "user": {"id": 4242}})
+    )
+
+    result = probe.check_terminal_row_membership("token")
+
+    assert result["examined"] == 1
+    assert len(result["divergences"]) == 1
+    d = result["divergences"][0]
+    assert d["group_id"] == "-1002496127723"
+    assert d["stored_status"] == "left"
+    assert d["live_membership"] == "administrator"
+    assert d["bot_removed_at"].startswith("2026-11-16 21:01:08")
+    assert d["moderation_enabled"] is True
+
+def test_terminal_row_with_bot_genuinely_absent_is_not_a_divergence(monkeypatch):
+    """`chat not found` is Telegram confirming the stamp, not an error.
+
+    This is the measured normal for -1002496127723. If this case were reported
+    as a divergence the leg would cry wolf on every terminal row in the table.
+    """
+    monkeypatch.setattr(probe, "remote", _fake_remote(TERMINAL_ROW))
+    monkeypatch.setattr(probe, "_tg_call", _fake_tg(None, "absent"))
+
+    result = probe.check_terminal_row_membership("token")
+
+    assert result["examined"] == 1
+    assert result["divergences"] == []
+    assert result["unverified"] == []
+
+def test_terminal_reconcile_read_failure_is_an_error_not_a_clean_bill(monkeypatch):
+    """`could not look` must never render as `nothing wrong`."""
+    monkeypatch.setattr(probe, "remote", _fake_remote("", rc=2, err="ssh: connect failed"))
+    monkeypatch.setattr(probe, "_tg_call", _fake_tg({"status": "member"}))
+
+    result = probe.check_terminal_row_membership("token")
+
+    assert "connect failed" in result["error"]
+    # The dangerous shape would be divergences == [] with no error key.
+    assert result["examined"] == 0
+
+def test_terminal_reconcile_unverifiable_row_is_reported_not_silently_passed(monkeypatch):
+    """A 5xx/timeout is neither healthy nor divergent — it gets its own bucket."""
+    monkeypatch.setattr(probe, "remote", _fake_remote(TERMINAL_ROW))
+    monkeypatch.setattr(probe, "_tg_call", _fake_tg(None, "HTTP 500"))
+
+    result = probe.check_terminal_row_membership("token")
+
+    assert result["divergences"] == []
+    assert len(result["unverified"]) == 1
+    assert result["unverified"][0]["reason"] == "HTTP 500"
+
+def test_restricted_counts_as_present_only_when_still_a_member(monkeypatch):
+    """A restricted bot that is still in the chat is present; one that is not is gone."""
+    monkeypatch.setattr(probe, "remote", _fake_remote(TERMINAL_ROW))
+    monkeypatch.setattr(probe, "_tg_call", _fake_tg({"status": "restricted", "is_member": True}))
+    assert len(probe.check_terminal_row_membership("token")["divergences"]) == 1
+
+    monkeypatch.setattr(
+        probe, "_tg_call", _fake_tg({"status": "restricted", "is_member": False})
+    )
+    assert probe.check_terminal_row_membership("token")["divergences"] == []
+
+def test_terminal_reconcile_is_report_only_by_construction():
+    """The leg must contain no write. #144 keeps `status` with the grace job."""
+    import inspect
+
+    source = inspect.getsource(probe.check_terminal_row_membership)
+    assert "UPDATE" not in source.upper()
+    assert "pause_group_preserving_data" not in source
+    assert "cleanup_group_data" not in source
+    # The SELECT is the only DB statement and it only reads.
+    assert probe._terminal_rows_query().lstrip().upper().startswith("SELECT")
+    assert "BOT_REMOVED_AT IS NOT NULL" in probe._terminal_rows_query().upper()
+
+def test_rendered_digest_names_the_divergence_with_both_artifacts():
+    """The digest must show stored status AND live status, or it is unusable."""
+    report = make_report(
+        generated_at="2026-11-21 15:00 UTC",
+        window_hours=24,
+        terminal_rows={
+            "examined": 20,
+            "divergences": [
+                {
+                    "group_id": "-1003751652625",
+                    "title": "Сервер Shadowraze",
+                    "stored_status": "paused",
+                    "bot_removed_at": "2026-11-16 21:01:08+00",
+                    "live_membership": "administrator",
+                    "moderation_enabled": True,
+                }
+            ],
+            "unverified": [],
+        },
+    )
+    text = probe.render_markdown(report, probe.OK, [])
+    assert "**Terminal rows — reconciled against live membership (#162)**" in text
+    assert "`-1003751652625` Сервер Shadowraze" in text
+    assert "stored `paused`" in text
+    assert "LIVE `administrator`" in text
+    assert "moderation ON" in text
+
+def test_rendered_digest_says_so_when_reconcile_could_not_run():
+    report = make_report(
+        generated_at="2026-11-21 15:00 UTC",
+        window_hours=24,
+        terminal_rows={"error": "ssh: connect failed", "divergences": [], "examined": 0},
+    )
+    text = probe.render_markdown(report, probe.OK, [])
+    assert "reconcile UNREADABLE" in text
+    assert "no divergence" not in text
