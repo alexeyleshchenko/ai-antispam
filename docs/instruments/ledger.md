@@ -53,7 +53,7 @@ the pair is what a member adopts; the manifest hashes the `TEMPLATE/` half (fram
 | 2 | `tools/ledger-index.py` ↔ `TEMPLATE/tools/ledger-index.py` | `standalone` | the derived index (§8) — `build`, `find`, `subject`, `touching`, `check` |
 | 3 | `tools/ledger_declaration.py` ↔ `TEMPLATE/tools/ledger_declaration.py` | `closure` | the authorized-actor matrix and the declaration readers (`ledger.py:73`) |
 | 4 | `tools/field_predicate.py` ↔ `TEMPLATE/tools/field_predicate.py` | `closure` | the shared field predicate — one field, one read (`ledger.py:87`, `reconstruction.py:26`) |
-| 5 | `tools/reconstruction.py` ↔ `TEMPLATE/tools/reconstruction.py` | `closure` | a reconstructed claim's basis, and its recomputed interval (`ledger.py:100`) |
+| 5 | `tools/reconstruction.py` ↔ `TEMPLATE/tools/reconstruction.py` | `closure` | a reconstruction's basis and the population — both arms, `claim=reconstructed` and `intake=reconstructed` — plus the claim's recomputed interval (`ledger.py:100`) |
 | 6 | `tests/ledger_boundary.py` ↔ `TEMPLATE/tests/ledger_boundary.py` | `closure` | the declared boundaries — a row before its boundary is excused (`test_ledger.py:53`); also gate 3 of §5 |
 | 7 | `tests/gate_fixtures.py` ↔ `TEMPLATE/tests/gate_fixtures.py` | `closure` | the staged-tool fixture (`test_ledger.py:52`, `test_ledger_identity.py`) — shared with other instruments' gates |
 | 8 | `tests/test_ledger.py` ↔ `TEMPLATE/tests/test_ledger.py` | `standalone` | **the gate** — the write path and the read path end to end |
@@ -702,7 +702,7 @@ re-opened subject must be re-claimed. Exemptions are listed explicitly by subjec
 PROOF in `EXEMPTIONS` inside `tools/ledger.py` and printed as `excused:` whenever one is used, so
 **"clean" and "excused" are never the same output**.
 
-### 9.4 A reconstructed claim declares itself and its basis, never an interval
+### 9.4 A reconstruction declares itself and its basis, never an interval
 
 A reconstruction declares **two facts the author controls** — the self-declaration token and the
 basis, named under the canonical marker `BASIS:` — and nothing else. It must **not** assert an
@@ -715,12 +715,50 @@ a property its author controls.** The interval therefore moves from DECLARED to
 **RECOMPUTED-AND-PRINTED**: the reader recomputes it from the two rows' own `ts` values, tool-sourced
 on both sides, with no typed expectation.
 
-The gate PRINTS the population it examined and is proven to BITE by a synthetic probe; its live
-population is legitimately EMPTY until the next reconstruction, so the loud-fail-on-zero form is
-the **wrong** guard here. Its boundary is declared in `docs/ledger-invariants.json`, and the five
-historical reconstructions are OUTSIDE its population: **nothing is backfilled.** The `claim_gap`
-token is withdrawn as a requirement (#115, n=687), and no hand-edit of a ledger row is ever lawful —
-the one-append-path rule stands, and a correction is a DECLARED DEVIATION, never precedent.
+**Two arms, one population, one predicate.** A reconstruction is a row that declares itself under
+the token for ITS OWN event — `claim=reconstructed` on an event `claim` row, `intake=reconstructed`
+on an event `intake` row — and both are first-class members of the one population
+`tools/reconstruction.py` reports (#111 option A, HQ ruling 2026-11-06T00:37:14Z). The intake arm
+is not decoration: the 2026-10-04 board migration renumbered every service unit, so a
+pre-migration `claim`/`intake` keeps its OLD-number subject and the canonical-number leg is rebuilt
+by a **reconstructed intake** that names the old intake row and the map entry under `BASIS:`. That
+token was written by the recipe and read by NOTHING until this arm landed, so a reconstructed
+intake naming no basis was indistinguishable from one that named it — the `#218` class, a
+declaration written and never read.
+
+**The form, stated once so it is not re-invented per run.** Both scopes are required, per arm: the
+EVENT scope keeps a ruling row that merely quotes a token out of the population (measured: `n=602`),
+and the TOKEN scope keeps an ordinary row out of it. The key is looked up FROM the event
+(`RECONSTRUCTION_KEYS`), so a `claim` row quoting `intake=reconstructed` is not a reconstructed
+intake and a `ruling` row quoting either is neither. The token is read VERBATIM —
+`intake=reconstructed.` is prose, not a declaration. The basis test is `names_basis()`, ONE
+function, reused by the printer and by the gate; a second copy of the marker check is the defect
+`§9.8` forbids.
+
+**What prints, and what judges.** `tools/ledger.py verify` prints the population it examined on
+BOTH paths — `reconstructed rows examined: N (X claim, Y intake)` — so a zero can never be read as
+"my pattern did not match the text the tool emits" (rule 7: a zero is a verdict only from a working
+instrument). It prints one line per member: `reconstructed claim: … interval=…` for the claim arm,
+`reconstructed intake: … basis=declared` or `basis=MISSING` for the intake arm. A MISSING basis
+prints on both paths, beside `malformed subject`, because a defect with no in-place repair must
+stay visible even when another problem is what made the ledger dirty. The TOOL prints; the GATE
+judges — the split the claim arm already had, and the reason `verify` stays a reader rather than
+growing a second verdict.
+
+**The gate, in this tree.** The kit's gate is `tests/test_reconstructed_claim_declared.py`; this
+factory does not carry it, and the absence is DECLARED as a PORT OWED in
+`registry/gate-deferrals.json` (its boundary key is already declared in
+`docs/ledger-invariants.json`). Until that port lands, the discriminating legs for BOTH arms live
+in `tests/test_ledger.py`'s reconstruction section: a token-bearing intake must print
+`basis=declared`, a basis-less one must print `basis=MISSING`, the printed count must name both
+arms at zero and at one, and neither a `claim` row carrying the intake token nor a `ruling` row
+quoting it may join the population. When the port lands, the gate PRINTS the population it
+examined and is proven to BITE by a synthetic probe; its live population is legitimately EMPTY
+until the next reconstruction, so the loud-fail-on-zero form is the **wrong** guard there — it
+takes the proportional guard, which skips with a stated reason. Historical reconstructions are
+OUTSIDE its population: **nothing is backfilled.** The `claim_gap` token is withdrawn as a
+requirement (#115, n=687), and no hand-edit of a ledger row is ever lawful — the one-append-path
+rule stands, and a correction is a DECLARED DEVIATION, never precedent.
 
 ### 9.5 A subject is `#N` or a descriptive stem — and `#N` is ONE board's
 
