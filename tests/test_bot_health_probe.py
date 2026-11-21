@@ -503,6 +503,66 @@ def test_terminal_row_with_bot_genuinely_absent_is_not_a_divergence(monkeypatch)
     assert result["examined"] == 1
     assert result["divergences"] == []
     assert result["unverified"] == []
+    # Confirmed-absent is its OWN count, not merely "not a divergence": the
+    # digest prints it, and a leg that cannot say how many stamps it confirmed
+    # cannot distinguish a verified inventory from an empty one.
+    assert result["verified_absent"] == 1
+
+def test_terminal_row_with_live_left_status_confirms_the_stamp(monkeypatch):
+    """The OTHER shape of absent: Telegram returns a record whose status is `left`.
+
+    Measured live at 2026-11-21: 20 terminal rows, 15 answering `chat not found`
+    and 4 answering with a `left` record. Both confirm the stamp. Counting only
+    the first shape leaves `examined` larger than the sum of its buckets, and a
+    total that cannot be reconciled against its own breakdown is a broken
+    instrument — the leg could then read clean while skipping rows.
+    """
+    monkeypatch.setattr(probe, "remote", _fake_remote(TERMINAL_ROW))
+    monkeypatch.setattr(probe, "_tg_call", _fake_tg({"status": "left", "user": {"id": 4242}}))
+
+    result = probe.check_terminal_row_membership("token")
+
+    assert result["examined"] == 1
+    assert result["divergences"] == []
+    assert result["verified_absent"] == 1
+
+def test_terminal_reconcile_buckets_account_for_every_row_examined(monkeypatch):
+    """Checksum: examined == verified_absent + divergences + unverified.
+
+    Four rows, one per outcome and one repeat, so no bucket can be satisfied by
+    a coincidental count. If any row can be read and land in no bucket, this
+    fails — which is what stops the leg reporting a clean bill over rows it
+    silently dropped.
+    """
+    rows = (
+        "-1|present|left|2026-11-16 21:01:08+00|true\n"
+        "-2|gone|left|2026-11-16 21:01:08+00|true\n"
+        "-3|leftrec|left|2026-11-16 21:01:08+00|true\n"
+        "-4|err|paused|2026-11-16 21:01:08+00|false\n"
+    )
+    monkeypatch.setattr(probe, "remote", _fake_remote(rows))
+
+    def _call(token, method, params):
+        if method == "getMe":
+            return {"id": 4242, "is_bot": True}, None
+        return {
+            "-1": ({"status": "administrator"}, None),
+            "-2": (None, "absent"),
+            "-3": ({"status": "left"}, None),
+            "-4": (None, "HTTP 500"),
+        }[params["chat_id"]]
+
+    monkeypatch.setattr(probe, "_tg_call", _call)
+
+    result = probe.check_terminal_row_membership("token")
+
+    assert result["examined"] == 4
+    assert len(result["divergences"]) == 1
+    assert result["verified_absent"] == 2
+    assert len(result["unverified"]) == 1
+    assert result["examined"] == (
+        result["verified_absent"] + len(result["divergences"]) + len(result["unverified"])
+    )
 
 def test_terminal_reconcile_read_failure_is_an_error_not_a_clean_bill(monkeypatch):
     """`could not look` must never render as `nothing wrong`."""

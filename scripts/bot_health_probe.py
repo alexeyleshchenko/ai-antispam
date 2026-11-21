@@ -513,12 +513,14 @@ def check_terminal_row_membership(token: str | None) -> dict:
             "error": (err or out).strip()[:200] or f"rc={rc}",
             "divergences": [],
             "examined": 0,
+            "verified_absent": 0,
         }
     if not token:
         return {
             "error": "bot token unavailable",
             "divergences": [],
             "examined": 0,
+            "verified_absent": 0,
         }
 
     me, me_error = _tg_call(token, "getMe", {})
@@ -527,12 +529,14 @@ def check_terminal_row_membership(token: str | None) -> dict:
             "error": f"getMe failed: {me_error or 'no result'}",
             "divergences": [],
             "examined": 0,
+            "verified_absent": 0,
         }
     bot_id = me.get("id")
 
     divergences: list[dict] = []
     unverified: list[dict] = []
     examined = 0
+    verified_absent = 0
     for line in out.splitlines():
         parts = line.split("|", 4)
         if len(parts) != 5:
@@ -543,6 +547,9 @@ def check_terminal_row_membership(token: str | None) -> dict:
             token, "getChatMember", {"chat_id": group_id, "user_id": bot_id}
         )
         if member_error == "absent":
+            # Telegram answered "chat not found": the stamp is CONFIRMED, which
+            # is the expected case and must not be folded into `examined`.
+            verified_absent += 1
             continue
         if member_error or not member:
             unverified.append(
@@ -564,8 +571,16 @@ def check_terminal_row_membership(token: str | None) -> dict:
                     "moderation_enabled": moderation == "true",
                 }
             )
+        else:
+            # Telegram returned a member record whose status is `left`/`kicked`:
+            # the bot is genuinely out, so the stamp is CONFIRMED. This is the
+            # second shape of "absent" and must be counted, or the three buckets
+            # stop summing to `examined` and the leg can no longer prove it
+            # accounted for every row it read.
+            verified_absent += 1
     return {
         "examined": examined,
+        "verified_absent": verified_absent,
         "divergences": divergences,
         "unverified": unverified,
     }
@@ -798,7 +813,9 @@ def render_markdown(report: dict, verdict: int, reasons: list[str]) -> str:
             lines.append(f"- ⚠️ reconcile UNREADABLE: {terminal['error']}")
         elif not terminal.get("divergences"):
             lines.append(
-                f"- no divergence ({terminal.get('examined', 0)} terminal row(s) checked)"
+                f"- no divergence ({terminal.get('examined', 0)} terminal row(s) checked: "
+                f"{terminal.get('verified_absent', 0)} confirmed absent by Telegram, "
+                f"{len(terminal.get('unverified', []))} unverifiable)"
             )
         else:
             lines += [
