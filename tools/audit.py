@@ -49,6 +49,203 @@ from field_predicate import (  # noqa: E402
 )
 from gate_budget import TIMEOUT_EXIT_CODE  # noqa: E402
 
+# #158 -- the gates' interpreter is RESOLVED, never inherited from the ambient `python3`.
+# The bare `python3` is an alternatives symlink that the host can flip (2026-11-20: one
+# `update-alternatives --set` to 3.12 turned 16 gates red with `No module named aiosqlite`),
+# and `sys.executable` only names whichever interpreter happened to launch this file. Both
+# are ambient. The audit's gates need the declared set below, so it resolves an interpreter
+# that PROVES it has them, in order: $AUDIT_GATE_PYTHON, then the pinned 3.14 path, then
+# the launching interpreter. If none proves it, the run fails once, by name, at the top.
+GATE_PYTHON_PINNED = "/usr/bin/python3.14"
+GATE_PYTHON_REQUIRED_IMPORTS = ("aiosqlite", "asyncpg")
+_GATE_PYTHON_CACHE: dict[str, Any] = {}
+
+
+def _interpreter_proves_requirements(candidate: str) -> str | None:
+    """Return None when `candidate` imports the declared set, else the named cause."""
+    probe = "import " + ", ".join(GATE_PYTHON_REQUIRED_IMPORTS)
+    try:
+        res = subprocess.run(
+            [candidate, "-c", probe],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"{type(exc).__name__}: {exc}"
+    if res.returncode == 0:
+        return None
+    return (res.stderr.strip().splitlines() or [f"exit {res.returncode}"])[-1]
+
+
+def resolve_gate_python() -> tuple[str | None, list[str]]:
+    """Resolve the gate interpreter. Returns (path or None, per-candidate causes)."""
+    if "resolved" in _GATE_PYTHON_CACHE:
+        return _GATE_PYTHON_CACHE["resolved"], _GATE_PYTHON_CACHE["causes"]
+    candidates: list[str] = []
+    override = os.environ.get("AUDIT_GATE_PYTHON", "").strip()
+    if override:
+        candidates.append(override)
+    candidates += [GATE_PYTHON_PINNED, sys.executable]
+    causes: list[str] = []
+    chosen: str | None = None
+    for cand in candidates:
+        cause = _interpreter_proves_requirements(cand)
+        if cause is None:
+            chosen = cand
+            break
+        causes.append(f"{cand}: {cause}")
+    _GATE_PYTHON_CACHE["resolved"] = chosen
+    _GATE_PYTHON_CACHE["causes"] = causes
+    return chosen, causes
+
+
+def gate_python() -> str:
+    """The interpreter every gate launch uses. Raises if preflight found none."""
+    chosen, causes = resolve_gate_python()
+    if chosen is None:
+        raise SystemExit(
+            "GATE INTERPRETER UNRESOLVED: no interpreter imports "
+            f"{', '.join(GATE_PYTHON_REQUIRED_IMPORTS)}. Tried -- " + " | ".join(causes)
+        )
+    return chosen
+
+# #158 clause 3 -- the interpreter is checked against the repo's OWN declaration BEFORE a
+# single gate launches. Clause 1 names the interpreter on the scorecard and clause 2 names a
+# dependency failure as ONE cause; this clause stops the wall from being hit at all. The
+# 2026-11-20 incident ran 60 gates under 3.12 against `requires-python = ">=3.14"`
+# (pyproject.toml:12) and published 16 failures, of which the `SyntaxError` row was PEP 758
+# syntax the file has carried since 2026-09-29 -- so the audit spent its whole gate window
+# measuring the interpreter. A preflight turns that into ONE refusal that quotes the
+# declaration it violated.
+PYPROJECT_FILE = REPO_ROOT / "pyproject.toml"
+
+def read_declared_requires_python(pyproject_path: Path | None = None) -> str | None:
+    """The `[project] requires-python` declaration EXACTLY as written, or None.
+
+    Read with `tomllib` -- the value is a TOML string, and the parser is the only thing that
+    reads TOML (a regex over the file would report a commented-out line as a declaration).
+    `tomllib` is stdlib from 3.11; the import stays INSIDE the function so an older launcher
+    can still run the audit's other legs rather than dying at module load.
+
+    A missing file, an unreadable file, a missing `[project]` table or a missing key returns
+    None. That is deliberate: the preflight REFUSES only a mismatch it can PROVE, because a
+    false refusal blocks every gate the audit exists to run. A repo that declares nothing has
+    declared no requirement, and the scorecard's Interpreter line is what tells a reader which
+    interpreter the resulting verdicts describe.
+    """
+    path = PYPROJECT_FILE if pyproject_path is None else pyproject_path
+    try:
+        import tomllib
+    except ImportError:
+        return None
+    try:
+        with open(path, "rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, ValueError):
+        return None
+    project = data.get("project")
+    if not isinstance(project, dict):
+        return None
+    declared = project.get("requires-python")
+    if isinstance(declared, str) and declared.strip():
+        return declared
+    return None
+
+def _version_tuple(text: str) -> tuple[int, ...]:
+    """`"3.14.6"` -> `(3, 14, 6)`; trailing non-numeric segments are dropped."""
+    parts: list[int] = []
+    for chunk in text.strip().split("."):
+        m = re.match(r"\d+", chunk)
+        if not m:
+            break
+        parts.append(int(m.group(0)))
+    return tuple(parts)
+
+def _satisfies_fallback(declaration: str, running: tuple[int, ...]) -> bool:
+    """The hand-rolled comparator: `>=X.Y[.Z]` clauses, comma-separated (see the caller).
+
+    FAIL-OPEN on a clause it cannot read, and that direction is the point: the preflight
+    REFUSES the run, so a clause this comparator misparses must never manufacture a refusal.
+    Every form pyproject.toml declares today (`>=3.14`) is read exactly.
+    """
+    for clause in (c.strip() for c in declaration.split(",")):
+        if not clause:
+            continue
+        m = re.match(r"^(>=|<=|==|!=|>|<)\s*([0-9][0-9.]*)$", clause)
+        if not m:
+            return True
+        op, bound_text = m.groups()
+        bound = _version_tuple(bound_text)
+        width = max(len(bound), len(running))
+        a = running + (0,) * (width - len(running))
+        b = bound + (0,) * (width - len(bound))
+        holds = {
+            ">=": a >= b,
+            "<=": a <= b,
+            "==": a == b,
+            "!=": a != b,
+            ">": a > b,
+            "<": a < b,
+        }[op]
+        if not holds:
+            return False
+    return True
+
+def requires_python_violation(
+    declaration: str | None, version_info: Any = None
+) -> str | None:
+    """Return the DECLARATION when the running interpreter violates it, else None.
+
+    COMPARATOR: `packaging.specifiers.SpecifierSet` when it imports, which it does under the
+    pinned gate interpreter (`/usr/bin/python3.14`, verified `SpecifierSet(">=3.14")
+    .contains("3.14.6") -> True` on this host) -- a PEP 440 implementation rather than a
+    second reading of the same spec. If `packaging` is absent, or the declaration is not a
+    valid specifier, the hand-rolled `_satisfies_fallback` covers the forms this repo uses
+    (`>=X.Y[.Z]`, comma clauses); it is NARROWER, so the two are not interchangeable in
+    general and only the fallback's own docstring may speak for it.
+
+    `version_info` is a PARAMETER, never a read of `sys.version_info` at the call site: the
+    refuses-arm test drives a version the running interpreter does not satisfy without
+    needing a second real interpreter on the box, and a predicate testable only by changing
+    the host's python3 is a predicate nobody tests.
+    """
+    if not declaration:
+        return None
+    info = sys.version_info if version_info is None else version_info
+    running = tuple(int(x) for x in info[:3])
+    try:
+        from packaging.specifiers import SpecifierSet
+    except ImportError:
+        satisfied = _satisfies_fallback(declaration, running)
+    else:
+        try:
+            satisfied = SpecifierSet(declaration).contains(".".join(str(x) for x in running))
+        except Exception:
+            satisfied = _satisfies_fallback(declaration, running)
+    return None if satisfied else declaration
+
+def format_requires_python_refusal(declaration: str, version: str, executable: str) -> str:
+    """The refusal text: names the RUNNING interpreter and QUOTES the declaration (#158).
+
+    Both facts travel in one sentence because either alone is unreadable: the version
+    without the declaration does not say what it violated, and the declaration without the
+    version does not say who violated it. The resolved path is named beside the launch path
+    for the same reason clause 1's header carries both -- on 2026-11-20 `/usr/bin/python3`
+    was the launch path under BOTH arms, and only its realpath distinguished them.
+    """
+    resolved = os.path.realpath(executable)
+    return (
+        f'AUDIT REFUSED: interpreter mismatch -- this run is Python {version} '
+        f'({executable} -> {resolved}), but pyproject.toml declares requires-python '
+        f'"{declaration}". NO gate was run and NO scorecard was written: every verdict '
+        f'taken under this interpreter would describe the interpreter, not the tree '
+        f'(2026-11-20: one host alternatives flip turned 16 gates red with '
+        f'"No module named aiosqlite"). Re-run under an interpreter that satisfies '
+        f'"{declaration}" -- the pinned gate interpreter is {GATE_PYTHON_PINNED}.'
+    )
+
 
 def format_yield_percent(value: float | None) -> str:
     """The yield as a percentage — THE rounding site, so every surface states one number.
@@ -936,6 +1133,16 @@ for _pytest_gate in PYTEST_FORM_GATES:
 # from. Stated here rather than folded into the loop so the two numbers keep their own arithmetic.
 GATE_WALLS_SEC["tests/test_audit_rates.py"] = 90.0
 
+# #158 -- the two gates this issue adds are pytest form, so their wall carries pytest's own
+# conftest import, which DOMINATES the work: measured whole-command wall 9.98s and 13.82s
+# against ~0.3s and ~3.7s of assertions (2026-11-25, unloaded, `-m pytest <file> -q`). Left on
+# the 30.0s depth default the preflight gate would have 3.0x of room -- not the 4.0x margin
+# law -- and #72's co-tenant loaded regime is exactly what that margin is for. Basis is the
+# MEASURED wall, never a picked round number: margin_x 4.0 + 0.75/measured_sec, budget =
+# margin_x x measured_sec -> 4.0752 x 9.98 = 40.67 and 4.0543 x 13.82 = 56.03.
+GATE_WALLS_SEC["tests/test_audit_requires_python_preflight.py"] = 40.67
+GATE_WALLS_SEC["tests/test_audit_env_classification.py"] = 56.03
+
 
 def _gate_wall_key(cmd: list[str]) -> str:
     """The command element a gate's wall is keyed on.
@@ -1197,6 +1404,183 @@ def attach_gate_causes(gate_results: list[dict[str, Any]]) -> None:
             continue
         g["note"] = gate_cause_from_streams(g.get("stdout"), g.get("stderr"))
 
+# #158 clause 2 -- a DEPENDENCY failure is ONE environment leg, never N defects.
+#
+# The 2026-11-20 scorecard reported 60 gates, 44 PASS, 16 FAIL, of which 15 were
+# `ModuleNotFoundError: No module named 'aiosqlite'` at `tests/conftest.py:61` and the 16th
+# a `SyntaxError` in a file untouched since 2026-09-29. One host alternatives flip produced
+# sixteen rows a triager would read as sixteen defects, and nothing on the artifact named the
+# single cause. This leg names it: the gate rows still FAIL (the verdict is not laundered --
+# a run that cannot execute its gates is not green), and ONE line above them names the
+# interpreter that ran them and the declared distribution(s) they could not import.
+#
+# The SyntaxError row of that incident is NOT classified here, and the omission is deliberate
+# rather than an oversight: it was the 3.12 interpreter rejecting PEP 758 syntax in a file
+# that parses on 3.14, i.e. the SAME cause as the missing modules. Clause 3's preflight
+# refuses such a run before a single gate launches, so under a satisfying interpreter a gate
+# SyntaxError is a code defect -- which is what it should be reported as. Classifying it as
+# interpreter-caused would be a claim the preflight has already made unreachable.
+MODULE_NOT_FOUND_RE = re.compile(r"ModuleNotFoundError: No module named ['\"]([^'\"]+)['\"]")
+# A PEP 508 requirement's NAME, before any extras (`[...]`) or specifier (`>=1.0`).
+_REQUIREMENT_NAME_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
+
+def normalize_distribution_name(name: str) -> str:
+    """PEP 503 normalization: lowercase, and any run of `-`/`_`/`.` becomes one `-`.
+
+    Applied to BOTH sides of the match, so `PyYAML` and `pyyaml` are the same declaration and
+    `pydantic_ai_slim` is `pydantic-ai-slim`. A module whose import name differs from its
+    distribution name (`yaml` -> `pyyaml`) is deliberately NOT resolved: a guess table would
+    be a second, unverifiable mapping beside pyproject.toml's own, and the declared set this
+    leg exists for (`aiosqlite`, `asyncpg`) is identical on both sides.
+    """
+    return re.sub(r"[-_.]+", "-", name.strip().lower())
+
+def read_declared_distributions(pyproject_path: Path | None = None) -> dict[str, str]:
+    """`{normalized name: declared name}` for every distribution pyproject.toml declares.
+
+    Reads `[project] dependencies`, every `[project.optional-dependencies]` group and every
+    `[dependency-groups]` group (PEP 735). THE WIDENING IS LOAD-BEARING: `aiosqlite` -- the
+    exact module the 2026-11-20 incident lost -- is declared at pyproject.toml:70 under
+    `[dependency-groups] dev`, NOT in `[project] dependencies`, so a classifier reading only
+    the latter would have missed the one incident it exists for. `asyncpg` is in
+    `[project] dependencies`; both normalize to themselves.
+
+    Unreadable file / absent tables -> `{}`, i.e. nothing is classified: an empty declared set
+    turns the leg off rather than turning every ModuleNotFoundError into a false leg.
+    """
+    path = PYPROJECT_FILE if pyproject_path is None else pyproject_path
+    try:
+        import tomllib
+    except ImportError:
+        return {}
+    try:
+        with open(path, "rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, ValueError):
+        return {}
+    declared: dict[str, str] = {}
+    project = data.get("project")
+    groups: list[Any] = []
+    if isinstance(project, dict):
+        groups.append(project.get("dependencies"))
+        optional = project.get("optional-dependencies")
+        if isinstance(optional, dict):
+            groups.extend(optional.values())
+    dev_groups = data.get("dependency-groups")
+    if isinstance(dev_groups, dict):
+        groups.extend(dev_groups.values())
+    for group in groups:
+        if not isinstance(group, list):
+            continue
+        for requirement in group:
+            # PEP 735 allows `{include-group = "..."}` entries; they declare no distribution.
+            if not isinstance(requirement, str):
+                continue
+            m = _REQUIREMENT_NAME_RE.match(requirement)
+            if m:
+                declared[normalize_distribution_name(m.group(1))] = m.group(1)
+    return declared
+
+def missing_declared_distributions(
+    stderr: str | None, declared: dict[str, str]
+) -> list[str]:
+    """The DECLARED distributions this stderr names as missing, in declaration spelling.
+
+    Empty when the stream carries no `ModuleNotFoundError` or every name it carries is outside
+    the declared set -- an undeclared module is an ordinary gate failure, not an environment
+    leg, and the discriminator is what keeps this from becoming a catch-all that excuses any
+    import error.
+    """
+    if not stderr or not declared:
+        return []
+    found: list[str] = []
+    for module in MODULE_NOT_FOUND_RE.findall(stderr):
+        declared_name = declared.get(normalize_distribution_name(module))
+        if declared_name and declared_name not in found:
+            found.append(declared_name)
+    return found
+
+def classify_environment_failures(
+    gate_results: list[dict[str, Any]],
+    interpreter: str | None = None,
+    pyproject_path: Path | None = None,
+) -> dict[str, Any] | None:
+    """Collapse the gate rows that died on a DECLARED distribution into ONE leg, or None.
+
+    `interpreter` defaults to the path the gate launches RESOLVED (`resolve_gate_python()`),
+    never `sys.executable` alone: the leg must name the interpreter that actually ran the
+    gates, which is the same resolution `gate_python()` hands the launches (clause 1's
+    defect, one field over). Only FAILED gates are considered -- a passing gate's stderr is
+    never evidence of a missing module, and an UNKNOWN gate took no verdict at all.
+
+    The returned leg is a STATEMENT, not an excuse: `passed`/`unknown` are untouched and
+    `judge_gates` still reports DEGRADED over these rows. A leg that also turned them green
+    would be the defect this issue was filed about, wearing the fix's clothes.
+    """
+    declared = read_declared_distributions(pyproject_path)
+    affected: list[dict[str, Any]] = []
+    by_distribution: dict[str, int] = {}
+    modules: list[str] = []
+    for g in gate_results:
+        if g.get("passed") or g.get("unknown"):
+            continue
+        found = missing_declared_distributions(g.get("stderr"), declared)
+        if not found:
+            continue
+        affected.append(g)
+        for name in found:
+            by_distribution[name] = by_distribution.get(name, 0) + 1
+        for module in MODULE_NOT_FOUND_RE.findall(g.get("stderr") or ""):
+            if module not in modules:
+                modules.append(module)
+    if not affected:
+        return None
+    if interpreter is None:
+        chosen, _causes = resolve_gate_python()
+        interpreter = chosen or sys.executable
+    return {
+        "interpreter": interpreter,
+        "distributions": sorted(by_distribution),
+        "modules": modules,
+        "by_distribution": by_distribution,
+        "gates": [g["cmd"] for g in affected],
+        "gate_count": len(affected),
+    }
+
+def render_environment_leg_line(leg: dict[str, Any]) -> str:
+    """The leg on ONE line, for the stdout table a triager reads first."""
+    return (
+        f"Environment leg: {leg['gate_count']} gate(s) failed with ModuleNotFoundError for "
+        f"declared distribution(s) {', '.join(leg['distributions'])} under interpreter "
+        f"{leg['interpreter']} -- ONE cause; the rows remain FAILED and the verdict "
+        f"reflects them."
+    )
+
+def render_environment_leg_markdown(leg: dict[str, Any]) -> list[str]:
+    """The leg as the scorecard's section 2.0 -- above the N rows it explains.
+
+    Above, not below: a reader who opens 2.1 first must meet the one cause BEFORE the sixteen
+    rows, or the leg is a footnote to the noise it was meant to explain.
+    """
+    return [
+        f"### 2.0 Environment leg -- one cause behind {leg['gate_count']} gate row(s)",
+        "",
+        f"> **Environment:** {leg['gate_count']} gate(s) died with `ModuleNotFoundError` for "
+        f"distribution(s) declared in `pyproject.toml`, under interpreter "
+        f"`{leg['interpreter']}`. This is ONE cause, not {leg['gate_count']} defects -- and "
+        f"the rows REMAIN FAILURES in the verdict above: this leg names the cause, it does "
+        f"not excuse it.",
+        "",
+        "| Missing distribution | Gate rows |",
+        "|---|---|",
+    ] + [
+        f"| `{name}` | {count} |" for name, count in sorted(leg["by_distribution"].items())
+    ] + [
+        "",
+        "Affected gates: " + ", ".join(f"`{cmd}`" for cmd in leg["gates"]),
+        "",
+    ]
+
 @dataclass
 class GateVerdict:
     """The THREE-state verdict over a gate run (#74 leg 7 / kit #93 PART 2).
@@ -1401,15 +1785,15 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
 
     # 1. Ledger verify
     if (repo_root / "tools/ledger.py").is_file():
-        gates_to_run.append([sys.executable, "tools/ledger.py", "verify"])
+        gates_to_run.append([gate_python(), "tools/ledger.py", "verify"])
 
     # 2. Ontology gate
     if (repo_root / "tests/test_ontology.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_ontology.py"])
+        gates_to_run.append([gate_python(), "tests/test_ontology.py"])
 
     # 3. Rework gate
     if (repo_root / "tests/test_rework.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_rework.py"])
+        gates_to_run.append([gate_python(), "tests/test_rework.py"])
 
     # 3b. Rework relative-revision gate (#129). It was DEFERRED in
     # `registry/gate-run-deferrals.json` behind one reason shared with its sibling —
@@ -1422,7 +1806,7 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     # while red turns the daily audit red. SCRIPT form: it is a `check(...)` script, so
     # pytest would report "no tests ran" and exit 0 — a green that measured nothing.
     if (repo_root / "tests/test_rework_relative_revision.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_rework_relative_revision.py"])
+        gates_to_run.append([gate_python(), "tests/test_rework_relative_revision.py"])
 
     # 3c. Rework declared-to-landed gate (#129). Its deferral named an EXPIRED blocker —
     # "the evidence format this tree uses has no `Subject` column" — which #126 removed on
@@ -1435,19 +1819,19 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     # 1 declaration in scope, resolved, exit 0. SCRIPT form — a `check(...)` script, so
     # pytest would report "no tests ran" and exit 0, a green that measured nothing.
     if (repo_root / "tests/test_rework_declared_landed.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_rework_declared_landed.py"])
+        gates_to_run.append([gate_python(), "tests/test_rework_declared_landed.py"])
 
     # 4. Single-writer gate
     if (repo_root / "tests/test_single_writer.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_single_writer.py"])
+        gates_to_run.append([gate_python(), "tests/test_single_writer.py"])
 
     # 5. Ledger schema & domain invariant gate
     if (repo_root / "tests/test_ledger_schema.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_ledger_schema.py"])
+        gates_to_run.append([gate_python(), "tests/test_ledger_schema.py"])
 
     # 6. Template sync gate
     if (repo_root / "tests/test_template_sync.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_template_sync.py"])
+        gates_to_run.append([gate_python(), "tests/test_template_sync.py"])
 
     # 7. Workspace hygiene — reap first, then audit.
     #
@@ -1465,24 +1849,24 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     # nobody cleaned read exactly like a namespace that is clean.
     if (repo_root / "tools/hygiene.py").is_file():
         gates_to_run.append(
-            [sys.executable, "tools/hygiene.py", "--clean",
+            [gate_python(), "tools/hygiene.py", "--clean",
              "--namespace", hygiene_namespace(repo_root)]
         )
         gates_to_run.append(
-            [sys.executable, "tools/hygiene.py", "--audit",
+            [gate_python(), "tools/hygiene.py", "--audit",
              "--namespace", hygiene_namespace(repo_root)]
         )
 
     # 8. Visual roadmap and process-to-product matrix audit
     if (repo_root / "tools/roadmap.py").is_file():
-        gates_to_run.append([sys.executable, "tools/roadmap.py", "--audit"])
+        gates_to_run.append([gate_python(), "tools/roadmap.py", "--audit"])
 
     # 9. Yield-artifact consistency (#38) -- the run row and the scorecard must state
     # ONE yield for one run. It runs as a GATE, not merely as a test: CI is paths-filtered
     # to src/**, so a guard living only under tests/ would never execute on a tools/ change
     # -- which is the same shape as the defect it guards.
     if (repo_root / "tests/test_audit_yield.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_audit_yield.py"])
+        gates_to_run.append([gate_python(), "tests/test_audit_yield.py"])
 
     # 10. Gate-note population (2026-09-25) -- the scorecard must state the
     # POPULATION a failing gate reported, not its final item. Measured: the
@@ -1490,7 +1874,7 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     # repairing that row would believe the gate done. It runs as a GATE for the
     # same reason as #9: nothing under tests/ is reached by CI here.
     if (repo_root / "tests/test_audit_gate_note.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_audit_gate_note.py"])
+        gates_to_run.append([gate_python(), "tests/test_audit_gate_note.py"])
 
     # 11. Board-close recorded (2026-09-26, #40) -- a close row must record the board
     # close it observed, not only the ledger transition. Measured: #49's close row was
@@ -1500,7 +1884,7 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     # it was recorded. Runs as a GATE for the same reason as #9 and #10: nothing under
     # tests/ is reached by CI here.
     if (repo_root / "tests/test_close_board_recorded.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_close_board_recorded.py"])
+        gates_to_run.append([gate_python(), "tests/test_close_board_recorded.py"])
 
     # 12. Kit pin (2026-09-27) -- the tree judged against the kit state it VENDORED, not
     # against the meta-factory's live manifest. The direction of the verdict is the whole
@@ -1511,7 +1895,7 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     # deliberate fork is a declaration in registry/kit-exemptions.json, never a silent
     # divergence. Measured on landing: 14 carried paths judged, 6 declared exempt.
     if (repo_root / "tests/test_kit_pin.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_kit_pin.py"])
+        gates_to_run.append([gate_python(), "tests/test_kit_pin.py"])
 
     # 13. Cron thinness (2026-09-27, pacemaker instrument) -- every enabled cron row
     # must either wake a lane (deliver_to session:*, or a notify in the prompt) or
@@ -1529,7 +1913,7 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
         # pass, not a fast one. (Same class as the pytest-mode close-preflight gate;
         # #64's per-gate wall makes the honest invocation affordable.)
         gates_to_run.append(
-            [sys.executable, "-m", "pytest", "tests/test_cron_thinness.py", "-q"]
+            [gate_python(), "-m", "pytest", "tests/test_cron_thinness.py", "-q"]
         )
 
     # 14. The patrol RUNNER's own wiring, as its own row (#163, adoption round).
@@ -1542,7 +1926,7 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     # probes exist to prevent. Measured on adoption: rc=0, 102 checks, and CI's own
     # invocation 912 passed / 0 failed, so it is safe to hold in the audit AND in pytest.
     if (repo_root / "tests/test_patrol_host_state.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_patrol_host_state.py"])
+        gates_to_run.append([gate_python(), "tests/test_patrol_host_state.py"])
 
     # 15. The ledger instrument's own gate, registered because IT asserts its registration:
     # an unregistered gate never runs (P29), and the adopted copy fails on exactly that check.
@@ -1550,7 +1934,7 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     # the flake ai-antispam#64 exists to remove -- so this row carries its own budget
     # (GATE_WALLS_SEC above) rather than inheriting a wall it does not fit.
     if (repo_root / "tests/test_ledger.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_ledger.py"])
+        gates_to_run.append([gate_python(), "tests/test_ledger.py"])
 
     # 16. The stamp's own duration (#71) -- the run row's `duration=` must be MEASURED, not
     # the literal `4s` it carried for 15 consecutive rows, and it must track the gate work
@@ -1565,7 +1949,7 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     # -- and pytest is the expensive path here, dragging in `tests/conftest.py` and
     # `pythonpath = src` for ~46s against this file's ~10s script run.
     if (repo_root / "tests/test_audit_stamp_duration.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_audit_stamp_duration.py"])
+        gates_to_run.append([gate_python(), "tests/test_audit_stamp_duration.py"])
 
     # 17. The cadence record (#116) -- the cadence leg must NAME the record it reads and tell a
     # DROPPED ROW (the run happened; its handoff row never landed) from a MISSED RUN. Measured
@@ -1579,7 +1963,7 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     # It imports the tool and calls the pure functions with fixture paths, so it never touches
     # live state and runs in well under a second.
     if (repo_root / "tests/test_audit_cadence_record.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_audit_cadence_record.py"])
+        gates_to_run.append([gate_python(), "tests/test_audit_cadence_record.py"])
 
     # 18. The cadence SUBJECT binding (#124) -- #17 above tells a DROPPED ROW from a MISSED RUN,
     # but it read the clock off ANY `run`/`score` row, so an unrelated ledger row landing on a
@@ -1593,7 +1977,7 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     #
     # SCRIPT-form, matching #16/#17.
     if (repo_root / "tests/test_audit_cadence_subject.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_audit_cadence_subject.py"])
+        gates_to_run.append([gate_python(), "tests/test_audit_cadence_subject.py"])
 
     # 19. The ARTIFACT/LEDGER CROSSCHECK (#159) -- every scorecard artifact date must carry a
     # self-audit `run`/`score` row, and the gate FAILS BY DATE where one does not. The two legs
@@ -1611,7 +1995,7 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     # without reading this factory's exemption table.
     if (repo_root / "tests/test_audit_cadence_artifact_crosscheck.py").is_file():
         gates_to_run.append(
-            [sys.executable, "tests/test_audit_cadence_artifact_crosscheck.py"]
+            [gate_python(), "tests/test_audit_cadence_artifact_crosscheck.py"]
         )
 
     # The commit-citation clause. SCRIPT-MODE (0 test functions collected, `__main__` present),
@@ -1624,7 +2008,7 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     # proofs. Registering it is what makes those exemptions PRINTED on every audit -- visible
     # debt rather than a silent pass.
     if (repo_root / "tests/test_ledger_commit_cites_no_rows.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_ledger_commit_cites_no_rows.py"])
+        gates_to_run.append([gate_python(), "tests/test_ledger_commit_cites_no_rows.py"])
 
     # ---------------------------------------------------------------------------------
     # THE DECLARED-GATE SET (#107). Before this block, 38 files declared themselves gates
@@ -1635,7 +2019,7 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     # registration: a gate registered while red turns the daily audit red, which is why the
     # set is the PASSING set and the rest are declared on their own surface.
     #
-    # THE FORM IS NOT COSMETIC. Nine of these have no `__main__`, so `[sys.executable, path]`
+    # THE FORM IS NOT COSMETIC. Nine of these have no `__main__`, so `[gate_python(), path]`
     # would exit 0 having executed ZERO checks — a decorative green, the exact class gate 10
     # exists for. They are registered under `-m pytest` with the wall measured above. This is
     # also why `test_ledger_close_preflight.py` is now registered in pytest form: the note
@@ -1646,87 +2030,108 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     # ---------------------------------------------------------------------------------
     # script form — each carries its own `__main__` and returns a real exit code
     if (repo_root / "tests/test_audit_cadence_own_run.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_audit_cadence_own_run.py"])
+        gates_to_run.append([gate_python(), "tests/test_audit_cadence_own_run.py"])
+    # #158 -- the binding itself: the scorecard names the resolved interpreter, and the
+    # resolution prefers $AUDIT_GATE_PYTHON over the pinned path over the launcher. Pytest
+    # form: the file carries module-level `def test_*` arms (its __main__ driver exists for
+    # standalone runs), and a script-form registration against that shape is the exact
+    # direction-5 mismatch the classifier exists to catch. Registered here so the
+    # registration gate's declared -> registered direction sees it the moment it lands --
+    # an unregistered gate never runs.
+    if (repo_root / "tests/test_audit_interpreter_binding.py").is_file():
+        gates_to_run.append([gate_python(), "-m", "pytest", "tests/test_audit_interpreter_binding.py", "-q"])
+    # #158 clause 3 -- the requires-python preflight: a run whose interpreter violates
+    # pyproject.toml's declaration is REFUSED before a gate launches, quoting the declaration.
+    # Pytest form for the same reason as the binding gate above: module-level `def test_*`
+    # arms with a `__main__` driver, and a script-form registration against that shape is the
+    # direction-5 mismatch `test_gate_registration.py` exists to catch.
+    if (repo_root / "tests/test_audit_requires_python_preflight.py").is_file():
+        gates_to_run.append([gate_python(), "-m", "pytest", "tests/test_audit_requires_python_preflight.py", "-q"])
+    # #158 clause 2 -- the environment leg: gate rows that died with `ModuleNotFoundError` for
+    # a DECLARED distribution collapse into ONE cause naming the interpreter, while every row
+    # stays FAILED in the verdict. Pytest form, same reasoning.
+    if (repo_root / "tests/test_audit_env_classification.py").is_file():
+        gates_to_run.append([gate_python(), "-m", "pytest", "tests/test_audit_env_classification.py", "-q"])
     if (repo_root / "tests/test_audit_tree_condition.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_audit_tree_condition.py"])
+        gates_to_run.append([gate_python(), "tests/test_audit_tree_condition.py"])
     if (repo_root / "tests/test_board_intake_recorded.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_board_intake_recorded.py"])
+        gates_to_run.append([gate_python(), "tests/test_board_intake_recorded.py"])
     if (repo_root / "tests/test_brain_metrics.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_brain_metrics.py"])
+        gates_to_run.append([gate_python(), "tests/test_brain_metrics.py"])
     if (repo_root / "tests/test_close_row_revision.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_close_row_revision.py"])
+        gates_to_run.append([gate_python(), "tests/test_close_row_revision.py"])
     if (repo_root / "tests/test_commit_close_keyword.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_commit_close_keyword.py"])
+        gates_to_run.append([gate_python(), "tests/test_commit_close_keyword.py"])
     if (repo_root / "tests/test_commit_pair_hook.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_commit_pair_hook.py"])
+        gates_to_run.append([gate_python(), "tests/test_commit_pair_hook.py"])
     if (repo_root / "tests/test_commit_session_trailer.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_commit_session_trailer.py"])
+        gates_to_run.append([gate_python(), "tests/test_commit_session_trailer.py"])
     if (repo_root / "tests/test_criteria_count.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_criteria_count.py"])
+        gates_to_run.append([gate_python(), "tests/test_criteria_count.py"])
     if (repo_root / "tests/test_docs_sync.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_docs_sync.py"])
+        gates_to_run.append([gate_python(), "tests/test_docs_sync.py"])
     if (repo_root / "tests/test_duplicate_prose.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_duplicate_prose.py"])
+        gates_to_run.append([gate_python(), "tests/test_duplicate_prose.py"])
     if (repo_root / "tests/test_gate_fixtures_closure.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_gate_fixtures_closure.py"])
+        gates_to_run.append([gate_python(), "tests/test_gate_fixtures_closure.py"])
     if (repo_root / "tests/test_gate_invocation_mode.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_gate_invocation_mode.py"])
+        gates_to_run.append([gate_python(), "tests/test_gate_invocation_mode.py"])
     if (repo_root / "tests/test_gate_registration.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_gate_registration.py"])
+        gates_to_run.append([gate_python(), "tests/test_gate_registration.py"])
     if (repo_root / "tests/test_ledger_identity.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_ledger_identity.py"])
+        gates_to_run.append([gate_python(), "tests/test_ledger_identity.py"])
     if (repo_root / "tests/test_ledger_index.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_ledger_index.py"])
+        gates_to_run.append([gate_python(), "tests/test_ledger_index.py"])
     if (repo_root / "tests/test_ledger_no_shrink.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_ledger_no_shrink.py"])
+        gates_to_run.append([gate_python(), "tests/test_ledger_no_shrink.py"])
     if (repo_root / "tests/test_publish.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_publish.py"])
+        gates_to_run.append([gate_python(), "tests/test_publish.py"])
     # Registered under #107: the questions store's own selftest. It drives every verb and
     # the renderer, so its wall is declared in GATE_WALLS_SEC from a MEASURED runtime —
     # the 120s fallback would kill a healthy gate and report UNKNOWN.
     if (repo_root / "tests/test_questions.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_questions.py"])
+        gates_to_run.append([gate_python(), "tests/test_questions.py"])
     if (repo_root / "tests/test_registry.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_registry.py"])
+        gates_to_run.append([gate_python(), "tests/test_registry.py"])
     if (repo_root / "tests/test_roadmap_transition.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_roadmap_transition.py"])
+        gates_to_run.append([gate_python(), "tests/test_roadmap_transition.py"])
     if (repo_root / "tests/test_skill_version_contract.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_skill_version_contract.py"])
+        gates_to_run.append([gate_python(), "tests/test_skill_version_contract.py"])
     if (repo_root / "tests/test_subject_anchor.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_subject_anchor.py"])
+        gates_to_run.append([gate_python(), "tests/test_subject_anchor.py"])
     if (repo_root / "tests/test_template_integrity.py").is_file():
-        gates_to_run.append([sys.executable, "tests/test_template_integrity.py"])
+        gates_to_run.append([gate_python(), "tests/test_template_integrity.py"])
 
     # pytest form — no `__main__`, so a bare-script registration would execute
     # ZERO checks and exit 0. The wall is declared in GATE_WALLS_SEC above.
     if (repo_root / "tests/test_binding_mechanism_exists.py").is_file():
-        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_binding_mechanism_exists.py", "-q"])
+        gates_to_run.append([gate_python(), "-m", "pytest", "tests/test_binding_mechanism_exists.py", "-q"])
     if (repo_root / "tests/test_close_telemetry_provenance.py").is_file():
-        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_close_telemetry_provenance.py", "-q"])
+        gates_to_run.append([gate_python(), "-m", "pytest", "tests/test_close_telemetry_provenance.py", "-q"])
     if (repo_root / "tests/test_hygiene_inflight.py").is_file():
-        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_hygiene_inflight.py", "-q"])
+        gates_to_run.append([gate_python(), "-m", "pytest", "tests/test_hygiene_inflight.py", "-q"])
     if (repo_root / "tests/test_hygiene_namespace.py").is_file():
-        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_hygiene_namespace.py", "-q"])
+        gates_to_run.append([gate_python(), "-m", "pytest", "tests/test_hygiene_namespace.py", "-q"])
     if (repo_root / "tests/test_hygiene_build_residue.py").is_file():
-        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_hygiene_build_residue.py", "-q"])
+        gates_to_run.append([gate_python(), "-m", "pytest", "tests/test_hygiene_build_residue.py", "-q"])
     if (repo_root / "tests/test_hygiene_declaration_sweep.py").is_file():
-        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_hygiene_declaration_sweep.py", "-q"])
+        gates_to_run.append([gate_python(), "-m", "pytest", "tests/test_hygiene_declaration_sweep.py", "-q"])
     if (repo_root / "tests/test_hygiene_stale_dirs.py").is_file():
-        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_hygiene_stale_dirs.py", "-q"])
+        gates_to_run.append([gate_python(), "-m", "pytest", "tests/test_hygiene_stale_dirs.py", "-q"])
     if (repo_root / "tests/test_hygiene_branch_occupancy.py").is_file():
-        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_hygiene_branch_occupancy.py", "-q"])
+        gates_to_run.append([gate_python(), "-m", "pytest", "tests/test_hygiene_branch_occupancy.py", "-q"])
     if (repo_root / "tests/test_insights_gate_recorded.py").is_file():
-        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_insights_gate_recorded.py", "-q"])
+        gates_to_run.append([gate_python(), "-m", "pytest", "tests/test_insights_gate_recorded.py", "-q"])
     if (repo_root / "tests/test_ledger_close_preflight.py").is_file():
-        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_ledger_close_preflight.py", "-q"])
+        gates_to_run.append([gate_python(), "-m", "pytest", "tests/test_ledger_close_preflight.py", "-q"])
     if (repo_root / "tests/test_ledger_event_authorized.py").is_file():
-        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_ledger_event_authorized.py", "-q"])
+        gates_to_run.append([gate_python(), "-m", "pytest", "tests/test_ledger_event_authorized.py", "-q"])
     if (repo_root / "tests/test_registry_attest.py").is_file():
-        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_registry_attest.py", "-q"])
+        gates_to_run.append([gate_python(), "-m", "pytest", "tests/test_registry_attest.py", "-q"])
     if (repo_root / "tests/test_registry_render.py").is_file():
-        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_registry_render.py", "-q"])
+        gates_to_run.append([gate_python(), "-m", "pytest", "tests/test_registry_render.py", "-q"])
     if (repo_root / "tests/test_score_gate_recorded.py").is_file():
-        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_score_gate_recorded.py", "-q"])
+        gates_to_run.append([gate_python(), "-m", "pytest", "tests/test_score_gate_recorded.py", "-q"])
     # Registered under #135: the daily self-audit's push leg. `git push <remote> main` pushes a
     # REF, not a commit, so an unconditional push in step 3 ships whatever held leg happens to
     # be on main (measured 2026-11-08: 19 commits ahead of origin, all of them the owner-gated
@@ -1735,14 +2140,14 @@ def execute_mechanical_gates(repo_root: Path) -> list[dict[str, Any]]:
     # coupling in a throwaway two-remote sandbox. pytest form, so a bare-script registration
     # would execute ZERO checks and exit 0.
     if (repo_root / "tests/test_self_audit_push_gate.py").is_file():
-        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_self_audit_push_gate.py", "-q"])
+        gates_to_run.append([gate_python(), "-m", "pytest", "tests/test_self_audit_push_gate.py", "-q"])
     # Registered under #126: the reporting contract's own gate -- both rework rate FORMS
     # with their denominators, the outcome partition for run AND close rows, the rework
     # declaration population, the change fail rate with its linkage coverage, and the
     # cost-per-successful-task rate. It is pytest form (18 test functions, no `__main__`),
     # so a bare-script registration would execute ZERO checks and exit 0.
     if (repo_root / "tests/test_audit_rates.py").is_file():
-        gates_to_run.append([sys.executable, "-m", "pytest", "tests/test_audit_rates.py", "-q"])
+        gates_to_run.append([gate_python(), "-m", "pytest", "tests/test_audit_rates.py", "-q"])
     results = []
     for cmd in gates_to_run:
         wall = _gate_wall(cmd)
@@ -2156,8 +2561,16 @@ def format_report_markdown(
     rework_stats: dict[str, Any],
     cadence_stats: dict[str, Any],
     gate_results: list[dict[str, Any]],
+    environment_leg: dict[str, Any] | None = None,
 ) -> str:
-    """Format the full audit into markdown document."""
+    """Format the full audit into markdown document.
+
+    `environment_leg` is the #158 clause 2 classification (`classify_environment_failures`),
+    passed in rather than re-derived: the leg is computed ONCE in `main()` and the same dict
+    feeds the JSON payload and the stdout line, so the artifact and the terminal cannot name
+    different causes. Default None keeps every pre-existing caller (and its fixture-driven
+    tests) rendering exactly as before.
+    """
     # The report's headline is the SAME three-state verdict the stdout line and the stamp row
     # carry (#72), taken from the ONE reduction rather than re-derived here: a second
     # `all(g["passed"])` would count a timed-out gate as a FAILURE, which is the defect this
@@ -2174,6 +2587,10 @@ def format_report_markdown(
         f"# Operational Process Self-Audit — {date_str}",
         "",
         f"> **Verdict:** `{verdict}` · Process 3 (Internal Self-Audit)",
+        "",
+        f"> **Interpreter:** sys.version `{sys.version.split()[0]}` · sys.executable "
+        f"`{sys.executable}` · realpath `{os.path.realpath(sys.executable)}` · "
+        f"GATE_PYTHON `{resolve_gate_python()[0] or 'UNRESOLVED'}`",
         "",
         f"> **Ledger read at:** `{ledger_read_at}` "
         f"({ledger_stats.get('total_events', 0)} events) — this artifact describes the ledger "
@@ -2227,6 +2644,13 @@ def format_report_markdown(
     # HEADER keeps its pre-#72 wording because `tests/test_audit_gate_note.py` pins the
     # literal `### 2.1 Failing gate output (full)`; the per-row label carries the
     # three-state distinction instead, which is where a reader looks anyway.
+    # #158 clause 2 -- section 2.0, ABOVE the rows it explains. The gate table and 2.1 still
+    # carry every one of these rows as a FAILURE; this section is the ONE cause they share,
+    # stated once, with the interpreter that produced them. The literal heading is pinned by
+    # tests/test_audit_env_classification.py.
+    if environment_leg:
+        lines.extend([""] + render_environment_leg_markdown(environment_leg))
+
     non_passing = [g for g in gate_results if not g["passed"]]
     if non_passing:
         lines.extend([
@@ -2289,6 +2713,24 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # #158 clause 3 -- REFUSE BEFORE ANY GATE RUNS. Placed after `parse_args` (so `--help`
+    # and a bad flag still answer as themselves) and before every read of the ledger, every
+    # gate launch and every write: a run whose interpreter violates `requires-python` cannot
+    # produce a verdict about the tree, only about the interpreter, and the 2026-11-20
+    # incident published 16 such verdicts as if they were defects. Exit 2 is "the invocation
+    # was refused", distinct from 1 ("a gate failed") -- a caller that only sees the code
+    # must be able to tell a refused run from a red one.
+    _declared_requires_python = read_declared_requires_python()
+    _requires_python_violation = requires_python_violation(_declared_requires_python)
+    if _requires_python_violation is not None:
+        print(
+            format_requires_python_refusal(
+                _requires_python_violation, sys.version.split()[0], sys.executable
+            ),
+            file=sys.stderr,
+        )
+        return 2
+
     ledger_file = REPO_ROOT / "evidence/ledger.jsonl"
     rework_file = REPO_ROOT / "evidence/rework.md"
 
@@ -2338,6 +2780,13 @@ def main() -> int:
     # JSON payload, the markdown report and the stdout table cannot disagree about what a
     # gate said.
     attach_gate_causes(gate_results)
+    # #158 clause 2 -- the rows that died on a DECLARED distribution collapse into ONE
+    # environment leg naming the interpreter that ran them and the distribution(s) they could
+    # not import. Computed ONCE here and read by all three surfaces (JSON, stdout, report) for
+    # the same reason `attach_gate_causes` runs here: a second derivation is a second thing to
+    # keep in step. It does NOT touch `passed`/`unknown`, so the verdict below still counts
+    # every one of those rows as a failure.
+    environment_leg = classify_environment_failures(gate_results)
     cadence_ok = cadence_stats.get("cadence_held", True)
     gates_ran = not args.no_gates
     verdict = judge_gates(gate_results, cadence_ok=cadence_ok, gates_ran=gates_ran)
@@ -2357,6 +2806,11 @@ def main() -> int:
             "all_gates_pass": verdict.all_known_pass,
             "unknown_gates": len(verdict.unknown),
             "cadence": cadence_stats,
+            # #158 clause 2: the classified environment leg (None when no gate died on a
+            # declared distribution). The `gates` list beside it is unchanged and still
+            # carries those rows as failures -- the leg is an ADDITIONAL fact, never a
+            # substitution for the rows.
+            "environment": environment_leg,
             "delivery": ledger_stats,
             "rework": rework_stats,
             "gates": gate_results,
@@ -2435,7 +2889,7 @@ def main() -> int:
         elapsed_secs = math.ceil(time.monotonic() - started)
         detail = format_run_row_detail(ledger_stats, outcome, gate_summary, elapsed_secs)
         stamp_cmd = [
-            sys.executable,
+            gate_python(),
             "tools/ledger.py",
             "append",
             "--event",
@@ -2488,6 +2942,10 @@ def main() -> int:
     print(f"  - Cadence: {render_cadence_label(cadence_stats)} (last run: {cadence_stats.get('hours_since_last_run')}h ago · record read: {cadence_stats.get('record_read')} · {render_record_counts(cadence_stats)} · latest artifact: {cadence_stats.get('artifact_latest_date')})")
     unknown_note = f", {len(verdict.unknown)} UNKNOWN" if verdict.unknown else ""
     print(f"\nMechanical Gates ({len(gate_results)}{unknown_note}):")
+    # #158 clause 2: the ONE cause, printed ABOVE the rows it explains (same order as the
+    # report's 2.0 -> 2.1). The rows below stay FAIL; this line only says they share a cause.
+    if environment_leg:
+        print(render_environment_leg_line(environment_leg))
     for g in gate_results:
         # `render_gate_line` carries the mark, the elapsed time, the declared budget and the
         # gate's own cause on ONE line, so a reader triaging the table does not have to open
@@ -2495,7 +2953,15 @@ def main() -> int:
         print(render_gate_line(g))
 
     if args.report or args.output:
-        report_md = format_report_markdown(today, ledger_read_at, ledger_stats, rework_stats, cadence_stats, gate_results)
+        report_md = format_report_markdown(
+            today,
+            ledger_read_at,
+            ledger_stats,
+            rework_stats,
+            cadence_stats,
+            gate_results,
+            environment_leg=environment_leg,
+        )
         out_path = Path(args.output) if args.output else (REPO_ROOT / f"evidence/scores/{today}-self-audit.md")
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(report_md, encoding="utf-8")

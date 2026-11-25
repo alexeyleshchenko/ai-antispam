@@ -148,7 +148,7 @@ _OPENING = re.compile(r'^\s*(?:#!.*\n)?\s*(?:[rR][bB]?|[bB][rR]?|[uU])?"""(?P<fi
 # a COMPUTED argument carries no quotes, so `hygiene_namespace(repo_root)` was dropped a
 # SECOND time and the very same `tools/hygiene.py --audit --namespace` came back. A wider
 # scan cannot repair a lossy join, so the argv is now rendered from the list literal's own
-# ELEMENTS (`_argv_tokens`): string literals bare, and everything else — `sys.executable`,
+# ELEMENTS (`_argv_tokens`): string literals bare, and everything else — `gate_python()`,
 # `hygiene_namespace(repo_root)` — as an explicit placeholder `<expr>`. The placeholder is
 # the point: this projection is a DECLARED FORM for the report and the budget sweep, never
 # a runnable command line, and the command that RUNS is the audit's own live list.
@@ -437,12 +437,12 @@ def _argv_tokens(argv_source: str) -> list[str]:
         computed at run time and no text can state it.
 
     The asymmetry IS the contract: this is a DECLARED FORM, never a runnable command. Paste
-    `<sys.executable> tools/hygiene.py --audit --namespace <hygiene_namespace(repo_root)>`
+    `<gate_python()> tools/hygiene.py --audit --namespace <hygiene_namespace(repo_root)>`
     into a shell and the `<` is a literal token, not a redirect — an error, which is the
     honest reading. The command that RUNS is the audit's own live list
     (`tools/audit.py::registered_gates`); this projection exists for the report and the
     budget sweep. `gate_key_for_cmd` skips a placeholder for the same reason it skips
-    `sys.executable`: it does not resolve to a file under the root.
+    `gate_python()`: it does not resolve to a file under the root.
 
     BOUND: the carrier is a space-joined string, so an element whose own text contains
     whitespace could not round-trip through `split()`. No registration in this tree has one

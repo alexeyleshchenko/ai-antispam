@@ -512,7 +512,7 @@ def probe_the_live_tool_invocations_are_never_truncated() -> None:
           all(not a.rstrip().endswith("--namespace") for a in report["tool_invocations"]),
           str(report["tool_invocations"])[:120])
     check("clause 3 — every live tool invocation is a DECLARED FORM, never a command line",
-          all("<sys.executable>" in a.split() for a in report["tool_invocations"]),
+          all("<gate_python()>" in a.split() for a in report["tool_invocations"]),
           str(report["tool_invocations"])[:120])
 
 def _naive_declared_names(tests_dir: Path) -> set[str]:
@@ -1395,7 +1395,7 @@ def probe_a_computed_argument_survives_the_projection() -> None:
         tests, audit = _synthetic_tree(
             Path(tmp), {},
             "gates_to_run.append(\n"
-            '    [sys.executable, "tools/hygiene.py", "--audit",\n'
+            '    [gate_python(), "tools/hygiene.py", "--audit",\n'
             '     "--namespace", hygiene_namespace(repo_root)]\n'
             ")\n",
         )
@@ -1403,7 +1403,7 @@ def probe_a_computed_argument_survives_the_projection() -> None:
         check("clause 3 — a non-literal argument is rendered as an explicit PLACEHOLDER",
               "<hygiene_namespace(repo_root)>" in entry["argv"], entry["argv"])
         check("clause 3 — the interpreter is a placeholder too, never a bare token",
-              "<sys.executable>" in entry["argv"].split(), entry["argv"])
+              "<gate_python()>" in entry["argv"].split(), entry["argv"])
         check("clause 3 — the truncated literal-only form is never produced",
               entry["argv"] != "tools/hygiene.py --audit --namespace", entry["argv"])
         check("clause 3 — the value is still a token list, so `split()` keeps the target",
