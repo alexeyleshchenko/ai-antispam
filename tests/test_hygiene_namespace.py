@@ -34,7 +34,7 @@ TOOLS = REPO / "tools"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gate_fixtures import stage_tool  # noqa: E402
 
-FOREIGN_PREFIX = "oc-snap-oc-deploy-"
+FOREIGN_PREFIX = "oc-snap-oc-build-"
 
 
 def _load_hygiene():

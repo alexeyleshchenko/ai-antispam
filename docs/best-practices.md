@@ -159,7 +159,7 @@ Where a check can be a command, it is a command with a documented return code.
 Human judgment is reserved for the part a command cannot decide.
 
 - *Proven:* opencrabs-dev — ~30 `oc-*` tools with an rc contract
-  (`oc-ledger`, `oc-prchecks`, `oc-order-validate`, `oc-deploy`, `oc-attrib`).
+  (`oc-ledger`, `oc-prchecks`, `oc-order-validate`, `oc-build`, `oc-attrib`).
 - *Prevents:* a ritual being performed "approximately" — and the same ritual
   being performed differently by each lane.
 
